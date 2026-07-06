@@ -335,3 +335,61 @@ class JointPositionActionTerm(ActionTermBase):
                     self.action_scales[i] = control_cfg.action_scale * effort / stiffness
         else:
             self.action_scales[:] = control_cfg.action_scale
+
+
+class SelectiveJointPositionActionTerm(JointPositionActionTerm):
+    """Joint-position action term that exposes actions for a selected DOF subset.
+
+    Uncontrolled DOFs still receive PD torques toward ``env.default_dof_pos`` so
+    they hold the robot's nominal posture while the policy controls only the
+    selected joints.
+    """
+
+    def __init__(self, cfg: ActionTermCfg, env: Any):
+        controlled_joint_names = cfg.params.get("controlled_joint_names")
+        if not controlled_joint_names:
+            raise ValueError("SelectiveJointPositionActionTerm requires params['controlled_joint_names']")
+
+        self.controlled_joint_names = list(controlled_joint_names)
+        missing = [name for name in self.controlled_joint_names if name not in env.dof_names]
+        if missing:
+            raise ValueError(f"Controlled joint names not found in robot DOFs: {missing}")
+
+        self.controlled_dof_indices = torch.tensor(
+            [env.dof_names.index(name) for name in self.controlled_joint_names],
+            dtype=torch.long,
+            device=env.device,
+        )
+
+        super().__init__(cfg, env)
+        self._action_dim = len(self.controlled_joint_names)
+        self._raw_actions = torch.zeros(env.num_envs, self._action_dim, device=env.device)
+        self._processed_actions = torch.zeros(env.num_envs, self._action_dim, device=env.device)
+        self._actions_after_delay = torch.zeros(env.num_envs, self._action_dim, device=env.device)
+
+    def setup(self) -> None:
+        ActionTermBase.setup(self)
+
+        if getattr(self.env, "_randomize_ctrl_delay", False):
+            max_delay = self.env._ctrl_delay_step_range[1]
+            self.action_queue = torch.zeros(self.env.num_envs, max_delay + 1, self._action_dim, device=self.env.device)
+
+        decimation = self.env.simulator.simulator_config.sim.control_decimation
+        self.torques_substep = torch.zeros(self.env.num_envs, decimation, self.env.num_dof, device=self.env.device)
+        self.dof_pos_substep = torch.zeros(self.env.num_envs, decimation, self.env.num_dof, device=self.env.device)
+        self.dof_vel_substep = torch.zeros(self.env.num_envs, decimation, self.env.num_dof, device=self.env.device)
+
+        self._attach_actuator_randomizer_scales()
+
+        enabled, rfi_lim = self.env._pending_torque_rfi
+        self.configure_torque_rfi(enabled=enabled, rfi_lim=rfi_lim)
+        self.env._pending_torque_rfi = (False, 0.0)
+
+    @property
+    def action_dim(self) -> int:
+        return self._action_dim
+
+    def _compute_torques(self, actions: torch.Tensor) -> torch.Tensor:
+        actions_full = torch.zeros(self.env.num_envs, self.env.num_dof, device=self.env.device)
+        actions_full[:, self.controlled_dof_indices] = actions
+        return super()._compute_torques(actions_full)
