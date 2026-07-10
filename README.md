@@ -83,6 +83,22 @@ bash demo_scripts/demo_omomo_wb_tracking.sh
 bash demo_scripts/demo_lafan_wb_tracking.sh
 ```
 
+### Diffusion Motion Generator (experimental)
+
+Conditional diffusion model that generates 0.5 s of future G1 whole-body motion
+from 2 past frames + a target heading (first-stage reproduction of
+[arXiv:2604.17335](https://arxiv.org/abs/2604.17335), single RTX 4090).
+
+```bash
+# Prepare ~11 training motions (downloaded locally; data/ is not committed to git)
+bash demo_scripts/prepare_motion_gen_data.sh
+# Train / evaluate
+~/.holosoma_deps/miniconda3/envs/hssim/bin/python -m holosoma.motion_gen.scripts.train baseline_4090
+```
+
+Full Korean manual: [docs/motion_generator_ko.html](docs/motion_generator_ko.html) ·
+implementation notes: [docs/motion_generator_implementation_notes.md](docs/motion_generator_implementation_notes.md)
+
 ### Deployment & Evaluation
 
 After training, deploy your policies:

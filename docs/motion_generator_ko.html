@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HoloSoma Diffusion Motion Generator — 사용자 매뉴얼</title>
+<style>
+:root {
+  --bg: #fbfbfd;
+  --card: #ffffff;
+  --text: #1d1d1f;
+  --muted: #6e6e73;
+  --accent: #0071e3;
+  --accent-soft: #eaf3fe;
+  --border: #e5e5ea;
+  --code-bg: #f5f5f7;
+  --warn-bg: #fff8e6;
+  --warn-border: #f0d47a;
+  --ok-bg: #e9f7ef;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+    "Helvetica Neue", Arial, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.7;
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+}
+.container { max-width: 800px; margin: 0 auto; padding: 0 24px 120px; }
+header.hero { padding: 96px 0 48px; text-align: center; }
+header.hero h1 { font-size: 44px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; }
+header.hero p.sub { margin-top: 16px; font-size: 20px; color: var(--muted); font-weight: 400; }
+header.hero .badge {
+  display: inline-block; margin-top: 20px; padding: 6px 14px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 600;
+}
+nav.toc {
+  position: sticky; top: 0; z-index: 10; background: rgba(251,251,253,0.92);
+  backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
+  padding: 10px 0; margin-bottom: 48px;
+}
+nav.toc .toc-inner { max-width: 800px; margin: 0 auto; padding: 0 24px;
+  display: flex; gap: 6px; overflow-x: auto; white-space: nowrap; }
+nav.toc a {
+  color: var(--muted); text-decoration: none; font-size: 13px; font-weight: 500;
+  padding: 5px 10px; border-radius: 8px; flex: none;
+}
+nav.toc a:hover { color: var(--accent); background: var(--accent-soft); }
+section { margin-bottom: 72px; }
+h2 {
+  font-size: 30px; font-weight: 700; letter-spacing: -0.02em;
+  margin-bottom: 8px; padding-top: 24px;
+}
+h2 .num { color: var(--accent); margin-right: 8px; }
+h3 { font-size: 20px; font-weight: 600; margin: 32px 0 12px; }
+h4 { font-size: 16px; font-weight: 600; margin: 20px 0 8px; }
+p { margin: 12px 0; }
+p.lead { color: var(--muted); font-size: 17px; margin-bottom: 24px; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+ul, ol { margin: 12px 0 12px 24px; }
+li { margin: 6px 0; }
+code {
+  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.88em; background: var(--code-bg); border-radius: 6px; padding: 2px 6px;
+}
+pre {
+  background: #1d1d1f; color: #f5f5f7; border-radius: 14px;
+  padding: 18px 20px; overflow-x: auto; margin: 16px 0;
+  font-size: 13.5px; line-height: 1.6;
+}
+pre code { background: none; color: inherit; padding: 0; font-size: inherit; }
+.card {
+  background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+  padding: 20px 24px; margin: 16px 0;
+}
+.callout { border-radius: 14px; padding: 14px 18px; margin: 16px 0; font-size: 15px; }
+.callout.warn { background: var(--warn-bg); border: 1px solid var(--warn-border); }
+.callout.ok { background: var(--ok-bg); border: 1px solid #b7e0c5; }
+.callout.info { background: var(--accent-soft); border: 1px solid #bcd9f7; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 14px; margin: 16px 0; }
+table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 14px; background: var(--card); }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { background: var(--code-bg); font-weight: 600; white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+.tag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.tag.measured { background: var(--ok-bg); color: #1b7a3d; }
+.tag.estimated { background: var(--warn-bg); color: #9a7b12; }
+.tag.nv { background: #f2f2f7; color: var(--muted); }
+.pipeline { display: flex; flex-direction: column; gap: 0; margin: 20px 0; }
+.pipe-step {
+  background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+  padding: 14px 18px;
+}
+.pipe-step b { color: var(--accent); }
+.pipe-step .desc { color: var(--muted); font-size: 14px; }
+.pipe-arrow { text-align: center; color: var(--muted); font-size: 18px; padding: 2px 0; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 640px) {
+  header.hero h1 { font-size: 32px; }
+  .grid2 { grid-template-columns: 1fr; }
+  body { font-size: 15px; }
+}
+footer { color: var(--muted); font-size: 13px; text-align: center; padding-top: 48px; border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="container" style="padding-bottom:0">
+    <h1>Diffusion Motion Generator</h1>
+    <p class="sub">HoloSoma 안에서 Unitree G1의 미래 전신 모션을 생성하는<br>조건부 diffusion 모델 — 1차 재현 파이프라인 매뉴얼</p>
+    <span class="badge">arXiv:2604.17335 · 1단계 재현 · RTX 4090 단일 GPU</span>
+  </div>
+</header>
+
+<nav class="toc">
+  <div class="toc-inner">
+    <a href="#s0">0 코드맵</a><a href="#s1">1 목표</a><a href="#s2">2 논문 구조</a><a href="#s3">3 차이점</a><a href="#s4">4 설치</a><a href="#s5">5 데이터</a><a href="#s6">6 Schema</a><a href="#s7">7 모델</a><a href="#s8">8 학습</a><a href="#s9">9 VRAM/시간</a><a href="#s10">10 결과 확인</a><a href="#s11">11 문제 해결</a><a href="#s12">12 다음 단계</a><a href="#s13">13 체크리스트</a><a href="#s14">14 참고문헌</a>
+  </div>
+</nav>
+
+<div class="container">
+
+<!-- ============================================================ -->
+<section id="s0">
+  <h2><span class="num">0.</span>기능별 코드 위치</h2>
+  <p class="lead">모든 신규 코드는 <code>src/holosoma/holosoma/motion_gen/</code> 아래에 있습니다.</p>
+  <div class="table-wrap"><table>
+    <tr><th>기능</th><th>파일</th><th>내용</th></tr>
+    <tr><td>Motion representation</td><td><code>motion_gen/features.py</code></td><td>78차원 per-frame feature, canonicalization(heading 정규화), quaternion 유틸(wxyz), target heading 계산</td></tr>
+    <tr><td>Normalization</td><td><code>motion_gen/normalization.py</code></td><td>train split 전용 z-score 통계, <code>normalization_stats.npz</code> 저장/로드</td></tr>
+    <tr><td>Dataset</td><td><code>motion_gen/dataset.py</code></td><td>WBT <code>.npz</code> 로더, sliding window 샘플링(경계 침범 없음), foot-contact proxy, split 로드</td></tr>
+    <tr><td>Diffusion 모델</td><td><code>motion_gen/model.py</code></td><td>MDM-style Transformer encoder, timestep/heading/terrain 임베딩, condition masking(null embedding)</td></tr>
+    <tr><td>Diffusion 스케줄러</td><td><code>motion_gen/diffusion.py</code></td><td>DDPM(cosine/linear), x0/epsilon 파라미터화, DDPM 및 DDIM(감소 스텝) 샘플링</td></tr>
+    <tr><td>Loss</td><td><code>motion_gen/losses.py</code></td><td>recon(root pos/quat/joint/body) + velocity + bone-length + foot-slide + terrain penetration, 전부 config weight</td></tr>
+    <tr><td>학습 루프</td><td><code>motion_gen/training.py</code></td><td>AMP, grad accum, EMA, checkpoint save/resume, TensorBoard, validation/샘플 export</td></tr>
+    <tr><td>Config/preset</td><td><code>motion_gen/configs.py</code></td><td><code>smoke</code> / <code>debug</code> / <code>baseline_4090</code></td></tr>
+    <tr><td>추론 API</td><td><code>motion_gen/sampling.py</code></td><td><code>MotionGenerator</code>, <code>MotionGeneratorInput/Output</code>, receding-horizon, CFG</td></tr>
+    <tr><td>평가</td><td><code>motion_gen/evaluation.py</code></td><td>root/joint/body 오차, quat norm, joint-limit 위반율, foot slide 등</td></tr>
+    <tr><td>Export</td><td><code>motion_gen/export.py</code></td><td>생성 결과 <code>*_gen_raw.npz</code>, <code>*_gen_qpos.npz</code> 저장</td></tr>
+    <tr><td>시각화</td><td><code>motion_gen/visualization.py</code></td><td>GT vs 생성 joint/root/foot 비교 plot, rollout plot</td></tr>
+    <tr><td>데이터 manifest</td><td><code>motion_gen/data_manifest.py</code></td><td>사용하는 11개 클립 목록·라이선스·frame range·split</td></tr>
+    <tr><td>Scripts</td><td><code>motion_gen/scripts/*.py</code></td><td>inspect_motion_npz / download_data / prepare_motions / make_splits / train / evaluate / sample</td></tr>
+    <tr><td>FK 변환기(headless)</td><td><code>src/holosoma_retargeting/.../data_conversion/convert_data_format_mj_headless.py</code></td><td>qpos npz → MuJoCo FK → 50fps WBT npz, joint limit 추출</td></tr>
+    <tr><td>데이터 준비 일괄 실행</td><td><code>demo_scripts/prepare_motion_gen_data.sh</code></td><td>다운로드→정규화→FK 변환→split 한 번에</td></tr>
+    <tr><td>테스트</td><td><code>motion_gen/tests/</code></td><td>CPU 전용 36개 (schema/윈도우/정규화/모델/diffusion/loss/checkpoint/smoke 학습/export)</td></tr>
+  </table></div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s1">
+  <h2><span class="num">1.</span>프로젝트 목표</h2>
+  <h3>논문 전체 시스템</h3>
+  <p>주 논문은 (1) 인간 모션을 수집·retargeting해 데이터셋을 만들고,
+  (2) terrain과 heading을 조건으로 미래 0.5초의 전신 모션을 생성하는 <b>diffusion motion generator</b>를 학습하고,
+  (3) 생성된 reference를 추종하는 <b>RL motion tracker</b>를 학습한 뒤,
+  (4) 두 모듈을 폐루프로 <b>fine-tuning</b>하고,
+  (5) 실제 로봇에서 0.25초마다 재계획하는 <b>receding-horizon</b> 방식으로 배포합니다.</p>
+  <h3>이번 1차 구현 범위</h3>
+  <ul>
+    <li>G1 retargeted <code>.npz</code> 데이터 파이프라인 (11개 클립, 총 약 6.8분, 50 Hz)</li>
+    <li>Feature 추출·정규화, 조건부 diffusion generator 학습/샘플링</li>
+    <li>단일 RTX 4090 학습 config, checkpoint 저장/재개, 정량 평가·시각화·<code>.npz</code> export</li>
+    <li>RL tracker 연결을 위한 추론 API(<code>MotionGenerator</code>) 및 receding-horizon 생성</li>
+  </ul>
+  <h3>아직 구현하지 않는 범위</h3>
+  <ul>
+    <li>RL motion tracker 학습, 폐루프 generator-tracker fine-tuning</li>
+    <li>실제 terrain height scan 조건 학습 (인터페이스만 존재, Phase B — <b>experimental</b>)</li>
+    <li>ONNX/TensorRT export, MuJoCo sim-to-sim, sim-to-real</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section id="s2">
+  <h2><span class="num">2.</span>논문 핵심 구조</h2>
+  <div class="pipeline">
+    <div class="pipe-step"><b>① 데이터 수집·Retargeting</b><div class="desc">자체 영상(GVHMR) + AMASS + OmniRetarget 데이터를 contact-constrained IK로 G1에 retarget, 물리 추종 replay로 필터링, terrain 변형으로 약 1시간 분량 증강 (논문 명시)</div></div>
+    <div class="pipe-arrow">↓</div>
+    <div class="pipe-step"><b>② Diffusion Motion Generator</b><div class="desc">과거 2 frame + target heading + terrain height scan을 조건으로, 0.5초(25 frame)의 root pose·joint·body-link 위치를 생성 (MDM 계열, 논문 명시)</div></div>
+    <div class="pipe-arrow">↓</div>
+    <div class="pipe-step"><b>③ RL Motion Tracker</b><div class="desc">생성된 reference를 추종하는 PPO 정책 (Isaac Lab). 이번 단계 미구현</div></div>
+    <div class="pipe-arrow">↓</div>
+    <div class="pipe-step"><b>④ Closed-loop Fine-tuning</b><div class="desc">generator를 고정(frozen)하고 로봇의 실측 상태를 과거 frame 조건으로 사용하여 tracker를 폐루프 fine-tuning. 이번 단계 미구현</div></div>
+    <div class="pipe-arrow">↓</div>
+    <div class="pipe-step"><b>⑤ Receding-horizon 배포</b><div class="desc">0.25초마다 재계획, 배포 시 denoising 2 step, Jetson Thor에서 TensorRT 추론 약 0.02 s (논문 명시). 이번 구현은 API 수준 receding-horizon만 제공</div></div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s3">
+  <h2><span class="num">3.</span>이번 구현과 논문의 차이</h2>
+  <p class="lead">논문이 공개하지 않은 항목(hidden dim, layer 수, schedule, optimizer, batch, LR, EMA, loss weight, normalization, scan 해상도 등)은 전부 구현 선택이며 아래 표의 근거 열에 표시했습니다.</p>
+  <div class="table-wrap"><table>
+    <tr><th>항목</th><th>논문 원본</th><th>현재 4090 baseline</th><th>향후 확장</th><th>근거</th></tr>
+    <tr><td>Joint 수</td><td>23 (G1 23-DoF)</td><td><b>29</b> (HoloSoma G1 29-DoF)</td><td>동일 유지</td><td>현재 robot model 기준(손목 3-DoF 포함)</td></tr>
+    <tr><td>Body-link 위치</td><td>23개</td><td><b>14개</b> (WBT tracker 추적 body)</td><td>확대 가능</td><td>기존 tracker 설정 재사용</td></tr>
+    <tr><td>Frame feature</td><td>99차원</td><td>78차원 (3+4+29+42)</td><td>—</td><td>위 결과</td></tr>
+    <tr><td>Horizon / 과거 조건</td><td>25 frame(0.5 s) / 2 frame</td><td>동일 (논문 명시값)</td><td>—</td><td>논문</td></tr>
+    <tr><td>Terrain 조건</td><td>height scan 학습</td><td>zero scan 인터페이스만 (Phase A)</td><td>실제 scan + penetration 검증 (Phase B)</td><td>terrain scan 데이터 부재 — <b>experimental</b></td></tr>
+    <tr><td>Architecture</td><td>MDM 계열(상세 비공개)</td><td>Transformer 8층·4 head·d512·ff1024</td><td>스케일 업</td><td>공식 MDM 기본값 차용</td></tr>
+    <tr><td>Diffusion</td><td>비공개</td><td>DDPM T=1000 cosine, x0-prediction</td><td>distillation 등</td><td>MDM 관례 차용</td></tr>
+    <tr><td>배포 denoising</td><td>2 step</td><td>검증 경로는 DDIM 50 step, 2 step은 옵션(experimental)</td><td>2-step 품질 검증</td><td>정상 학습 검증 우선</td></tr>
+    <tr><td>데이터</td><td>~1시간(증강 포함)</td><td>11 클립 ≈ 6.8분</td><td>클립 수·terrain 증강 확대</td><td>1차 재현 범위(≈10 클립)</td></tr>
+    <tr><td>Tracker/폐루프/실기</td><td>포함</td><td>미구현</td><td>2단계 이후</td><td>범위 제한</td></tr>
+  </table></div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s4">
+  <h2><span class="num">4.</span>환경 설치</h2>
+  <div class="card">
+    <ul>
+      <li><b>OS</b>: Ubuntu Linux (본 저장소 기준; 검증 환경 kernel 6.17)</li>
+      <li><b>GPU</b>: NVIDIA RTX 4090 24 GB (driver + CUDA 12.8 런타임)</li>
+      <li><b>Python</b>: 3.11 (<code>hssim</code> env), 3.11 (<code>hsretargeting</code> env)</li>
+      <li><b>PyTorch</b>: 2.7.0+cu128 (<code>hssim</code>) — generator 학습용</li>
+      <li><b>MuJoCo</b>: 3.9 (<code>hsretargeting</code>) — FK 데이터 변환용</li>
+      <li><b>Isaac Lab</b>: <code>~/.holosoma_deps/IsaacLab</code> — <b>이번 generator 단계에는 불필요</b> (tracker 단계에서 사용)</li>
+    </ul>
+  </div>
+  <p>HoloSoma 표준 설치 스크립트가 conda env들을 <code>~/.holosoma_deps/miniconda3/envs/</code>에 만듭니다.</p>
+<pre><code># 저장소 루트에서 (최초 1회, 시간 소요)
+bash scripts/setup_all.sh          # 또는 setup_isaacsim.sh + setup_retargeting.sh
+
+# 환경 검증
+~/.holosoma_deps/miniconda3/envs/hssim/bin/python -c \
+  "import torch, holosoma; print(torch.__version__, torch.cuda.is_available())"
+~/.holosoma_deps/miniconda3/envs/hsretargeting/bin/python -c \
+  "import mujoco; print(mujoco.__version__)"</code></pre>
+  <div class="callout info">아래 모든 명령은 <b>저장소 루트</b>에서 실행하며, <code>PY=~/.holosoma_deps/miniconda3/envs/hssim/bin/python</code>을 가정합니다.</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s5">
+  <h2><span class="num">5.</span>데이터 준비</h2>
+  <h3>선택된 11개 모션과 라이선스</h3>
+  <div class="table-wrap"><table>
+    <tr><th>클립 (stem)</th><th>내용</th><th>출처</th><th>라이선스</th><th>split</th></tr>
+    <tr><td>lafan1_walk1_subject1</td><td>직진 보행</td><td rowspan="6"><a href="https://huggingface.co/datasets/lvhaidong/LAFAN1_Retargeting_Dataset">LAFAN1 G1 retarget</a></td><td rowspan="6">CC BY-NC-ND 4.0</td><td>train</td></tr>
+    <tr><td>lafan1_walk3_subject2</td><td>회전이 포함된 보행</td><td>train</td></tr>
+    <tr><td>lafan1_dance1_subject2</td><td>전방향 스텝 + 크라우치성 자세</td><td>train</td></tr>
+    <tr><td>lafan1_run2_subject1</td><td>조깅/러닝</td><td>train</td></tr>
+    <tr><td>lafan1_sprint1_subject2</td><td>스프린트(동적)</td><td>train</td></tr>
+    <tr><td>lafan1_walk4_subject1</td><td>사이드/후진 스텝 보행</td><td><b>val</b></td></tr>
+    <tr><td>omni_climb_02 / omni_climb_14</td><td>계단·플랫폼형 climb</td><td rowspan="3"><a href="https://huggingface.co/datasets/omniretarget/OmniRetarget_Dataset">OmniRetarget</a></td><td rowspan="3">MIT</td><td>train</td></tr>
+    <tr><td>omni_climb_09</td><td>climb</td><td><b>val</b></td></tr>
+    <tr><td>omni_chair_scene_06</td><td>의자(장애물) 상호작용</td><td>train</td></tr>
+    <tr><td>omomo_largebox_003</td><td>대형 박스 조작(전신 팔 협응)</td><td>HoloSoma 내장 demo (OMOMO)</td><td>CC BY-NC 4.0</td><td>train</td></tr>
+  </table></div>
+  <ul>
+    <li>총 길이 ≈ <b>6.8분</b> @50 Hz. LAFAN1 클립은 3~10분 범위를 지키기 위해 클립당 ≤60초로 트리밍(<code>data_manifest.py</code>의 frame_range).</li>
+    <li>Split은 <b>motion 단위</b>로 분리(leakage 방지): train 9개 / val 2개.</li>
+    <li>LAFAN1은 비상업·재배포 금지 조건입니다. 데이터는 git에 커밋되지 않습니다(<code>/data/</code>는 gitignore).</li>
+  </ul>
+  <h3>한 번에 준비하기</h3>
+<pre><code>bash demo_scripts/prepare_motion_gen_data.sh</code></pre>
+  <p>내부적으로 다음 4단계를 수행합니다. 개별 실행도 가능합니다.</p>
+<pre><code>PY=~/.holosoma_deps/miniconda3/envs/hssim/bin/python
+PYRT=~/.holosoma_deps/miniconda3/envs/hsretargeting/bin/python
+
+# 1) 선택된 파일만 다운로드 (있으면 skip, zip sha256 검증)
+$PY -m holosoma.motion_gen.scripts.download_data
+
+# 2) 원본 형식 → HoloSoma qpos npz 정규화 (+클립 메타데이터)
+$PY -m holosoma.motion_gen.scripts.prepare_motions
+
+# 3) MuJoCo FK로 50fps WBT 형식 변환 + joint limit 추출 (hsretargeting env)
+cd src/holosoma_retargeting/holosoma_retargeting
+$PYRT data_conversion/convert_data_format_mj_headless.py \
+    --input-dir ../../../data/motion_gen/raw_qpos \
+    --output-dir ../../../data/motion_gen/processed \
+    --joint-limits-out ../../../data/motion_gen/metadata/joint_limits.json
+cd ../../..
+
+# 4) train/val split 생성
+$PY -m holosoma.motion_gen.scripts.make_splits</code></pre>
+  <h3>.npz 검사</h3>
+<pre><code>$PY -m holosoma.motion_gen.scripts.inspect_motion_npz \
+    --path data/motion_gen/processed/lafan1_walk1_subject1.npz --stats</code></pre>
+  <h3>좌표계와 joint ordering</h3>
+  <ul>
+    <li>World up 축: <b>+Z</b>, 단위: 미터/라디안, quaternion: <b>wxyz</b> (MuJoCo 관례)</li>
+    <li>Joint 순서: MuJoCo G1 모델 순서 — 왼다리 6 → 오른다리 6 → 허리 3 → 왼팔 7 → 오른팔 7 (총 29)</li>
+    <li>원본별 주의: LAFAN1 CSV의 quaternion은 <b>xyzw</b>(변환 시 wxyz로 재배열), OmniRetarget qpos는 <b>[quat, pos, joints]</b> 순서(변환 시 [pos, quat, joints]로 재배열) — 모두 <code>prepare_motions.py</code>가 처리</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section id="s6">
+  <h2><span class="num">6.</span>데이터 schema</h2>
+  <h3>처리된 모션 파일 (HoloSoma WBT 형식, <code>data/motion_gen/processed/*.npz</code>)</h3>
+  <div class="table-wrap"><table>
+    <tr><th>key</th><th>shape</th><th>dtype</th><th>의미</th><th>단위 / 좌표계</th></tr>
+    <tr><td>fps</td><td>(1,)</td><td>int64</td><td>프레임레이트(50)</td><td>Hz</td></tr>
+    <tr><td>joint_pos</td><td>(T, 36)</td><td>float64</td><td>[root pos(3), root quat wxyz(4), joint 29]</td><td>m / rad, world</td></tr>
+    <tr><td>joint_vel</td><td>(T, 35)</td><td>float64</td><td>[root lin vel(3), root ang vel(3), joint vel 29]</td><td>m/s / rad/s, world</td></tr>
+    <tr><td>body_pos_w</td><td>(T, 51, 3)</td><td>float64</td><td>body 위치 (index 0 = world)</td><td>m, world</td></tr>
+    <tr><td>body_quat_w</td><td>(T, 51, 4)</td><td>float64</td><td>body 자세 (wxyz)</td><td>world</td></tr>
+    <tr><td>body_lin_vel_w / body_ang_vel_w</td><td>(T, 51, 3)</td><td>float64</td><td>body 선/각속도</td><td>m/s, rad/s, world</td></tr>
+    <tr><td>joint_names / body_names</td><td>(29,) / (51,)</td><td>str</td><td>이름(순서 정의)</td><td>—</td></tr>
+  </table></div>
+  <h3>Generator 학습 윈도우 (canonical frame)</h3>
+  <p>윈도우 = 과거 2 + 미래 25 frame. anchor(마지막 과거 frame) 기준으로 root xy → 원점, yaw → 0으로 정규화하고 z는 절대값을 유지합니다. per-frame feature 78차원:</p>
+  <div class="table-wrap"><table>
+    <tr><th>구간</th><th>차원</th><th>내용</th></tr>
+    <tr><td>[0:3]</td><td>3</td><td>root position (canonical)</td></tr>
+    <tr><td>[3:7]</td><td>4</td><td>root quaternion wxyz (canonical, 부호 연속화)</td></tr>
+    <tr><td>[7:36]</td><td>29</td><td>joint positions (rad)</td></tr>
+    <tr><td>[36:78]</td><td>42</td><td>14개 tracked body 위치 ×3 (canonical)</td></tr>
+  </table></div>
+  <p>조건: 과거 2 frame(동일 78차원) + target heading 2차원 단위벡터(anchor→마지막 미래 frame 변위 방향, 5cm 미만이면 (1,0)) + terrain scan 121차원(현재 zero — Phase A).</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="s7">
+  <h2><span class="num">7.</span>모델 구조</h2>
+  <div class="pipeline">
+    <div class="pipe-step"><b>입력</b> — noised future window x<sub>t</sub> (25×78, 정규화 공간) <span class="desc">+ diffusion timestep t</span></div>
+    <div class="pipe-arrow">↓</div>
+    <div class="pipe-step"><b>조건 임베딩</b><div class="desc">cond token = timestep 임베딩(sinusoidal→MLP) + heading MLP + terrain MLP · 과거 2 frame은 별도 token 2개로 투영 · 각 조건은 학습된 null embedding으로 마스킹 가능(cond_dropout 0.1 → classifier-free guidance 지원)</div></div>
+    <div class="pipe-arrow">↓</div>
+    <div class="pipe-step"><b>Transformer Encoder</b><div class="desc">토큰열 [cond, past×2, future×25] + sinusoidal positional encoding → 8층 · 4 head · d_model 512 · ff 1024 · GELU · dropout 0.1 (MDM 기본값 차용)</div></div>
+    <div class="pipe-arrow">↓</div>
+    <div class="pipe-step"><b>출력</b> — future 25 token → linear → x̂₀ (25×78) <span class="desc">기본 x0-prediction (epsilon-prediction도 config로 선택)</span></div>
+  </div>
+  <h3>Diffusion 과정</h3>
+  <ul>
+    <li><b>학습</b>: t ~ U[0,1000), cosine β-schedule로 q_sample → 모델이 x̂₀ 예측 → 물리 단위로 denormalize 후 loss</li>
+    <li><b>샘플링</b>: full-step DDPM(검증 경로) 또는 DDIM n-step (validation 기본 50 step, 논문의 2 step은 experimental 옵션)</li>
+  </ul>
+  <h3>Loss (전부 <code>--loss.*</code> weight로 조절)</h3>
+  <div class="table-wrap"><table>
+    <tr><th>Loss</th><th>정의</th><th>기본 weight</th><th>출처</th></tr>
+    <tr><td>root_pos / joint_pos / body_pos</td><td>MSE (m², rad²), canonical frame</td><td>1.0</td><td>논문의 reconstruction loss를 성분 분해(가중치는 구현 선택)</td></tr>
+    <tr><td>root_quat</td><td>1 − ⟨q̂/‖q̂‖, q⟩² (부호 불변)</td><td>1.0</td><td>구현 선택 (quaternion sign ambiguity 처리)</td></tr>
+    <tr><td>quat_norm</td><td>(‖q̂‖−1)²</td><td>0.1</td><td>구현 선택</td></tr>
+    <tr><td>velocity</td><td>시간 차분 MSE(전체 feature)</td><td>1.0</td><td>논문 명시 항목(형태는 MDM식 구현 선택)</td></tr>
+    <tr><td>bone_length</td><td>인접 body 간 거리 vs GT (FK-consistency 대체)</td><td>0.5</td><td>구현 선택 — 미분가능 FK 부재</td></tr>
+    <tr><td>foot_slide</td><td>GT contact proxy 구간의 발 xy 변위²</td><td>0.3</td><td>구현 선택 (contact label 없음 → 높이+속도 proxy)</td></tr>
+    <tr><td>terrain_penetration</td><td>relu(−z)², 평지 클립에만 적용</td><td>0.5</td><td>논문 명시 항목의 평지 버전(experimental)</td></tr>
+  </table></div>
+  <p>contact-consistency loss는 contact label이 없어 <b>비활성</b>(문서화된 제외).</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="s8">
+  <h2><span class="num">8.</span>학습 방법</h2>
+  <h3>Smoke (파이프라인 확인, 약 10초)</h3>
+<pre><code>$PY -m holosoma.motion_gen.scripts.train smoke</code></pre>
+  <h3>Debug (1개 클립 overfit, 3000 step)</h3>
+<pre><code>$PY -m holosoma.motion_gen.scripts.train debug</code></pre>
+  <h3>4090 baseline (11 클립, 200k step)</h3>
+<pre><code>$PY -m holosoma.motion_gen.scripts.train baseline_4090
+# 하이퍼파라미터 오버라이드 예시
+$PY -m holosoma.motion_gen.scripts.train baseline_4090 --batch-size 128 --max-steps 100000</code></pre>
+  <h3>Resume (checkpoint 재개)</h3>
+<pre><code>$PY -m holosoma.motion_gen.scripts.train baseline_4090 \
+    --resume logs/motion_gen/baseline_4090/checkpoints/latest.pt</code></pre>
+  <h3>Validation (별도 평가)</h3>
+<pre><code>$PY -m holosoma.motion_gen.scripts.evaluate \
+    --ckpt logs/motion_gen/baseline_4090/checkpoints/latest.pt --split val
+# train split 평가(비교용)
+$PY -m holosoma.motion_gen.scripts.evaluate \
+    --ckpt logs/motion_gen/baseline_4090/checkpoints/latest.pt --split train
+# 논문의 2-step 배포 설정 (experimental)
+$PY -m holosoma.motion_gen.scripts.evaluate \
+    --ckpt logs/motion_gen/baseline_4090/checkpoints/latest.pt --split val --num-steps 2</code></pre>
+  <h3>Sampling / 생성 export</h3>
+<pre><code># GT 윈도우와 비교 (plot + npz)
+$PY -m holosoma.motion_gen.scripts.sample \
+    --ckpt logs/motion_gen/baseline_4090/checkpoints/latest.pt \
+    --clip lafan1_walk4_subject1 --mode window --start 200
+
+# receding-horizon 장기 생성 (0.24 s = 12 frame마다 재계획)
+$PY -m holosoma.motion_gen.scripts.sample \
+    --ckpt logs/motion_gen/baseline_4090/checkpoints/latest.pt \
+    --clip lafan1_walk4_subject1 --mode rollout --num-cycles 16 --replan-stride 12
+
+# 생성 qpos npz → 전체 WBT 형식(51 body, tracker 재생용) 변환
+cd src/holosoma_retargeting/holosoma_retargeting
+$PYRT data_conversion/convert_data_format_mj_headless.py \
+    --input-file &lt;..._gen_qpos.npz&gt; --output-name &lt;..._gen_mj.npz&gt; --output-fps 50</code></pre>
+  <h3>테스트</h3>
+<pre><code>$PY -m pytest src/holosoma/holosoma/motion_gen/tests/ -q   # GPU 불필요</code></pre>
+  <h3>OOM 시 줄이는 순서</h3>
+  <ol>
+    <li><code>--batch-size</code> 256→128→64 (필요 시 <code>--grad-accum 2</code>로 유효 batch 유지)</li>
+    <li><code>--model.d-ff 1024→512</code>, <code>--model.d-model 512→384</code></li>
+    <li><code>--model.n-layers 8→6</code></li>
+    <li><code>--num-workers</code> 축소 (CPU/RAM 압박 시)</li>
+  </ol>
+</section>
+
+<!-- ============================================================ -->
+<section id="s9">
+  <h2><span class="num">9.</span>예상 VRAM 및 시간 (RTX 4090 기준)</h2>
+  <div class="table-wrap"><table>
+    <tr><th>Config</th><th>모델</th><th>VRAM</th><th>속도</th><th>총 시간</th><th>상태</th></tr>
+    <tr><td>smoke (30 step)</td><td>0.11 M</td><td>&lt; 1 GB</td><td>—</td><td>약 5초</td><td><span class="tag measured">measured</span></td></tr>
+    <tr><td>debug (3000 step)</td><td>3 M급</td><td>0.06 GB (torch alloc)</td><td>≈ 90 step/s</td><td>약 34초</td><td><span class="tag measured">measured</span></td></tr>
+    <tr><td>baseline_4090 (기본 50k step)</td><td>18.06 M</td><td>1.3 GB (torch alloc) / ≈ 2.9 GB (프로세스 전체, nvidia-smi)</td><td>≈ 52 step/s</td><td>≈ 17–20분</td><td><span class="tag estimated">estimated</span> (실측 속도에서 외삽)</td></tr>
+    <tr><td>baseline_4090 200k-step 실험 런</td><td>18.06 M</td><td>동일</td><td>≈ 52 step/s</td><td>64분 (17:34→18:39)</td><td><span class="tag measured">measured</span> — 단 10k step 이후 과적합(§10)</td></tr>
+    <tr><td>DDIM 50-step 샘플링 (batch 256)</td><td>—</td><td>학습 VRAM에 포함</td><td>수 초/batch</td><td>—</td><td><span class="tag measured">measured</span></td></tr>
+    <tr><td>2-step 추론 지연시간(실기)</td><td>—</td><td>—</td><td>—</td><td>—</td><td><span class="tag nv">not verified</span> (논문: TensorRT 0.02 s)</td></tr>
+  </table></div>
+  <p>시퀀스가 28 token으로 짧아 VRAM 여유가 매우 큽니다. 24 GB 한도 대비 &lt;15% 사용이므로 batch나 모델을 키울 여지가 있습니다.</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="s10">
+  <h2><span class="num">10.</span>결과 확인</h2>
+  <h3>TensorBoard</h3>
+<pre><code>~/.holosoma_deps/miniconda3/envs/hssim/bin/tensorboard --logdir logs/motion_gen</code></pre>
+  <h3>출력 디렉터리 구조</h3>
+<pre><code>logs/motion_gen/&lt;run_name&gt;/
+  config.yaml                # 해석된 전체 config
+  normalization_stats.npz    # train split feature 통계
+  checkpoints/               # ckpt_*.pt, latest.pt, final.pt
+  metrics.json               # validation 이력 (step별)
+  samples/step_*/            # 생성 *_gen_raw.npz (GT 포함)
+  plots/step_*/              # GT vs 생성 비교 그림
+  logs/                      # TensorBoard events
+  eval_val/                  # evaluate.py 결과 (metrics_eval.json)</code></pre>
+  <h3>Loss / metric 해석</h3>
+  <ul>
+    <li><code>train/total</code>: 꾸준히 감소해야 함. 물리 단위 기준이라 절대값이 작게 시작합니다(초기 예측≈평균 모션).</li>
+    <li><code>val/body_mpjpe_m</code>: 핵심 지표. 14개 body 평균 위치 오차(m). 0.5초 예측 기준 수 cm 수준이면 양호.</li>
+    <li><code>val/root_quat_err_rad</code>: root 방향 오차(rad). <code>val/quat_norm_dev</code>: 0.05 이하 유지 확인.</li>
+    <li><code>val/joint_limit_violation_rate</code>: 0에 가까워야 함.</li>
+    <li><code>val/foot_slide_m_per_s</code>: GT contact 구간의 발 미끄러짐. 감소 추세 확인.</li>
+  </ul>
+  <h3>실측 결과 (11 클립, 2026-07-10)</h3>
+  <div class="table-wrap"><table>
+    <tr><th>Checkpoint</th><th>Split</th><th>body MPJPE</th><th>root pos err</th><th>joint err</th><th>비고</th></tr>
+    <tr><td>debug 3000 step (overfit 모드)</td><td>train(동일 클립)</td><td>0.040 m</td><td>0.031 m</td><td>0.052 rad</td><td>파이프라인 검증용 — 일반화 아님</td></tr>
+    <tr><td>baseline ckpt_00010000</td><td><b>val</b></td><td><b>0.166 m</b></td><td>0.142 m</td><td>0.258 rad</td><td>val 최적 근방(≈4k–10k step)</td></tr>
+    <tr><td>baseline ckpt_00010000</td><td>train</td><td>0.162 m</td><td>0.145 m</td><td>0.174 rad</td><td>train≈val → 아직 과적합 아님</td></tr>
+    <tr><td>baseline 200k step (final)</td><td>train</td><td>0.005 m</td><td>0.003 m</td><td>0.006 rad</td><td>사실상 암기</td></tr>
+    <tr><td>baseline 200k step (final)</td><td><b>val</b></td><td>0.237 m</td><td>0.233 m</td><td>0.225 rad</td><td>과적합으로 악화</td></tr>
+  </table></div>
+  <p>모든 값은 DDIM 50-step, 고정 seed로 측정(<code>evaluate.py</code>). 결론: 총 6.8분 데이터에서는 <b>약 10k step에서 조기 종료</b>가 최선이며, 이 실측을 반영해 baseline 기본 max_steps는 50k로 설정되어 있습니다(1k step마다 validation → val 지표가 가장 좋은 checkpoint를 선택하세요). 데이터가 늘어나면 step 수를 함께 늘리면 됩니다. joint limit 위반율 ≤ 0.5%, quat norm 편차 ≤ 3e-8 (정규화 후).</p>
+  <h3>좋은 결과 vs 실패 결과</h3>
+  <div class="grid2">
+    <div class="card"><h4>좋은 결과</h4><ul>
+      <li>plot에서 생성 궤적(파선)이 GT(실선)를 부드럽게 따라감</li>
+      <li>발 높이 궤적이 지면(≈0.03 m) 아래로 파고들지 않음</li>
+      <li>quat norm ≈ 1 유지, rollout에서 root 경로가 연속적</li>
+    </ul></div>
+    <div class="card"><h4>실패 신호</h4><ul>
+      <li>생성 joint 궤적이 고주파로 떨림 → §11 참조</li>
+      <li>root가 GT에서 급격히 벗어나거나 rollout이 발산</li>
+      <li>val 지표가 train과 크게 벌어짐(overfit) 또는 정체</li>
+    </ul></div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s11">
+  <h2><span class="num">11.</span>문제 해결</h2>
+  <div class="table-wrap"><table>
+    <tr><th>증상</th><th>원인·해결</th></tr>
+    <tr><td>CUDA OOM</td><td>§8의 OOM 순서대로 축소. 다른 프로세스의 GPU 점유 확인(<code>nvidia-smi</code>).</td></tr>
+    <tr><td>Isaac Lab import 실패</td><td>이번 generator 단계는 Isaac Lab을 사용하지 않습니다. tracker 단계에서 발생 시 <code>demo_scripts/demo_*_wb_tracking.sh</code>의 isaacsim env 재설치 절차 참조.</td></tr>
+    <tr><td><code>.npz</code> key mismatch</td><td><code>inspect_motion_npz</code>로 키 확인. WBT 형식(§6) 필수 키가 없으면 <code>convert_data_format_mj_headless.py</code>로 재변환.</td></tr>
+    <tr><td>Joint ordering mismatch</td><td>로더는 npz의 <code>joint_names</code>로 이름 매칭하므로 순서가 달라도 동작. 이름 자체가 다르면(다른 로봇/모델) 오류 발생 — G1 29-DoF 모델인지 확인.</td></tr>
+    <tr><td>Quaternion convention mismatch</td><td>내부는 전부 wxyz. 새 데이터 소스 추가 시 <code>prepare_motions.py</code>에서 재배열(LAFAN1 CSV=xyzw 예시 참고). 검증: quat norm≈1, 재생 시 로봇이 뒤집히지 않음.</td></tr>
+    <tr><td>NaN loss</td><td>5회 연속이면 자동 중단. 데이터 NaN 여부(<code>inspect --stats</code>), LR 축소, AMP off(<code>--no-amp</code>) 순으로 확인. 로더가 원천 NaN은 거부함.</td></tr>
+    <tr><td>Root drift (rollout 발산)</td><td>receding-horizon은 자기 출력에 조건화되어 분포 이탈에 민감. <code>--replan-stride</code> 축소, deterministic 샘플링, 학습 스텝 증가. 근본 해결은 논문의 폐루프 fine-tuning(다음 단계).</td></tr>
+    <tr><td>Validation loss 정체</td><td>데이터 6.8분은 작음 — 과도한 max_steps는 overfit(실측: 200k step에서 val MPJPE 0.166→0.237 m로 악화). val 지표 기준 early stop, 클립 수 확대, dropout/cond_dropout 조정.</td></tr>
+    <tr><td>Checkpoint incompatibility</td><td>checkpoint에 layout(차원·이름)과 format_version이 저장되어 불일치 시 명확히 오류. body/joint 구성을 바꿨다면 재학습 필요.</td></tr>
+    <tr><td>Terrain scan 없음</td><td>정상입니다(Phase A는 zero scan). terrain 성능 주장은 하지 않으며, penetration loss는 평지 클립에만 적용됩니다.</td></tr>
+    <tr><td>생성 결과가 떨림</td><td>denoising step 수 확대(2→50), EMA 사용 확인, <code>--loss.velocity</code> weight 증가, 학습 부족 여부 확인.</td></tr>
+    <tr><td>Overfit은 되지만 validation 실패</td><td>debug(overfit 모드) 성공 ≠ 일반화. 실측 예: 200k step 모델은 train MPJPE 0.005 m(암기) vs val 0.237 m. baseline에서 val 클립 지표로 checkpoint를 고르고, 데이터 확대가 정공법. train/val 지표를 혼동하지 말 것.</td></tr>
+  </table></div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s12">
+  <h2><span class="num">12.</span>다음 단계 (순서대로)</h2>
+  <ol>
+    <li><b>데이터 확대</b>: 10개 → 수백 클립 (OmniRetarget 전체 climb/box, AMASS retarget), terrain 증강</li>
+    <li><b>Terrain-conditioned generator (Phase B)</b>: OmniRetarget terrain mesh에서 height scan 추출, terrain encoder 학습, penetration loss 검증</li>
+    <li><b>HoloSoma RL motion tracker 학습</b>: 기존 <code>exp:g1-29dof-wbt</code> task에 생성 모션(<code>*_gen_mj.npz</code>) 투입</li>
+    <li><b>Frozen generator 폐루프 fine-tuning</b>: 로봇 실측 상태를 과거 frame으로 사용, 노이즈 주입</li>
+    <li><b>Generator/tracker runtime 통합</b>: <code>MotionGenerator</code> API를 tracker 관측 파이프라인에 연결</li>
+    <li><b>ONNX/TensorRT export</b>: 2-step DDIM 그래프 export (표준 연산만 사용, 미검증)</li>
+    <li><b>MuJoCo sim-to-sim</b> 검증</li>
+    <li><b>Sim-to-real</b>: Jetson 배포, 0.25 s receding-horizon 재계획</li>
+    <li><b>실제 G1 검증</b></li>
+  </ol>
+</section>
+
+<!-- ============================================================ -->
+<section id="s13">
+  <h2><span class="num">13.</span>재현 체크리스트</h2>
+  <div class="card">
+<pre><code>> 저장소 루트에서 위에서 아래로 실행
+PY=~/.holosoma_deps/miniconda3/envs/hssim/bin/python
+
+# 1. 환경 확인
+$PY -c "import torch, holosoma; print(torch.cuda.is_available())"
+
+# 2. 테스트 (GPU 불필요, 36개 통과 확인)
+$PY -m pytest src/holosoma/holosoma/motion_gen/tests/ -q
+
+# 3. 데이터 준비 (다운로드 → 변환 → split)
+bash demo_scripts/prepare_motion_gen_data.sh
+
+# 4. 데이터 검사
+$PY -m holosoma.motion_gen.scripts.inspect_motion_npz \
+    --path data/motion_gen/processed/lafan1_walk1_subject1.npz --stats
+
+# 5. smoke → debug → baseline
+$PY -m holosoma.motion_gen.scripts.train smoke
+$PY -m holosoma.motion_gen.scripts.train debug
+$PY -m holosoma.motion_gen.scripts.train baseline_4090
+
+# 6. 평가 + 샘플 생성
+$PY -m holosoma.motion_gen.scripts.evaluate \
+    --ckpt logs/motion_gen/baseline_4090/checkpoints/latest.pt --split val
+$PY -m holosoma.motion_gen.scripts.sample \
+    --ckpt logs/motion_gen/baseline_4090/checkpoints/latest.pt \
+    --clip lafan1_walk4_subject1 --mode rollout --num-cycles 16
+
+# 7. TensorBoard로 결과 확인
+~/.holosoma_deps/miniconda3/envs/hssim/bin/tensorboard --logdir logs/motion_gen</code></pre>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s14">
+  <h2><span class="num">14.</span>참고문헌 및 출처</h2>
+  <ul>
+    <li><b>주 논문</b>: Zhang et al., <a href="https://arxiv.org/abs/2604.17335">Learning Whole-Body Humanoid Locomotion via Motion Generation and Motion Tracking</a> (arXiv:2604.17335) · <a href="https://wholebodylocomotion.github.io/">project page</a> — 공개 코드 없음(2026-07-10 확인)</li>
+    <li><b>OmniRetarget</b>: <a href="https://arxiv.org/abs/2509.26633">논문</a> · <a href="https://github.com/amazon-far/holosoma">코드(HoloSoma, Apache-2.0)</a> · <a href="https://huggingface.co/datasets/omniretarget/OmniRetarget_Dataset">데이터셋(MIT)</a></li>
+    <li><b>BeyondMimic</b>: <a href="https://arxiv.org/abs/2508.08241">논문</a> · <a href="https://github.com/HybridRobotics/whole_body_tracking">코드(MIT)</a> — LAFAN1 CSV 형식·리샘플링 방식 참고</li>
+    <li><b>MDM</b>: Tevet et al., <a href="https://arxiv.org/abs/2209.14916">Human Motion Diffusion Model</a> (ICLR 2023) · <a href="https://github.com/GuyTevet/motion-diffusion-model">코드(MIT)</a> — architecture 기본값 차용</li>
+    <li><b>PARC</b>: Xu et al., SIGGRAPH 2025 — 주 논문이 인용한 geometric loss 참고</li>
+    <li><b>LAFAN1 G1 retarget 데이터</b>: <a href="https://huggingface.co/datasets/lvhaidong/LAFAN1_Retargeting_Dataset">lvhaidong/LAFAN1_Retargeting_Dataset</a> (CC BY-NC-ND 4.0, 원본 Ubisoft <a href="https://github.com/ubisoft/ubisoft-laforge-animation-dataset">LAFAN1</a>)</li>
+    <li><b>DDPM/DDIM</b>: Ho et al. 2020, Song et al. 2021 · cosine schedule: Nichol &amp; Dhariwal 2021</li>
+  </ul>
+  <p>라이선스 요약: 학습 데이터 중 LAFAN1·OMOMO 파생분은 비상업 조건입니다. 자세한 내용은 <code>data/motion_gen/metadata/SOURCES.md</code>와 <code>docs/motion_generator_implementation_notes.md</code>를 참조하세요.</p>
+</section>
+
+<footer>
+  HoloSoma motion_gen · 1단계 재현 구현 · 2026-07-10 · 상세 구현 기록: <code>docs/motion_generator_implementation_notes.md</code>
+</footer>
+
+</div>
+</body>
+</html>
