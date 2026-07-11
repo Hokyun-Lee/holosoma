@@ -41,6 +41,8 @@ class MotionClip:
     foot_contact: torch.Tensor  # (T, n_feet) bool, contact proxy
     flat_terrain: bool
     source: str = "unknown"
+    terrain_scan: torch.Tensor | None = None  # (T, G) heading-aligned heights
+    terrain_grid: torch.Tensor | None = None  # (5,) grid definition
 
     @property
     def num_frames(self) -> int:
@@ -93,6 +95,14 @@ def load_wbt_motion(
 
     features = pack_features(root_pos, root_quat, joint_pos, body_pos)
 
+    terrain_scan = None
+    terrain_grid = None
+    if "terrain_height" in data.files:
+        terrain_scan = torch.from_numpy(np.asarray(data["terrain_height"], dtype=np.float32))
+        terrain_grid = torch.from_numpy(np.asarray(data["terrain_grid"], dtype=np.float32))
+        if terrain_scan.shape[0] != features.shape[0]:
+            raise ValueError(f"{path}: terrain_height frames {terrain_scan.shape[0]} != motion frames {features.shape[0]}")
+
     foot_idx = layout.foot_body_indices()
     feet = body_pos[:, foot_idx]  # (T, n_feet, 3)
     z_floor = feet[..., 2].amin(dim=0, keepdim=True)  # per-foot clip minimum
@@ -108,6 +118,8 @@ def load_wbt_motion(
         foot_contact=contact,
         flat_terrain=flat_terrain,
         source=source,
+        terrain_scan=terrain_scan,
+        terrain_grid=terrain_grid,
     )
 
 
@@ -167,6 +179,7 @@ class MotionWindowDataset(Dataset):
         stride: int = 1,
         min_heading_disp: float = 0.05,
         terrain_dim: int = 121,
+        use_terrain_scan: bool = False,
     ):
         if past_frames < 1 or future_frames < 1:
             raise ValueError("past_frames and future_frames must be >= 1")
@@ -177,6 +190,15 @@ class MotionWindowDataset(Dataset):
         self.window = past_frames + future_frames
         self.min_heading_disp = min_heading_disp
         self.terrain_dim = terrain_dim
+        self.use_terrain_scan = use_terrain_scan
+        if use_terrain_scan:
+            for clip in clips:
+                if clip.terrain_scan is not None and clip.terrain_scan.shape[1] != terrain_dim:
+                    raise ValueError(
+                        f"{clip.name}: terrain scan dim {clip.terrain_scan.shape[1]} != "
+                        f"configured terrain_dim {terrain_dim} (re-run add_terrain_scans "
+                        "with a matching grid or fix the config)."
+                    )
 
         self._index: list[tuple[int, int]] = []
         for ci, clip in enumerate(clips):
@@ -202,11 +224,17 @@ class MotionWindowDataset(Dataset):
             canon, self.layout, anchor_index=anchor, min_disp=self.min_heading_disp
         )
         contact = clip.foot_contact[start + self.past_frames : start + self.window]
+        terrain = torch.zeros(self.terrain_dim)
+        has_scan = False
+        if self.use_terrain_scan and clip.terrain_scan is not None:
+            terrain = clip.terrain_scan[start + anchor]
+            has_scan = True
         return {
             "x": canon[self.past_frames :],
             "past": canon[: self.past_frames],
             "heading": heading,
-            "terrain": torch.zeros(self.terrain_dim),
+            "terrain": terrain,
+            "has_scan": torch.tensor(has_scan),
             "contact": contact,
             "flat": torch.tensor(clip.flat_terrain),
             "anchor_xy": transform.anchor_xy,

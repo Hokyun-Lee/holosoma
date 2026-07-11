@@ -52,7 +52,7 @@ def main(args: Args) -> None:
         clips, gen.layout,
         past_frames=cfg.data.past_frames, future_frames=cfg.data.future_frames,
         stride=cfg.data.val_stride, min_heading_disp=cfg.data.min_heading_disp,
-        terrain_dim=cfg.data.terrain_dim,
+        terrain_dim=cfg.data.terrain_dim, use_terrain_scan=cfg.data.use_terrain_scan,
     )
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
     joint_limits = load_joint_limits(Path(cfg.data.metadata_dir) / "joint_limits.json", gen.layout)
@@ -80,6 +80,9 @@ def main(args: Args) -> None:
         metrics = compute_metrics(
             out.features, batch["x"], gen.layout, cfg.data.fps,
             joint_limits=joint_limits, contact=batch["contact"], flat=batch["flat"],
+            terrain_scan=batch["terrain"] if cfg.data.use_terrain_scan else None,
+            has_scan=batch.get("has_scan"),
+            scan_grid=cfg.data.scan_grid if cfg.data.use_terrain_scan else None,
         )
         for k, v in metrics.items():
             agg[k] = agg.get(k, 0.0) + v

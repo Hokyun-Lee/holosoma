@@ -26,22 +26,26 @@ done
 
 DATA_ROOT="$PROJECT_ROOT/data/motion_gen"
 
-echo "== 1/4 download selected motions =="
+# Profile: "small" (~11 clips, ~7 min) or "paperscale" (~195 clips, ~2.7 h)
+PROFILE="${1:-small}"
+if [ "$PROFILE" = "small" ]; then SUFFIX=""; else SUFFIX="_$PROFILE"; fi
+
+echo "== 1/4 download selected motions (profile: $PROFILE) =="
 cd "$PROJECT_ROOT"
-"$HSSIM_PYTHON" -m holosoma.motion_gen.scripts.download_data --data-root "$DATA_ROOT"
+"$HSSIM_PYTHON" -m holosoma.motion_gen.scripts.download_data --data-root "$DATA_ROOT" --profile "$PROFILE"
 
 echo "== 2/4 normalize to qpos npz =="
-"$HSSIM_PYTHON" -m holosoma.motion_gen.scripts.prepare_motions --data-root "$DATA_ROOT" --repo-root "$PROJECT_ROOT"
+"$HSSIM_PYTHON" -m holosoma.motion_gen.scripts.prepare_motions --data-root "$DATA_ROOT" --repo-root "$PROJECT_ROOT" --profile "$PROFILE"
 
 echo "== 3/4 MuJoCo FK conversion to 50 fps WBT format =="
 cd "$PROJECT_ROOT/src/holosoma_retargeting/holosoma_retargeting"
 "$HSRETARGETING_PYTHON" data_conversion/convert_data_format_mj_headless.py \
-    --input-dir "$DATA_ROOT/raw_qpos" \
-    --output-dir "$DATA_ROOT/processed" \
-    --joint-limits-out "$DATA_ROOT/metadata/joint_limits.json"
+    --input-dir "$DATA_ROOT/raw_qpos$SUFFIX" \
+    --output-dir "$DATA_ROOT/processed$SUFFIX" \
+    --joint-limits-out "$DATA_ROOT/metadata$SUFFIX/joint_limits.json"
 
 echo "== 4/4 train/val splits =="
 cd "$PROJECT_ROOT"
-"$HSSIM_PYTHON" -m holosoma.motion_gen.scripts.make_splits --data-root "$DATA_ROOT"
+"$HSSIM_PYTHON" -m holosoma.motion_gen.scripts.make_splits --data-root "$DATA_ROOT" --profile "$PROFILE"
 
-echo "Done. Processed motions in $DATA_ROOT/processed"
+echo "Done. Processed motions in $DATA_ROOT/processed$SUFFIX"

@@ -124,6 +124,12 @@ class Trainer:
             f"val clips ({'train/overfit' if d.overfit else 'val'}): {[c.name for c in val_clips]}"
         )
 
+        if d.use_terrain_scan and d.terrain_dim != d.scan_grid.dim:
+            raise ValueError(
+                f"terrain_dim ({d.terrain_dim}) != scan_grid.dim ({d.scan_grid.dim}); "
+                "set data.terrain_dim to match the scan grid."
+            )
+
         def make_dataset(clips, stride: int) -> MotionWindowDataset:
             return MotionWindowDataset(
                 clips,
@@ -133,6 +139,7 @@ class Trainer:
                 stride=stride,
                 min_heading_disp=d.min_heading_disp,
                 terrain_dim=d.terrain_dim,
+                use_terrain_scan=d.use_terrain_scan,
             )
 
         self.train_dataset = make_dataset(train_clips, d.train_stride)
@@ -281,6 +288,9 @@ class Trainer:
         return compute_losses(
             x0_hat_phys, gt_phys, self.layout, cfg.loss,
             contact=batch["contact"], flat=batch["flat"],
+            terrain_scan=batch["terrain"] if cfg.data.use_terrain_scan else None,
+            has_scan=batch.get("has_scan"),
+            scan_grid=cfg.data.scan_grid if cfg.data.use_terrain_scan else None,
         )
 
     def train(self) -> None:
@@ -380,6 +390,9 @@ class Trainer:
         metrics = compute_metrics(
             sample_phys, batch["x"], self.layout, cfg.data.fps,
             joint_limits=self.joint_limits, contact=batch["contact"], flat=batch["flat"],
+            terrain_scan=batch["terrain"] if cfg.data.use_terrain_scan else None,
+            has_scan=batch.get("has_scan"),
+            scan_grid=cfg.data.scan_grid if cfg.data.use_terrain_scan else None,
         )
 
         for k, v in val_losses.items():

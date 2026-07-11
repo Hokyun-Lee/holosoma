@@ -30,6 +30,7 @@ from dataclasses import dataclass
 import torch
 
 from holosoma.motion_gen.features import FeatureLayout, quat_normalize, unpack_features
+from holosoma.motion_gen.terrain import ScanGrid, interpolate_scan_heights
 
 
 @dataclass
@@ -53,6 +54,9 @@ def compute_losses(
     contact: torch.Tensor | None = None,
     flat: torch.Tensor | None = None,
     seq_mask: torch.Tensor | None = None,
+    terrain_scan: torch.Tensor | None = None,
+    has_scan: torch.Tensor | None = None,
+    scan_grid: ScanGrid | None = None,
 ) -> dict[str, torch.Tensor]:
     """Compute all loss terms.
 
@@ -63,6 +67,10 @@ def compute_losses(
         flat: (B,) bool, clip is flat terrain (gates terrain_penetration).
         seq_mask: (B, H) bool, True = valid frame. Invalid frames contribute
             zero to every loss term.
+        terrain_scan: (B, G) anchor-frame height scans; with ``has_scan``
+            (B,) bool and ``scan_grid``, enables the scan-based penetration
+            loss (bodies below the interpolated terrain surface). Bodies
+            outside the scan grid are excluded.
     Returns:
         dict with each unweighted term and the weighted "total".
     """
@@ -118,13 +126,19 @@ def compute_losses(
     else:
         losses["foot_slide"] = torch.zeros((), device=pred_x0.device)
 
-    # Terrain penetration: flat clips only, ground plane z = 0.
+    # Terrain penetration: ground plane z=0 for flat clips; interpolated
+    # multi-box terrain height for clips with a real scan (Phase B).
+    pen_total = pred_x0.new_zeros(())
+    z = pred["body_pos"][..., 2]  # (B, H, num_bodies)
     if flat is not None:
-        z = pred["body_pos"][..., 2]  # (B, H, num_bodies)
         pen = torch.relu(-z) * flat.view(B, 1, 1).float() * m
-        losses["terrain_penetration"] = (pen**2).sum() / denom
-    else:
-        losses["terrain_penetration"] = torch.zeros((), device=pred_x0.device)
+        pen_total = pen_total + (pen**2).sum() / denom
+    if terrain_scan is not None and has_scan is not None and scan_grid is not None and has_scan.any():
+        h, valid = interpolate_scan_heights(terrain_scan, pred["body_pos"][..., :2], scan_grid)
+        gate = has_scan.view(B, 1, 1).float() * valid.float() * m
+        pen = torch.relu(h - z) * gate
+        pen_total = pen_total + (pen**2).sum() / gate.sum().clamp_min(1.0)
+    losses["terrain_penetration"] = pen_total
 
     total = pred_x0.new_zeros(())
     for name, value in losses.items():

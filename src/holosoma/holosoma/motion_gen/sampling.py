@@ -209,12 +209,17 @@ class MotionGenerator:
         num_steps: int | None = 50,
         deterministic: bool = False,
         seed: int = 0,
+        terrain_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Stitch a long motion by re-planning every ``replan_stride`` frames.
 
         The paper re-plans every 0.25 s (12.5 frames at 50 Hz) at deployment;
         default 12. Returns (P + num_cycles * replan_stride, D) world features
         for a single sequence (unbatched input (P, D) is accepted).
+
+        terrain_fn: optional callback mapping the current past window
+        (B, P, D world features) to a (B, terrain_dim) height scan around the
+        anchor pose (Phase B terrain conditioning during rollout).
         """
         single = past_motion.ndim == 2
         input_device = past_motion.device
@@ -229,8 +234,9 @@ class MotionGenerator:
                 heading = target_heading.unsqueeze(0) if target_heading.ndim == 1 else target_heading
             else:
                 heading = None
+            terrain = terrain_fn(past) if terrain_fn is not None else None
             out = self.generate(
-                MotionGeneratorInput(past_motion=past, target_heading=heading),
+                MotionGeneratorInput(past_motion=past, target_heading=heading, terrain_height=terrain),
                 num_steps=num_steps,
                 deterministic=deterministic,
                 seed=seed + cycle,
@@ -246,11 +252,15 @@ def _config_from_dict(d: dict) -> TrainConfig:
     """Reconstruct TrainConfig from a checkpoint dict without extra deps."""
     from holosoma.motion_gen.configs import DataCfg, DiffusionCfg, ModelCfg
     from holosoma.motion_gen.losses import LossWeights
+    from holosoma.motion_gen.terrain import ScanGrid
 
+    data = dict(d["data"])
+    if isinstance(data.get("scan_grid"), dict):
+        data["scan_grid"] = ScanGrid(**data["scan_grid"])
     return TrainConfig(
         **{
             **{k: v for k, v in d.items() if k not in ("data", "model", "diffusion", "loss")},
-            "data": DataCfg(**d["data"]),
+            "data": DataCfg(**data),
             "model": ModelCfg(**d["model"]),
             "diffusion": DiffusionCfg(**d["diffusion"]),
             "loss": LossWeights(**d["loss"]),

@@ -76,7 +76,9 @@ download_data, prepare_motions, make_splits, train, evaluate, sample),
 `tests/` (36 CPU tests incl. end-to-end training smoke).
 
 Other: `src/holosoma_retargeting/.../data_conversion/convert_data_format_mj_headless.py`
-(batch FK conversion, joint-limit dump), `demo_scripts/prepare_motion_gen_data.sh`,
+(batch FK conversion, joint-limit dump), `.../data_conversion/view_motion_mj.py`
+(MuJoCo kinematic replay / GIF render of any qpos or WBT npz),
+`demo_scripts/prepare_motion_gen_data.sh`,
 `.gitignore` (+`/data/`), `README.md` (short section),
 `docs/motion_generator_ko.html`, this file.
 
@@ -95,6 +97,8 @@ No existing files were modified except `.gitignore` and `README.md` (additive).
 | `evaluate.py` ckpt_00010000 vs final (val split) | passed — 10k: body MPJPE **0.166 m** / root 0.142 m; 200k: 0.237 m / 0.233 m (train at 200k: 0.005 m → memorization). Based on this the baseline preset default was reduced to max_steps=50k with val_interval=1k |
 | `sample.py --mode window` and `--mode rollout` (baseline & debug ckpts) | passed — plots + `*_gen_raw.npz` + `*_gen_qpos.npz` written (a heading/device bug found here was fixed; see review section) |
 | `convert_data_format_mj_headless.py --input-file <rollout qpos npz>` | passed — generated rollout round-trips into the full 51-body WBT schema npz |
+| `view_motion_mj.py --motion <rollout gen_qpos.npz> --video gen.gif` | passed — generated rollout replays kinematically on the G1 MuJoCo model (offscreen render verified; interactive viewer same code path) |
+| `view_motion_mj.py --motion <gen> --gt <processed clip> --gt-start 0` | passed — generated + translucent GT robot replay together in one scene (MjSpec attach, verified offscreen: past frames overlap exactly, divergence visible afterwards) |
 | `mypy --config-file mypy.ini src/holosoma/holosoma/motion_gen` | passed — no issues in 30 files |
 
 ## Independent implementation review (subagent) and fixes
@@ -122,6 +126,67 @@ issues that were then fixed and covered by regression tests:
    (ascending-t iteration → NaN), fixed before any training run.
 
 The published baseline_4090 run was restarted after these fixes.
+
+## Stage 2: paper-scale data expansion (2026-07-10, docs/motion_generator_scaleup_ko.html)
+
+The 11-clip run generalized poorly (val body MPJPE ≈ 0.166 m), so the dataset
+was expanded to a "paperscale" profile matching/exceeding the paper's ~1 h:
+34 full-length LAFAN1 G1 clips (fallAndGetUp excluded — locomotion scope,
+implementation choice) + all 145 OmniRetarget climb clips (29 takes × 5
+z-scales — the dataset's own terrain-height augmentation) + 15
+robot-object-terrain clips + the OMOMO demo = **195 clips, 165.3 min
+measured**, train 186 / val 9. Val holds out whole sequence groups to prevent
+leakage: walk4 (all), run1 (both subjects), climb_09 (all z-scales),
+scene_04. Same architecture/config as baseline (only data + step schedule
+changed): preset `paperscale_4090`, artifacts under
+`data/motion_gen/{raw_qpos,processed,metadata}_paperscale` and
+`splits/splits_paperscale.json`; scripts gained `--profile`, the prep shell
+script takes the profile as first argument. Known residual duplication:
+different subjects of the same LAFAN1 sequence share choreography inside the
+train split.
+
+Results (measured 2026-07-11, 200k steps in 63.9 min, no overfitting — val
+improved monotonically to the end): on the *same* val clips and protocol as
+stage 1 (walk4 + climb_09, DDIM 50, fixed seeds), val body MPJPE
+**0.166 → 0.0411 m (4.0x)**, root position error 0.142 → 0.0264 m, joint
+error 0.258 → 0.0937 rad, foot slide 0.276 → 0.142 m/s. Full 9-clip val:
+MPJPE 0.0546 m vs train 0.0288 m (healthy ~1.9x gap). Only the data changed;
+model/losses/training code identical. `view_motion_mj.py` gained
+contact/constraint disabling for kinematic replay (two overlapping robots
+crashed the constraint solver with a FactorizeHessian fatal error).
+
+## Stage 3: terrain-conditioned generator, Phase B (2026-07-11, docs/motion_generator_terrain_ko.html)
+
+Real terrain height scans extracted from OmniRetarget's multi-box terrain
+models (per-climb/scene URDFs referencing 8-vertex box .obj meshes baked in
+world coordinates; z-scale variants via the URDF scale attribute). New
+`motion_gen/terrain.py` computes heights analytically (max over yaw-rotated
+box footprints) and samples heading-aligned scans; grid is a forward-biased
+17x17 @0.1 m (289 dims, x in [-0.3,1.3], y in [-0.8,0.8]) — implementation
+choice, the paper gives no scan resolution. `add_terrain_scans.py` attaches
+`terrain_height`/`terrain_grid` keys to the processed npz (150 clips) and
+validates motion-terrain alignment: **150/150 clips pass** (no feet >5 cm
+below terrain; min clearances match the ~3.5 cm ankle-origin height).
+The penetration loss now penalizes bodies below the bilinearly interpolated
+scan surface (grid-outside bodies excluded); flat clips keep the z<0 form.
+`terrain_4090` preset = paperscale + use_terrain_scan (terrain_dim 289).
+Rollout sampling can re-sample scans along the generated root via
+`sample.py --terrain-urdf` (receding_horizon terrain_fn callback). Takes
+(10 clips) have no terrain models -> zero scans; the chair object itself is
+NOT part of scene scans (documented).
+
+Results (measured 2026-07-11, 200k steps / 66 min, no overfitting): on the
+terrain val subset (climb_09 x5 z-scales + scene_04), MPJPE is unchanged
+within noise vs the zero-scan paperscale model (0.0457 vs 0.0432 m) but the
+**measured terrain penetration of generated bodies drops 3.5x (0.21 -> 0.06
+mm)**; flat val unchanged (0.0546 vs 0.0566 m). Qualitative: a climb_09
+rollout with `--terrain-urdf` scan re-sampling climbs onto the terrain box
+(verified in the MuJoCo render; `view_motion_mj.py` gained a
+`--terrain-urdf` option that draws the terrain boxes as static geoms).
+Honest read: at a 0.5 s horizon the 2 past frames already imply most of the
+terrain state, so scan conditioning mainly improves physical plausibility
+here; its steering value should appear in receding-horizon deployment over
+unseen terrain layouts (post-tracker integration).
 
 ## Known limitations / not yet verified
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import torch
 import tyro
 from loguru import logger
@@ -49,6 +50,10 @@ class Args:
     heading: tuple[float, float] | None = None
     """Fixed world-frame target heading; None keeps the current direction
     (window mode uses the GT heading when None)."""
+    terrain_urdf: str | None = None
+    """Phase B: multi-box terrain URDF for scan conditioning. Window mode of a
+    scan-enabled checkpoint uses the clip's stored scans automatically; this
+    flag is for rollout mode, where scans must follow the generated root."""
     out_dir: str | None = None
 
 
@@ -68,14 +73,19 @@ def main(args: Args) -> None:
     past = clip.features[args.start : args.start + P].unsqueeze(0).to(gen.device)
     heading = torch.tensor([list(args.heading)], device=gen.device) if args.heading else None
 
+    use_scan = cfg.data.use_terrain_scan
     if args.mode == "window":
         gt_future = clip.features[args.start + P : args.start + P + H]
         if heading is None:
             disp = gt_future[-1, :2] - clip.features[args.start + P - 1, :2]
             if disp.norm() > cfg.data.min_heading_disp:
                 heading = (disp / disp.norm()).unsqueeze(0).to(gen.device)
+        terrain = None
+        if use_scan and clip.terrain_scan is not None:
+            terrain = clip.terrain_scan[args.start + P - 1].unsqueeze(0).to(gen.device)
+            logger.info("Conditioning on the clip's stored terrain scan (anchor frame)")
         out = gen.generate(
-            MotionGeneratorInput(past_motion=past, target_heading=heading),
+            MotionGeneratorInput(past_motion=past, target_heading=heading, terrain_height=terrain),
             num_steps=args.num_steps, deterministic=args.deterministic,
             seed=args.seed, guidance_scale=args.guidance_scale,
         )
@@ -87,10 +97,31 @@ def main(args: Args) -> None:
         )
         export_generated_qpos_npz(out.features[0].cpu(), gen.layout, cfg.data.fps, out_dir / f"{stem}_gen_qpos.npz")
     elif args.mode == "rollout":
+        terrain_fn = None
+        if args.terrain_urdf is not None:
+            if not use_scan:
+                raise ValueError("--terrain-urdf given but the checkpoint was trained without terrain scans")
+            from holosoma.motion_gen.features import quat_yaw
+            from holosoma.motion_gen.terrain import BoxTerrain
+
+            terrain = BoxTerrain.from_urdf(args.terrain_urdf)
+            grid = cfg.data.scan_grid
+
+            def terrain_fn(past_win: torch.Tensor) -> torch.Tensor:
+                anchor = past_win[:, -1]
+                scans = [
+                    terrain.sample_scan(
+                        anchor[b, :2].cpu().numpy(), float(quat_yaw(anchor[b, 3:7])), grid
+                    )
+                    for b in range(anchor.shape[0])
+                ]
+                return torch.from_numpy(np.stack(scans)).float().to(gen.device)
+
         traj = gen.receding_horizon(
             past[0], num_cycles=args.num_cycles, replan_stride=args.replan_stride,
             target_heading=heading[0] if heading is not None else None,
             num_steps=args.num_steps, deterministic=args.deterministic, seed=args.seed,
+            terrain_fn=terrain_fn,
         ).cpu()
         stem = f"{clip.name}_s{args.start}_rollout{args.num_cycles}x{args.replan_stride}"
         plot_long_rollout(traj, gen.layout, out_dir / f"{stem}.png")

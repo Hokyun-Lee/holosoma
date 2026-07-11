@@ -28,12 +28,14 @@ from pathlib import Path
 import numpy as np
 import tyro
 
-from holosoma.motion_gen.data_manifest import MANIFEST, ClipSpec
+from holosoma.motion_gen.data_manifest import _NO_END, ClipSpec, get_manifest
 
 
 @dataclass
 class Args:
     data_root: str = "data/motion_gen"
+    profile: str = "small"
+    """Clip selection: 'small' (~11 clips) or 'paperscale' (~195 clips)."""
     repo_root: str = "."
     force: bool = False
 
@@ -59,7 +61,8 @@ def prepare_lafan1(clip: ClipSpec, raw_dir: Path) -> tuple[np.ndarray, int]:
     if clip.frame_range is not None:
         start, end = clip.frame_range
         if end > rows.shape[0]:
-            print(f"[warn] {clip.stem}: frame_range end {end} > {rows.shape[0]} frames, clamping")
+            if end != _NO_END:  # _NO_END is the use-the-whole-clip sentinel
+                print(f"[warn] {clip.stem}: frame_range end {end} > {rows.shape[0]} frames, clamping")
             end = rows.shape[0]
         rows = rows[start:end]
     pos = rows[:, 0:3]
@@ -88,15 +91,16 @@ def prepare_omniretarget(clip: ClipSpec, raw_dir: Path) -> tuple[np.ndarray, int
 
 
 def main(args: Args) -> None:
+    suffix = "" if args.profile == "small" else f"_{args.profile}"
     root = Path(args.data_root)
     raw_dir = root / "raw"
-    qpos_dir = root / "raw_qpos"
-    processed_dir = root / "processed"
-    meta_dir = root / "metadata"
+    qpos_dir = root / f"raw_qpos{suffix}"
+    processed_dir = root / f"processed{suffix}"
+    meta_dir = root / f"metadata{suffix}"
     for d in (qpos_dir, processed_dir, meta_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    for clip in MANIFEST:
+    for clip in get_manifest(args.profile):
         meta = {
             "stem": clip.stem,
             "source": clip.source,

@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from holosoma.motion_gen.losses import LossWeights
+from holosoma.motion_gen.terrain import ScanGrid
 
 
 @dataclass
@@ -29,6 +30,12 @@ class DataCfg:
     terrain_dim: int = 121
     """Terrain scan interface size (Phase A: zeros). 11x11 grid at 0.1 m
     spacing is an implementation choice; the paper gives no scan resolution."""
+    use_terrain_scan: bool = False
+    """Phase B: feed real heading-aligned height scans (requires
+    add_terrain_scans; clips without scans still get zeros)."""
+    scan_grid: ScanGrid = field(default_factory=ScanGrid)
+    """Grid definition for Phase B scans; terrain_dim must equal scan_grid.dim
+    when use_terrain_scan is enabled."""
     max_train_clips: int | None = None
     """Optional cap on the number of train clips (debug presets)."""
     max_val_clips: int | None = None
@@ -156,8 +163,46 @@ def baseline_4090() -> TrainConfig:
     )
 
 
+def paperscale_4090() -> TrainConfig:
+    """Paper-scale data (~195 clips, ~2.7 h) on one RTX 4090.
+
+    Same architecture as baseline_4090; more data allows longer training.
+    200k steps measured ~64 min at batch 256 on the small profile; expect
+    similar (estimate). Pick the best-val checkpoint via metrics.json."""
+    return TrainConfig(
+        run_name="paperscale_4090",
+        model=ModelCfg(),
+        batch_size=256,
+        max_steps=200_000,
+        warmup_steps=1000,
+        num_workers=4,
+        ckpt_interval=10_000,
+        val_interval=2_000,
+        sample_interval=20_000,
+        norm_max_windows=4000,
+        data=DataCfg(
+            processed_dir="data/motion_gen/processed_paperscale",
+            metadata_dir="data/motion_gen/metadata_paperscale",
+            splits_file="data/motion_gen/splits/splits_paperscale.json",
+        ),
+    )
+
+
+def terrain_4090() -> TrainConfig:
+    """Phase B: paperscale data + real terrain height scans (climb/scene
+    clips; flat clips keep zero scans). Experimental until validated."""
+    cfg = paperscale_4090()
+    cfg.run_name = "terrain_4090"
+    cfg.data.use_terrain_scan = True
+    cfg.data.scan_grid = ScanGrid()
+    cfg.data.terrain_dim = ScanGrid().dim  # 17x17 forward-biased grid = 289
+    return cfg
+
+
 PRESETS = {
     "smoke": smoke,
     "debug": debug,
     "baseline_4090": baseline_4090,
+    "paperscale_4090": paperscale_4090,
+    "terrain_4090": terrain_4090,
 }

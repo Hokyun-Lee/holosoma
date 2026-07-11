@@ -39,6 +39,9 @@ def compute_metrics(
     joint_limits: torch.Tensor | None = None,
     contact: torch.Tensor | None = None,
     flat: torch.Tensor | None = None,
+    terrain_scan: torch.Tensor | None = None,
+    has_scan: torch.Tensor | None = None,
+    scan_grid=None,
 ) -> dict[str, float]:
     """Metrics over a batch of windows (B, H, D), physical canonical units."""
     pred = unpack_features(pred_x0, layout)
@@ -74,5 +77,14 @@ def compute_metrics(
         z = pred["body_pos"][..., 2]
         pen = torch.relu(-z) * flat.view(-1, 1, 1).float()
         metrics["terrain_penetration_m"] = (pen.sum() / flat.float().sum().clamp_min(1.0) / z.shape[1] / z.shape[2]).item()
+
+    if terrain_scan is not None and has_scan is not None and scan_grid is not None and has_scan.any():
+        from holosoma.motion_gen.terrain import interpolate_scan_heights
+
+        z = pred["body_pos"][..., 2]
+        h, valid = interpolate_scan_heights(terrain_scan, pred["body_pos"][..., :2], scan_grid)
+        gate = has_scan.view(-1, 1, 1).float() * valid.float()
+        pen = torch.relu(h - z) * gate
+        metrics["scan_penetration_m"] = (pen.sum() / gate.sum().clamp_min(1.0)).item()
 
     return metrics

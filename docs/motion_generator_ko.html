@@ -146,6 +146,7 @@ footer { color: var(--muted); font-size: 13px; text-align: center; padding-top: 
     <tr><td>데이터 manifest</td><td><code>motion_gen/data_manifest.py</code></td><td>사용하는 11개 클립 목록·라이선스·frame range·split</td></tr>
     <tr><td>Scripts</td><td><code>motion_gen/scripts/*.py</code></td><td>inspect_motion_npz / download_data / prepare_motions / make_splits / train / evaluate / sample</td></tr>
     <tr><td>FK 변환기(headless)</td><td><code>src/holosoma_retargeting/.../data_conversion/convert_data_format_mj_headless.py</code></td><td>qpos npz → MuJoCo FK → 50fps WBT npz, joint limit 추출</td></tr>
+    <tr><td>MuJoCo 리플레이</td><td><code>src/holosoma_retargeting/.../data_conversion/view_motion_mj.py</code></td><td>생성/원본 모션 npz를 MuJoCo 뷰어로 재생 또는 GIF 렌더링</td></tr>
     <tr><td>데이터 준비 일괄 실행</td><td><code>demo_scripts/prepare_motion_gen_data.sh</code></td><td>다운로드→정규화→FK 변환→split 한 번에</td></tr>
     <tr><td>테스트</td><td><code>motion_gen/tests/</code></td><td>CPU 전용 36개 (schema/윈도우/정규화/모델/diffusion/loss/checkpoint/smoke 학습/export)</td></tr>
   </table></div>
@@ -426,6 +427,24 @@ $PYRT data_conversion/convert_data_format_mj_headless.py \
   plots/step_*/              # GT vs 생성 비교 그림
   logs/                      # TensorBoard events
   eval_val/                  # evaluate.py 결과 (metrics_eval.json)</code></pre>
+  <h3>MuJoCo로 생성 모션 리플레이</h3>
+  <p>생성된 <code>*_gen_qpos.npz</code>(또는 <code>*_mj.npz</code>, 원본 데이터 npz)를 MuJoCo 뷰어에서 kinematic으로 재생할 수 있습니다 (hsretargeting env):</p>
+<pre><code>cd src/holosoma_retargeting/holosoma_retargeting
+
+# 인터랙티브 뷰어 (모니터 필요, 반복 재생)
+$PYRT data_conversion/view_motion_mj.py \
+    --motion &lt;.../lafan1_walk4_subject1_s0_rollout16x12_gen_qpos.npz&gt;
+
+# 화면 없이 GIF로 렌더링 (원격/헤드리스 환경)
+$PYRT data_conversion/view_motion_mj.py \
+    --motion &lt;..._gen_qpos.npz&gt; --video /tmp/gen_rollout.gif
+
+# Ground truth와 동시 재생 (GT = 반투명 파란 로봇, --gt-start = sample.py의 --start 값)
+$PYRT data_conversion/view_motion_mj.py \
+    --motion &lt;..._gen_qpos.npz&gt; \
+    --gt ../../../data/motion_gen/processed/lafan1_walk4_subject1.npz --gt-start 0
+# 겹쳐 보기 대신 나란히 보려면 --offset-y 1.0 추가</code></pre>
+  <div class="callout ok">참고: GT 데이터와 나란히 비교하려면 같은 명령으로 <code>data/motion_gen/processed/&lt;clip&gt;.npz</code>도 재생해 보세요. Isaac Sim 기반 리플레이는 <code>replay.py exp:g1-29dof-wbt --command...motion_file=&lt;*_gen_mj.npz&gt;</code> 경로도 있습니다 (isaacsim env 필요).</div>
   <h3>Loss / metric 해석</h3>
   <ul>
     <li><code>train/total</code>: 꾸준히 감소해야 함. 물리 단위 기준이라 절대값이 작게 시작합니다(초기 예측≈평균 모션).</li>

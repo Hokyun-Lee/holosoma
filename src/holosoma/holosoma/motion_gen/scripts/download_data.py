@@ -23,12 +23,14 @@ from pathlib import Path
 
 import tyro
 
-from holosoma.motion_gen.data_manifest import MANIFEST, OMNIRETARGET_BASE_URL, OMNIRETARGET_ZIPS
+from holosoma.motion_gen.data_manifest import OMNIRETARGET_BASE_URL, OMNIRETARGET_ZIPS, get_manifest
 
 
 @dataclass
 class Args:
     data_root: str = "data/motion_gen"
+    profile: str = "small"
+    """Clip selection: 'small' (~11 clips, ~7 min) or 'paperscale' (~195 clips, ~2.7 h)."""
     force: bool = False
 
 
@@ -60,16 +62,18 @@ def download(url: str, dest: Path, force: bool = False) -> None:
 
 
 def main(args: Args) -> None:
+    manifest = get_manifest(args.profile)
+    suffix = "" if args.profile == "small" else f"_{args.profile}"
     root = Path(args.data_root)
     raw_lafan = root / "raw" / "lafan1_g1"
     raw_omni = root / "raw" / "omniretarget"
-    meta_dir = root / "metadata"
+    meta_dir = root / f"metadata{suffix}"
     meta_dir.mkdir(parents=True, exist_ok=True)
 
     hashes: dict[str, str] = {}
 
     # --- LAFAN1 CSVs -------------------------------------------------------
-    for clip in MANIFEST:
+    for clip in manifest:
         if clip.source != "lafan1":
             continue
         dest = raw_lafan / clip.origin.rsplit("/", 1)[-1]
@@ -78,7 +82,7 @@ def main(args: Args) -> None:
 
     # --- OmniRetarget zips + selective extraction --------------------------
     needed_members: dict[str, list[str]] = {}
-    for clip in MANIFEST:
+    for clip in manifest:
         if clip.source != "omniretarget":
             continue
         zip_name, member = clip.origin.split(":", 1)
@@ -109,7 +113,7 @@ def main(args: Args) -> None:
     (meta_dir / "downloads.json").write_text(json.dumps(hashes, indent=2))
 
     sources = ["# Motion data sources and licenses\n"]
-    for clip in MANIFEST:
+    for clip in manifest:
         sources.append(
             f"- **{clip.stem}** — {clip.description}\n"
             f"  - source: {clip.source}, origin: `{clip.origin}`\n"

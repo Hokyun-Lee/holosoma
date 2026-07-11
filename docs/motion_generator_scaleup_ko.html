@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Motion Generator 2차: 논문 규모 데이터 확장</title>
+<style>
+:root {
+  --bg: #fbfbfd; --card: #ffffff; --text: #1d1d1f; --muted: #6e6e73;
+  --accent: #0071e3; --accent-soft: #eaf3fe; --border: #e5e5ea;
+  --code-bg: #f5f5f7; --warn-bg: #fff8e6; --warn-border: #f0d47a; --ok-bg: #e9f7ef;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+    "Helvetica Neue", Arial, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  background: var(--bg); color: var(--text); line-height: 1.7; font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+}
+.container { max-width: 800px; margin: 0 auto; padding: 0 24px 120px; }
+header.hero { padding: 96px 0 48px; text-align: center; }
+header.hero h1 { font-size: 40px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; }
+header.hero p.sub { margin-top: 16px; font-size: 19px; color: var(--muted); }
+header.hero .badge {
+  display: inline-block; margin-top: 20px; padding: 6px 14px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 600;
+}
+nav.toc {
+  position: sticky; top: 0; z-index: 10; background: rgba(251,251,253,0.92);
+  backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
+  padding: 10px 0; margin-bottom: 48px;
+}
+nav.toc .toc-inner { max-width: 800px; margin: 0 auto; padding: 0 24px;
+  display: flex; gap: 6px; overflow-x: auto; white-space: nowrap; }
+nav.toc a { color: var(--muted); text-decoration: none; font-size: 13px; font-weight: 500;
+  padding: 5px 10px; border-radius: 8px; flex: none; }
+nav.toc a:hover { color: var(--accent); background: var(--accent-soft); }
+section { margin-bottom: 72px; }
+h2 { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 8px; padding-top: 24px; }
+h2 .num { color: var(--accent); margin-right: 8px; }
+h3 { font-size: 19px; font-weight: 600; margin: 32px 0 12px; }
+p { margin: 12px 0; }
+p.lead { color: var(--muted); font-size: 17px; margin-bottom: 24px; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+ul, ol { margin: 12px 0 12px 24px; }
+li { margin: 6px 0; }
+code { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.88em; background: var(--code-bg); border-radius: 6px; padding: 2px 6px; }
+pre { background: #1d1d1f; color: #f5f5f7; border-radius: 14px; padding: 18px 20px;
+  overflow-x: auto; margin: 16px 0; font-size: 13.5px; line-height: 1.6; }
+pre code { background: none; color: inherit; padding: 0; font-size: inherit; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+  padding: 20px 24px; margin: 16px 0; }
+.callout { border-radius: 14px; padding: 14px 18px; margin: 16px 0; font-size: 15px; }
+.callout.warn { background: var(--warn-bg); border: 1px solid var(--warn-border); }
+.callout.ok { background: var(--ok-bg); border: 1px solid #b7e0c5; }
+.callout.info { background: var(--accent-soft); border: 1px solid #bcd9f7; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 14px; margin: 16px 0; }
+table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 14px; background: var(--card); }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { background: var(--code-bg); font-weight: 600; white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+.tag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.tag.measured { background: var(--ok-bg); color: #1b7a3d; }
+.tag.estimated { background: var(--warn-bg); color: #9a7b12; }
+.tag.nv { background: #f2f2f7; color: var(--muted); }
+footer { color: var(--muted); font-size: 13px; text-align: center; padding-top: 48px; border-top: 1px solid var(--border); }
+@media (max-width: 640px) { header.hero h1 { font-size: 30px; } body { font-size: 15px; } }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="container" style="padding-bottom:0">
+    <h1>2차: 논문 규모 데이터 확장</h1>
+    <p class="sub">11클립(6.8분) → 195클립(~2.7시간)으로 확장해 diffusion motion generator를<br>재학습하고 일반화 성능을 재평가한 작업 기록</p>
+    <span class="badge">paperscale 프로파일 · 1차 문서: motion_generator_ko.html</span>
+  </div>
+</header>
+
+<nav class="toc">
+  <div class="toc-inner">
+    <a href="#s1">1 배경</a><a href="#s2">2 데이터 확장</a><a href="#s3">3 변경 사항</a><a href="#s4">4 실행 명령</a><a href="#s5">5 결과</a><a href="#s6">6 리플레이</a><a href="#s7">7 남은 한계</a>
+  </div>
+</nav>
+
+<div class="container">
+
+<section id="s1">
+  <h2><span class="num">1.</span>배경과 목표</h2>
+  <p class="lead">1차 구현(<a href="motion_generator_ko.html">motion_generator_ko.html</a>)은 11클립 ≈ 6.8분으로 파이프라인을 검증했지만, 학습에 없던 val 클립에서 body MPJPE ≈ 0.166 m로 <b>일반화가 부족</b>했다. 원인은 명확히 데이터 규모(논문은 ~1시간 사용).</p>
+  <ul>
+    <li><b>목표</b>: 논문 수준 이상(~1시간+)의 G1 retargeted 데이터로 재학습하여 val 일반화 개선을 확인</li>
+    <li><b>비교 기준</b>: 1차와 동일한 val 클립(walk4_subject1, climb_09)을 유지해 직접 비교 가능하게 함</li>
+  </ul>
+</section>
+
+<section id="s2">
+  <h2><span class="num">2.</span>데이터 확장 (paperscale 프로파일)</h2>
+  <div class="table-wrap"><table>
+    <tr><th>구성</th><th>클립 수</th><th>길이(개략)</th><th>라이선스</th><th>비고</th></tr>
+    <tr><td>LAFAN1 G1 전체(fallAndGetUp 제외)</td><td>34</td><td>≈ 2.2 h</td><td>CC BY-NC-ND 4.0</td><td>walk/run/sprint/dance/jumps/fight — 각 클립 앞 2초(중립 자세) 트리밍</td></tr>
+    <tr><td>OmniRetarget climb 전체</td><td>145 (29종 × z-scale 5단계)</td><td>≈ 0.5 h</td><td>MIT</td><td>z-scale 0.8–1.2 변형 = 논문의 terrain 높이 증강에 대응</td></tr>
+    <tr><td>OmniRetarget 장애물 씬</td><td>15 (chair scene 5 + take 10)</td><td>≈ 5 min</td><td>MIT</td><td>의자/구조물 상호작용</td></tr>
+    <tr><td>OMOMO largebox</td><td>1</td><td>6.5 s</td><td>CC BY-NC 4.0</td><td>전신 팔 협응</td></tr>
+  </table></div>
+  <p>총 <b>≈ 195 클립, 약 2.7시간</b> — 논문의 ~1시간을 상회. 제외한 것: LAFAN1 fallAndGetUp 6클립(바닥 기상 동작, locomotion 범위 밖 — 구현 선택), OmniRetarget robot-object.zip(286MB 박스 조작, 향후 확장).</p>
+  <h3>Leakage 방지 val split</h3>
+  <p>동일 안무·동일 씬의 변형이 train에 남지 않도록 <b>시퀀스 그룹 전체</b>를 hold-out:</p>
+  <ul>
+    <li><code>lafan1_walk4_subject1</code> — 1차와 동일한 val 클립 (walk4는 subject1만 존재)</li>
+    <li><code>lafan1_run1_subject2</code>, <code>lafan1_run1_subject5</code> — run1 시퀀스 전체 (동일 안무의 다른 subject가 train에 남는 leakage 차단)</li>
+    <li><code>omni_climb_09_z0_8 … z1_2</code> — climb_09의 <b>모든 z-scale 변형</b> (변형 간 근사 중복 차단)</li>
+    <li><code>omni_scene_04</code> — chair scene 하나</li>
+  </ul>
+  <p>val ≈ 13분 / train ≈ 2.5시간. LAFAN1 동일 시퀀스의 다른 subject(예: walk3_subject1~5)는 같은 안무의 다른 연기라 train 내 중복도가 있음을 유의(문서화된 한계).</p>
+</section>
+
+<section id="s3">
+  <h2><span class="num">3.</span>코드 변경 사항</h2>
+  <div class="table-wrap"><table>
+    <tr><th>파일</th><th>변경</th></tr>
+    <tr><td><code>motion_gen/data_manifest.py</code></td><td><code>paperscale_manifest()</code>/<code>paperscale_splits()</code>/<code>get_manifest(profile)</code> 추가 — LAFAN1 34클립 + climb 145 + 씬 15 목록과 leakage-free split</td></tr>
+    <tr><td><code>scripts/download_data.py</code>, <code>scripts/prepare_motions.py</code>, <code>scripts/make_splits.py</code></td><td><code>--profile small|paperscale</code> 지원. paperscale 산출물은 <code>raw_qpos_paperscale/</code>, <code>processed_paperscale/</code>, <code>metadata_paperscale/</code>, <code>splits/splits_paperscale.json</code>로 분리(1차 데이터와 공존)</td></tr>
+    <tr><td><code>motion_gen/configs.py</code></td><td><code>paperscale_4090</code> preset 추가 (모델 동일: 512/8/4, batch 256, 200k step, val 2k 간격)</td></tr>
+    <tr><td><code>demo_scripts/prepare_motion_gen_data.sh</code></td><td>첫 인자로 profile 지정 가능: <code>bash ... paperscale</code></td></tr>
+    <tr><td><code>data_conversion/view_motion_mj.py</code></td><td>(직전 작업) GT 오버레이 동시 재생 — 이번 평가에 사용</td></tr>
+  </table></div>
+  <p>모델 구조·representation·diffusion 설정은 1차와 동일(데이터만 확장) — 개선이 데이터 효과임을 분리해 확인하기 위함.</p>
+</section>
+
+<section id="s4">
+  <h2><span class="num">4.</span>실행 명령</h2>
+<pre><code>PY=~/.holosoma_deps/miniconda3/envs/hssim/bin/python
+PYRT=~/.holosoma_deps/miniconda3/envs/hsretargeting/bin/python
+
+# 1) 데이터 준비 (다운로드 ~90MB → FK 변환 → split)
+bash demo_scripts/prepare_motion_gen_data.sh paperscale
+
+# 2) 학습 (RTX 4090, 200k step)
+$PY -m holosoma.motion_gen.scripts.train paperscale_4090
+
+# 3) 평가 (val: walk4 + run1 + climb_09 + scene_04)
+$PY -m holosoma.motion_gen.scripts.evaluate \
+    --ckpt logs/motion_gen/paperscale_4090/checkpoints/&lt;best&gt;.pt --split val
+
+# 4) 샘플 생성 + GT와 MuJoCo 동시 재생
+$PY -m holosoma.motion_gen.scripts.sample \
+    --ckpt logs/motion_gen/paperscale_4090/checkpoints/&lt;best&gt;.pt \
+    --clip lafan1_walk4_subject1 --mode rollout --num-cycles 16
+cd src/holosoma_retargeting/holosoma_retargeting
+$PYRT data_conversion/view_motion_mj.py \
+    --motion &lt;..._gen_qpos.npz&gt; \
+    --gt ../../../data/motion_gen/processed_paperscale/lafan1_walk4_subject1.npz --gt-start 0</code></pre>
+  <div class="callout info">1차 데이터·체크포인트는 그대로 유지됩니다. <code>&lt;best&gt;.pt</code>는 <code>metrics.json</code>에서 val 지표가 가장 좋은 step의 checkpoint를 고르세요.</div>
+</section>
+
+<section id="s5">
+  <h2><span class="num">5.</span>결과 <span class="tag measured">measured 2026-07-11</span></h2>
+  <h3>학습 (RTX 4090)</h3>
+  <ul>
+    <li>train windows <b>455,499</b> / val windows 7,048 · 모델 18.06 M (1차와 동일)</li>
+    <li>200k step 완주 <b>63.9분</b> (≈52 step/s), VRAM 1차와 동일 설정 (torch alloc ≈1.3 GB)</li>
+    <li><b>과적합 없음</b>: 1차와 달리 val 지표가 200k까지 단조 개선 (best = final)</li>
+  </ul>
+  <h3>1차 vs 2차 — 동일 val 클립(walk4 + climb_09), 동일 프로토콜(DDIM 50, 고정 seed)</h3>
+  <div class="table-wrap"><table>
+    <tr><th>지표</th><th>1차 (11클립, best ckpt)</th><th><b>2차 (195클립, final)</b></th><th>개선</th></tr>
+    <tr><td>body MPJPE</td><td>0.166 m</td><td><b>0.0411 m</b></td><td>4.0×</td></tr>
+    <tr><td>root position err</td><td>0.142 m</td><td><b>0.0264 m</b></td><td>5.4×</td></tr>
+    <tr><td>root quat err</td><td>0.272 rad</td><td><b>0.121 rad</b></td><td>2.2×</td></tr>
+    <tr><td>joint pos err</td><td>0.258 rad</td><td><b>0.0937 rad</b></td><td>2.8×</td></tr>
+    <tr><td>foot slide</td><td>0.276 m/s</td><td><b>0.142 m/s</b></td><td>1.9×</td></tr>
+    <tr><td>joint limit 위반율</td><td>0.51 %</td><td><b>0.03 %</b></td><td>—</td></tr>
+  </table></div>
+  <h3>전체 9-클립 val 및 train/val 격차</h3>
+  <div class="table-wrap"><table>
+    <tr><th>Split</th><th>body MPJPE</th><th>root pos err</th><th>joint err</th><th>해석</th></tr>
+    <tr><td>val (9클립: walk4, run1×2, climb_09×5, scene_04)</td><td>0.0546 m</td><td>0.0375 m</td><td>0.0967 rad</td><td>미학습 시퀀스 일반화</td></tr>
+    <tr><td>train (참고)</td><td>0.0288 m</td><td>0.0195 m</td><td>0.0503 rad</td><td>격차 ≈1.9× — 건강한 수준 (1차 final은 47× 격차로 암기 상태였음)</td></tr>
+  </table></div>
+  <p>결론: 일반화 부족의 원인은 진단대로 데이터 규모였고, 논문 규모 이상(2.7시간)으로 확장하자 <b>모델·손실·학습 코드 변경 없이</b> val 오차가 3–5배 줄었다. val 곡선이 200k에서도 하강 중이므로 더 긴 학습/더 많은 데이터로 추가 개선 여지가 있다.</p>
+</section>
+
+<section id="s6">
+  <h2><span class="num">6.</span>리플레이로 확인</h2>
+<pre><code>cd src/holosoma_retargeting/holosoma_retargeting
+PYRT=~/.holosoma_deps/miniconda3/envs/hsretargeting/bin/python
+
+# 생성(불투명) + GT(반투명 파랑) 동시 재생 — val 클립 walk4
+$PYRT data_conversion/view_motion_mj.py \
+    --motion ../../../logs/motion_gen/paperscale_4090/samples/manual/lafan1_walk4_subject1_s0_rollout16x12_gen_qpos.npz \
+    --gt ../../../data/motion_gen/processed_paperscale/lafan1_walk4_subject1.npz --gt-start 0</code></pre>
+  <p>확인된 것(offscreen 렌더로 검증): 16-cycle receding-horizon rollout(3.9초)에서 생성 로봇이 GT와 대부분 겹쳐 움직이며, 1차에서 보이던 조기 발산이 사라짐. 비교 plot은 <code>logs/motion_gen/paperscale_4090/plots/</code>, 평가 수치는 <code>eval_val/metrics_eval.json</code> 참조.</p>
+  <div class="callout info">이번 작업에서 <code>view_motion_mj.py</code>에 kinematic 재생 시 contact/constraint 비활성화를 추가했습니다 — 두 로봇을 겹쳐 그릴 때 접촉 솔버가 발산(<code>FactorizeHessian</code> fatal error)하는 문제 수정.</div>
+
+  <h3>전 모션 테스트 가이드</h3>
+  <p>어떤 클립이든 아래 절차로 확인할 수 있습니다. 변수 정의:</p>
+<pre><code>PY=~/.holosoma_deps/miniconda3/envs/hssim/bin/python
+PYRT=~/.holosoma_deps/miniconda3/envs/hsretargeting/bin/python
+CKPT=logs/motion_gen/paperscale_4090/checkpoints/final.pt
+DATA=data/motion_gen/processed_paperscale</code></pre>
+  <ol>
+    <li><b>클립 목록 (195개)</b>: <code>ls $DATA | sed 's/.npz//'</code> — val 9개는 <code>data/motion_gen/splits/splits_paperscale.json</code> 참조</li>
+    <li><b>GT 원본만 재생</b> (모델 무관, 데이터 확인):
+<pre><code>cd src/holosoma_retargeting/holosoma_retargeting
+$PYRT data_conversion/view_motion_mj.py --motion ../../../$DATA/&lt;클립&gt;.npz</code></pre></li>
+    <li><b>window 모드</b> — 0.5초 단일 예측. GT 추종 정확도를 볼 때는 이걸 사용:
+<pre><code>$PY -m holosoma.motion_gen.scripts.sample --ckpt $CKPT \
+    --clip &lt;클립&gt; --mode window --start &lt;프레임&gt;
+# → samples/manual/&lt;클립&gt;_s&lt;N&gt;_win.png (GT 실선 vs 생성 파선 plot)</code></pre></li>
+    <li><b>rollout 모드</b> — 장기 생성 + GT 오버레이 재생:
+<pre><code>$PY -m holosoma.motion_gen.scripts.sample --ckpt $CKPT \
+    --clip &lt;클립&gt; --mode rollout --start &lt;프레임&gt; --num-cycles 25
+cd src/holosoma_retargeting/holosoma_retargeting
+$PYRT data_conversion/view_motion_mj.py \
+    --motion ../../../logs/motion_gen/paperscale_4090/samples/manual/&lt;클립&gt;_s&lt;N&gt;_rollout25x12_gen_qpos.npz \
+    --gt ../../../$DATA/&lt;클립&gt;.npz --gt-start &lt;프레임&gt;   # sample의 --start와 동일</code></pre></li>
+    <li><b>val 클립 일괄 생성 + GIF</b>:
+<pre><code>for CLIP in lafan1_walk4_subject1 lafan1_run1_subject2 lafan1_run1_subject5 omni_climb_09_z1_0 omni_scene_04; do
+  $PY -m holosoma.motion_gen.scripts.sample --ckpt $CKPT --clip $CLIP --mode rollout --start 100 --num-cycles 25
+  (cd src/holosoma_retargeting/holosoma_retargeting && $PYRT data_conversion/view_motion_mj.py \
+     --motion ../../../logs/motion_gen/paperscale_4090/samples/manual/${CLIP}_s100_rollout25x12_gen_qpos.npz \
+     --gt ../../../$DATA/$CLIP.npz --gt-start 100 --video /tmp/${CLIP}.gif)
+done</code></pre></li>
+    <li><b>정량 평가</b>: <code>$PY -m holosoma.motion_gen.scripts.evaluate --ckpt $CKPT --split val</code></li>
+  </ol>
+  <div class="callout warn"><b>해석 주의</b> — 길이와 GT 추종에 관해:
+  <ul>
+    <li>rollout 길이 = (past 2 + cycles×12) / 50 s. 기본 16 cycle = 3.9초이며 <code>--num-cycles 50</code>이면 12초. 클립 끝까지가 아니라 원하는 만큼 생성하는 것.</li>
+    <li>rollout에서 생성이 GT와 점점 달라지는 것은 <b>정상</b>입니다. 모델은 과거 2 frame + heading만 조건으로 "그럴듯한 미래"를 생성하는 것이지 GT를 복사하는 것이 아니며, cycle마다 자기 출력 위에서 재계획하므로 GT 궤적과 자연히 갈라집니다. GT 추종 정확도는 window 모드(0.5초)로 판단하세요.</li>
+    <li>LAFAN1 클립 시작부(~2초)는 T-pose 캘리브레이션 잔여 구간이라 팔을 벌리고 서 있습니다. <code>--start 100</code> 이상에서 시작하면 정상 동작 구간입니다.</li>
+  </ul></div>
+</section>
+
+<section id="s7">
+  <h2><span class="num">7.</span>남은 한계</h2>
+  <ul>
+    <li>LAFAN1 동일 시퀀스의 subject 간 안무 중복이 train 내부에 존재 (val은 시퀀스 그룹 단위로 차단됨)</li>
+    <li>terrain 조건은 여전히 zero-scan (Phase A) — climb 데이터에 실제 height scan을 붙이는 Phase B가 다음 순서</li>
+    <li>receding-horizon 장기 rollout의 분포 이탈은 완화됐지만 근본 해결은 폐루프 tracker fine-tuning (다음 단계)</li>
+    <li>2-step 추론 품질 미검증 (검증 경로는 DDIM 50)</li>
+    <li>LAFAN1 학습분 포함 → 모델·결과물은 CC BY-NC-ND 비상업 조건 상속</li>
+  </ul>
+</section>
+
+<footer>
+  HoloSoma motion_gen · 2차 데이터 확장 · 2026-07-10 · 1차 문서: <a href="motion_generator_ko.html">motion_generator_ko.html</a>
+</footer>
+
+</div>
+</body>
+</html>
