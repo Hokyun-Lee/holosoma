@@ -129,3 +129,36 @@ class MotionConfig:
 
     # noise related
     noise_to_initial_pose: NoiseToInitialPoseConfig = field(default_factory=NoiseToInitialPoseConfig)
+
+
+@dataclass(frozen=True)
+class GeneratedMotionConfig(MotionConfig):
+    """Closed-loop generated-motion tracking (paper's fine-tuning stage).
+
+    ``motion_file`` acts as the *seed* motion: episode resets initialize the
+    robot from its frames (+noise) and seed the generator's conditioning
+    history; all references afterwards come from the frozen diffusion
+    generator, re-planned from the robot's measured state.
+    """
+
+    generator_checkpoint: str = ""
+    """Path to a trained holosoma.motion_gen checkpoint (frozen at load)."""
+
+    replan_interval_s: float = 0.5
+    """How often the generator is queried with the measured robot state
+    (paper: every 0.5 s = 2 Hz during fine-tuning)."""
+
+    denoise_steps: int = 2
+    """DDIM denoising steps per query (paper deployment/fine-tuning: 2)."""
+
+    use_ema: bool = True
+    """Use the EMA weights from the generator checkpoint."""
+
+    heading_mode: str = "random"
+    """Target-heading conditioning per episode: "random" world direction or
+    "current" (keep the facing direction at reset)."""
+
+    past_noise_std: float = 0.01
+    """Gaussian noise added to the measured past-state conditioning
+    (paper perturbs generator conditions during training; scale is an
+    implementation choice)."""

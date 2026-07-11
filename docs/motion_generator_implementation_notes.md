@@ -209,6 +209,42 @@ the remaining-70%/tuning territory). Policy checkpoint:
 `eval_agent.py --checkpoint ...`). Closed-loop generator-tracker
 fine-tuning remains future work (stage 5).
 
+## Stage 5: closed-loop generator-in-the-loop fine-tuning (2026-07-11, docs/motion_generator_closedloop_ko.html)
+
+Implements the paper's actual fine-tuning scheme: the frozen generator is
+called *inside* the RL loop — every 0.5 s (2 Hz) the measured robot state
+(past 2 frames at 50 Hz) of all 4096 envs is batch-fed to the generator
+(2-step DDIM; pre-measured quality 0.0475 m val MPJPE ≈ 50-step), producing
+the next 25-frame reference window that rewards/observations/termination
+consume. New `GeneratedMotionCommand` (managers/command/terms/wbt_gen.py)
+subclasses `MotionCommand`: seed-motion resets reused for initialization and
+conditioning history; name-based sim↔generator mappings (Isaac joint order ↔
+MuJoCo order, xyzw ↔ wxyz); per-episode random target heading; Gaussian
+conditioning noise (σ=0.01, paper's robustness idea, scale is a choice);
+reference velocities by finite difference; torso reference orientation
+reconstructed from root quat ⊗ waist z/x/y joint chain. Documented
+approximations: no per-body reference orientations/angular velocities (the
+generator representation has none, as in the paper) → the two rewards
+needing them are zero-weighted in the new `exp:g1-29dof-wbt-gen` preset.
+Config: `GeneratedMotionConfig` (config_types/command.py), presets in
+config_values/wbt/g1/{command_gen,experiment_gen}.py (+2-line registry).
+Smoke (64 envs, 10 iters) passed first try. Full run fine-tuned from the
+stage-4 tracker checkpoint (model_09000.pt) for 3,000 iterations (stopped at
+iter 12,048, converged/plateaued). Results: episode length dropped to 47
+immediately after the offline->closed-loop switch (distribution shift from
+fixed-clip to self-conditioned reference + random heading), recovered to
+full 500-step episodes within ~350 iterations. Final vs the stage-4 offline
+policy: relative body position reward 0.973 (offline 0.985, comparable);
+**global ref position reward 0.466 vs 0.334 (+40%)** — closed-loop
+re-conditions the reference on measured state every 0.5 s, so absolute
+drift cannot accumulate the way it does tracking a fixed clip; global
+orientation 0.477 (offline 0.486, comparable); body lin vel 0.848 (offline
+0.870, comparable). Generator-call overhead negligible (~21 iter/min,
+same as offline; 9.3 GB GPU). The resulting policy tracks generator output
+under a random per-episode heading command — effectively a heading-steerable
+locomotion controller. Checkpoint:
+`logs/WholeBodyTracking/20260711_122501-*/model_12000.pt`.
+
 ## Known limitations / not yet verified
 
 - Terrain conditioning is interface-only (zero scans): **not validated**; no

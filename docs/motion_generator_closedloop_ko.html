@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Motion Generator 5차: 폐루프 Generator-Tracker Fine-tuning</title>
+<style>
+:root {
+  --bg: #fbfbfd; --card: #ffffff; --text: #1d1d1f; --muted: #6e6e73;
+  --accent: #0071e3; --accent-soft: #eaf3fe; --border: #e5e5ea;
+  --code-bg: #f5f5f7; --warn-bg: #fff8e6; --warn-border: #f0d47a; --ok-bg: #e9f7ef;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+    "Helvetica Neue", Arial, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  background: var(--bg); color: var(--text); line-height: 1.7; font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+}
+.container { max-width: 800px; margin: 0 auto; padding: 0 24px 120px; }
+header.hero { padding: 96px 0 48px; text-align: center; }
+header.hero h1 { font-size: 38px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; }
+header.hero p.sub { margin-top: 16px; font-size: 19px; color: var(--muted); }
+header.hero .badge {
+  display: inline-block; margin-top: 20px; padding: 6px 14px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 600;
+}
+nav.toc {
+  position: sticky; top: 0; z-index: 10; background: rgba(251,251,253,0.92);
+  backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
+  padding: 10px 0; margin-bottom: 48px;
+}
+nav.toc .toc-inner { max-width: 800px; margin: 0 auto; padding: 0 24px;
+  display: flex; gap: 6px; overflow-x: auto; white-space: nowrap; }
+nav.toc a { color: var(--muted); text-decoration: none; font-size: 13px; font-weight: 500;
+  padding: 5px 10px; border-radius: 8px; flex: none; }
+nav.toc a:hover { color: var(--accent); background: var(--accent-soft); }
+section { margin-bottom: 72px; }
+h2 { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 8px; padding-top: 24px; }
+h2 .num { color: var(--accent); margin-right: 8px; }
+h3 { font-size: 19px; font-weight: 600; margin: 32px 0 12px; }
+p { margin: 12px 0; }
+p.lead { color: var(--muted); font-size: 17px; margin-bottom: 24px; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+ul, ol { margin: 12px 0 12px 24px; }
+li { margin: 6px 0; }
+code { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.88em; background: var(--code-bg); border-radius: 6px; padding: 2px 6px; }
+pre { background: #1d1d1f; color: #f5f5f7; border-radius: 14px; padding: 18px 20px;
+  overflow-x: auto; margin: 16px 0; font-size: 13.5px; line-height: 1.6; }
+pre code { background: none; color: inherit; padding: 0; font-size: inherit; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+  padding: 20px 24px; margin: 16px 0; }
+.callout { border-radius: 14px; padding: 14px 18px; margin: 16px 0; font-size: 15px; }
+.callout.warn { background: var(--warn-bg); border: 1px solid var(--warn-border); }
+.callout.ok { background: var(--ok-bg); border: 1px solid #b7e0c5; }
+.callout.info { background: var(--accent-soft); border: 1px solid #bcd9f7; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 14px; margin: 16px 0; }
+table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 14px; background: var(--card); }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { background: var(--code-bg); font-weight: 600; white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+.tag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.tag.measured { background: var(--ok-bg); color: #1b7a3d; }
+.tag.estimated { background: var(--warn-bg); color: #9a7b12; }
+.tag.nv { background: #f2f2f7; color: var(--muted); }
+.pipeline { display: flex; flex-direction: column; gap: 0; margin: 20px 0; }
+.pipe-step { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 14px 18px; }
+.pipe-step b { color: var(--accent); }
+.pipe-step .desc { color: var(--muted); font-size: 14px; }
+.pipe-arrow { text-align: center; color: var(--muted); font-size: 18px; padding: 2px 0; }
+footer { color: var(--muted); font-size: 13px; text-align: center; padding-top: 48px; border-top: 1px solid var(--border); }
+@media (max-width: 640px) { header.hero h1 { font-size: 28px; } body { font-size: 15px; } }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="container" style="padding-bottom:0">
+    <h1>5차: 폐루프 Generator-Tracker<br>Fine-tuning</h1>
+    <p class="sub">논문의 핵심 학습 방식 — frozen diffusion generator를 RL 학습 루프 안에서<br>로봇의 실측 상태로 0.5초마다 호출해, 실시간 생성 reference를 추종</p>
+    <span class="badge">exp:g1-29dof-wbt-gen · 2-step denoising · 이전: motion_generator_tracker_ko.html</span>
+  </div>
+</header>
+
+<nav class="toc">
+  <div class="toc-inner">
+    <a href="#s1">1 배경</a><a href="#s2">2 동작 구조</a><a href="#s3">3 구현</a><a href="#s4">4 실행 명령</a><a href="#s5">5 결과</a><a href="#s6">6 남은 한계</a>
+  </div>
+</nav>
+
+<div class="container">
+
+<section id="s1">
+  <h2><span class="num">1.</span>배경: 4차와의 차이</h2>
+  <p class="lead">4차에서는 generator가 <b>미리 만들어둔 고정 모션 파일</b>을 tracker가 추종했다(offline). 논문의 실제 방식은 다르다: fine-tuning 중 generator가 <b>학습 루프 안에서</b> 로봇의 현재 측정 상태(과거 2 frame)에 조건화되어 매 0.5초 reference를 새로 생성하고, tracker는 그 실시간 reference를 추종한다. 이렇게 해야 배포 시의 receding-horizon 동작과 학습 분포가 일치한다.</p>
+  <div class="table-wrap"><table>
+    <tr><th></th><th>4차 (offline)</th><th><b>5차 (closed-loop, 논문 방식)</b></th></tr>
+    <tr><td>Reference 출처</td><td>사전 생성된 고정 npz</td><td>학습 중 frozen generator 실시간 호출</td></tr>
+    <tr><td>Generator 조건</td><td>생성 시점의 GT 클립 상태</td><td><b>로봇의 실측 과거 2 frame</b> (자기 상태)</td></tr>
+    <tr><td>재계획</td><td>없음</td><td>매 0.5초 (2 Hz), 4096 env 동시 batch</td></tr>
+    <tr><td>분포 이탈</td><td>tracker가 밀리면 reference와 무관하게 벌어짐</td><td>reference가 로봇 상태를 따라와 회복 가능 — 배포와 동일</td></tr>
+  </table></div>
+</section>
+
+<section id="s2">
+  <h2><span class="num">2.</span>동작 구조 (매 policy step, 50 Hz)</h2>
+  <div class="pipeline">
+    <div class="pipe-step"><b>① 상태 이력 갱신</b><div class="desc">시뮬레이터에서 로봇 실측 상태(root pose, joint 29, tracked body 14 위치)를 generator feature(78차원)로 패킹해 최근 2 frame 이력 유지</div></div>
+    <div class="pipe-arrow">↓</div>
+    <div class="pipe-step"><b>② 0.5초마다 재계획 (2 Hz)</b><div class="desc">4096개 env의 이력을 한 번에 batch → 조건 노이즈 주입(σ=0.01, 논문의 robustness 학습) → frozen generator가 <b>2-step DDIM</b>으로 미래 25 frame 생성 → per-env reference window 교체</div></div>
+    <div class="pipe-arrow">↓</div>
+    <div class="pipe-step"><b>③ Reference 소비</b><div class="desc">기존 WBT reward/observation/termination이 읽던 인터페이스(joint/body/root/ref 상태)를 window에서 그대로 공급. torso 방향은 root 방향 + 허리 3관절 체인으로 해석적 복원. 속도는 유한차분</div></div>
+    <div class="pipe-arrow">↓</div>
+    <div class="pipe-step"><b>④ 에피소드 리셋</b><div class="desc">seed 모션(임의 WBT 클립)의 임의 frame + 노이즈로 로봇 초기화, 그 frame들로 이력 seed, per-env 랜덤 target heading 샘플</div></div>
+  </div>
+</section>
+
+<section id="s3">
+  <h2><span class="num">3.</span>구현</h2>
+  <div class="table-wrap"><table>
+    <tr><th>파일</th><th>내용</th></tr>
+    <tr><td><code>managers/command/terms/wbt_gen.py</code></td><td><b>신규</b> <code>GeneratedMotionCommand</code> — MotionCommand 상속, 상태 이력·재계획·window buffer·좌표/순서 변환(sim xyzw↔generator wxyz, Isaac joint 순서↔MuJoCo 순서를 이름 기반 매핑)</td></tr>
+    <tr><td><code>config_types/command.py</code></td><td><code>GeneratedMotionConfig</code> 추가 (generator_checkpoint, replan_interval_s=0.5, denoise_steps=2, heading_mode, past_noise_std)</td></tr>
+    <tr><td><code>config_values/wbt/g1/command_gen.py</code>, <code>experiment_gen.py</code></td><td><code>exp:g1-29dof-wbt-gen</code> preset — 기존 g1_29dof_wbt에서 command 교체 + 보상 2개 zero-weight</td></tr>
+    <tr><td><code>config_values/experiment.py</code></td><td>preset 등록 (+2줄)</td></tr>
+  </table></div>
+  <h3>문서화된 근사 (구현 선택)</h3>
+  <ul>
+    <li>generator representation에는 per-body 방향이 없음(논문과 동일) → <code>relative_body_orientation</code>·<code>global_body_ang_vel</code> 보상을 0으로 설정</li>
+    <li>reference torso 방향 = root 방향 ⊗ 허리 yaw(z)·roll(x)·pitch(y) 관절 회전 체인 (G1 XML 축 확인)</li>
+    <li>reference 속도 = window 유한차분 (직전 실측 frame을 시드로 사용)</li>
+    <li>terrain scan = 평지 zero (시뮬 지면이 평지이므로 terrain_4090 checkpoint에 대해 의미상 정확)</li>
+  </ul>
+</section>
+
+<section id="s4">
+  <h2><span class="num">4.</span>실행 명령</h2>
+<pre><code>PY=~/.holosoma_deps/miniconda3/envs/hssim/bin/python
+GENCKPT=logs/motion_gen/terrain_4090/checkpoints/final.pt
+SEED=data/motion_gen/processed_paperscale/lafan1_walk4_subject1.npz
+
+# smoke (64 envs, 10 iterations)
+$PY src/holosoma/holosoma/train_agent.py exp:g1-29dof-wbt-gen logger:disabled \
+    --training.num-envs 64 --algo.config.num-learning-iterations 10 \
+    --command.setup_terms.motion_command.params.motion_config.generator-checkpoint=$GENCKPT \
+    --command.setup_terms.motion_command.params.motion_config.motion-file=$SEED
+
+# 본 학습 (4096 envs)
+$PY src/holosoma/holosoma/train_agent.py exp:g1-29dof-wbt-gen logger:disabled \
+    --algo.config.save-interval 500 \
+    --command.setup_terms.motion_command.params.motion_config.generator-checkpoint=$GENCKPT \
+    --command.setup_terms.motion_command.params.motion_config.motion-file=$SEED
+
+# 학습된 정책 재생 (Isaac Sim 뷰어) — generator가 실시간으로 reference 생성
+$PY src/holosoma/holosoma/eval_agent.py --checkpoint logs/WholeBodyTracking/&lt;run&gt;/model_&lt;iter&gt;.pt</code></pre>
+  <div class="callout info">2-step DDIM 품질 사전 실측: val body MPJPE 0.0475 m — 50-step(0.0546)과 동급이라 논문의 2-step 설정을 그대로 사용.</div>
+</section>
+
+<section id="s5">
+  <h2><span class="num">5.</span>결과 <span class="tag measured">measured 2026-07-11</span></h2>
+  <h3>Fine-tuning 적응 곡선 (stage-4 tracker model_09000에서 재개, iteration 9,000 → 12,000)</h3>
+  <div class="table-wrap"><table>
+    <tr><th>지표</th><th>전환 직후 (@9,000)</th><th>+350 iter</th><th>+1,000 iter</th><th><b>+3,000 iter (@12,048, 최종)</b></th><th>4차 offline 대비</th></tr>
+    <tr><td><b>평균 에피소드 길이</b></td><td><b>47</b> (적응 충격)</td><td>494</td><td>494</td><td><b>493 / 500</b></td><td>동일 (만기 생존 회복·유지)</td></tr>
+    <tr><td>relative body position 보상</td><td>0.023</td><td>0.958</td><td>0.971</td><td><b>0.973</b></td><td>0.985와 동급</td></tr>
+    <tr><td><b>global ref position 보상</b></td><td>0.010</td><td>0.433</td><td>0.456</td><td><b>0.466</b></td><td><b>0.334보다 높음 (+40%)</b></td></tr>
+    <tr><td>global ref orientation 보상</td><td>0.010</td><td>0.456</td><td>0.470</td><td><b>0.477</b></td><td>0.486과 동급</td></tr>
+    <tr><td>body lin vel 보상</td><td>0.015</td><td>0.779</td><td>0.830</td><td><b>0.848</b></td><td>0.870 근접</td></tr>
+  </table></div>
+  <p>1,000→3,000 iteration 구간에서 모든 지표가 완만히 더 개선된 뒤 평탄화 — 폐루프 적응이 사실상 수렴.</p>
+  <h3>해석</h3>
+  <ul>
+    <li><b>적응 충격 → 빠른 회복</b>: 고정 클립 추종 정책이 "실시간 생성 reference + 랜덤 heading" 분포로 전환되자 에피소드 길이가 47로 급락했지만, <b>약 350 iteration(~17분) 만에 만기 생존으로 회복</b> — 폐루프 fine-tuning이 의도대로 동작.</li>
+    <li><b>global position 추종이 offline보다 개선</b>(0.334→0.456): 폐루프에서는 reference가 0.5초마다 로봇의 실측 상태에 재조건화되므로 절대 위치 드리프트가 누적될 수 없음 — 논문이 폐루프 fine-tuning을 하는 이유가 실측으로 확인된 것.</li>
+    <li><b>Generator 호출 오버헤드 무시 가능</b>: ~20.9 iter/분 (4차 offline 21 iter/분과 동일) — 4096-env batch 2-step DDIM 재계획이 학습 속도에 영향 없음. GPU 9.3 GB.</li>
+    <li>정책은 이제 임의의 랜덤 heading 명령에 대해 generator가 만드는 모션을 추종 — 사실상 <b>heading 조종 가능한 locomotion 컨트롤러</b>의 원형.</li>
+  </ul>
+  <h3>정책 확인</h3>
+<pre><code># 폐루프 그대로 재생 (generator가 실시간 reference 생성, Isaac Sim 뷰어)
+~/.holosoma_deps/miniconda3/envs/hssim/bin/python src/holosoma/holosoma/eval_agent.py \
+    --checkpoint logs/WholeBodyTracking/20260711_122501-g1_29dof_wbt_gen_manager-locomotion/model_12000.pt</code></pre>
+</section>
+
+<section id="s6">
+  <h2><span class="num">6.</span>남은 한계 / 다음 단계</h2>
+  <ul>
+    <li>per-body reference 방향·각속도 보상은 zero-weight (generator representation에 body 방향 없음 — 논문과 동일한 제약)</li>
+    <li>조건 노이즈 σ=0.01은 구현 선택 — 논문은 노이즈 주입 사실만 명시, 크기는 비공개</li>
+    <li>terrain은 평지(zero scan) — 시뮬레이션에 박스 지형을 세우고 실제 scan을 물리면 terrain-aware 폐루프로 확장 가능</li>
+    <li>다음 단계: 충분한 iteration까지 학습 → ONNX/TensorRT export(2-step generator + tracker) → MuJoCo sim-to-sim → 실기 G1</li>
+  </ul>
+</section>
+
+<footer>
+  HoloSoma motion_gen · 5차 폐루프 fine-tuning · 2026-07-11 · 이전: <a href="motion_generator_tracker_ko.html">4차 tracker</a> · <a href="motion_generator_terrain_ko.html">3차 terrain</a> · <a href="motion_generator_scaleup_ko.html">2차 확장</a> · <a href="motion_generator_ko.html">1차</a>
+</footer>
+
+</div>
+</body>
+</html>
