@@ -188,6 +188,27 @@ terrain state, so scan conditioning mainly improves physical plausibility
 here; its steering value should appear in receding-horizon deployment over
 unseen terrain layouts (post-tracker integration).
 
+## Stage 4: RL motion tracker on generated motion (2026-07-11, docs/motion_generator_tracker_ko.html)
+
+The generated-motion export path was validated against the existing HoloSoma
+WBT RL task with **zero task-code changes**: a 20 s receding-horizon rollout
+(walk4 val clip start, terrain_4090 generator, deterministic DDIM 50) was
+converted to the full WBT schema and fed to `exp:g1-29dof-wbt` via the
+motion_file override. Smoke run (64 envs, 10 PPO iterations, Isaac Sim
+headless, logger:disabled) passed — motion loads, PPO trains, checkpoints
+and per-checkpoint ONNX exports are produced
+(`logs/WholeBodyTracking/20260711_021527-*/model_00009.pt/.onnx`).
+A full-scale run (4096 envs, save_interval 500) was intentionally stopped at
+30% (9,000/30,000 iterations, ~21 iter/min measured) per user request.
+Results at iter 9,012: average episode length 88 -> **500 steps (full 10 s
+episodes, no falls)**; relative body position/orientation rewards
+0.985/0.908 (max 1.0); body lin/ang velocity 0.870/0.805; global ref
+position/orientation 0.334/0.486 still rising (absolute-drift tightening is
+the remaining-70%/tuning territory). Policy checkpoint:
+`logs/WholeBodyTracking/20260711_021742-*/model_09000.pt` (replayable via
+`eval_agent.py --checkpoint ...`). Closed-loop generator-tracker
+fine-tuning remains future work (stage 5).
+
 ## Known limitations / not yet verified
 
 - Terrain conditioning is interface-only (zero scans): **not validated**; no
