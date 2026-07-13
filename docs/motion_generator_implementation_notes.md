@@ -615,14 +615,114 @@ tracker closed-loop against this frozen generator. Real collision/contact and
 obstacle crossing must be measured in simulation rather than inferred from
 the Stage-8 body-origin proxy.
 
+## Stage 9: terrain closed-loop PPO wiring and gate (2026-07-13, docs/motion_generator_stage9_ko.html)
+
+`exp:g1-29dof-wbt-gen-terrain` closes the intended loop without changing the
+Stage-5 flat preset: each 50 Hz policy step packs measured simulator state and
+the shared `(N, 289)` local terrain scan, non-bootstrap replans require two
+measured history frames, and every 25 control steps the frozen robust+FK
+generator produces a 25-frame reference with 2-step DDIM. The tracker consumes
+five-frame proprioception plus the current reference/scan; only tracker
+actor/critic parameters enter PPO. A runtime check fails if any generator
+parameter is trainable. Bootstrap uses the seed clip's two frames once; all
+later condition-history frames are simulator measurements.
+
+Curriculum outcome state is schema v3 with
+`progress_semantics="target_heading_signed_v1"`. Each episode captures its
+start XY and normalized target heading, then gates crossing on the maximum
+non-negative signed projection along that fixed heading. Success requires a
+comparable complete episode, no fall/non-timeout termination, at least 90% of
+the 500-step timeout, and at least 1.5 m signed progress. Lateral/backward
+travel therefore cannot count as a crossing. Version-2 radial-progress state
+cannot be converted: migration preserves durable levels/streaks and resets
+crossing/progress state. These gates, thresholds, ten levels, and obstacle
+geometry are implementation choices, not published paper values.
+
+The 64-env Isaac gate at
+`logs/WholeBodyTracking/20260713_100144-g1_29dof_wbt_gen_terrain_manager-locomotion/model_12001.pt`
+(SHA-256
+`d4fe42db0349d630fb4ec9d58979cc37867708fb3d68d2913e216c177264ad41`)
+completed two PPO iterations, crossed a non-bootstrap replan boundary, loaded
+the optimizer, expanded the Stage-5 actor/critic inputs from 154/286 to
+702/834, preserved equal 16-env quotas for flat/box/stair/hurdle, saved v3
+curriculum state, and logged zero trainable generator parameters. This is a
+wiring/checkpoint-migration gate, not evidence of recovery or obstacle
+performance.
+
+The 1,024-env, 3,000-iteration production run remains in progress at
+`logs/WholeBodyTracking/20260713_100222-g1_29dof_wbt_gen_terrain_manager-locomotion/`.
+Verified intermediate snapshots are `model_12500.pt` (SHA-256
+`12aaa8ac7d21497551f5e8d7b2e0d19a878c3d482ceef293a1a7ec93ab9f17f3`)
+and `model_13000.pt` (SHA-256
+`dcdb5c532f9f65f2cc8af39eedfcc9994b160aaee77694c0b2516afb949059e3`).
+They establish checkpoint creation only. Production completion, convergence,
+episode-length recovery, fall/contact reduction, and increased obstacle
+success remain pending a completed run and the common Stage-10 protocol.
+
+## Stage 10: ablation and evaluation infrastructure (implementation-only, docs/motion_generator_stage10_ko.html)
+
+Six current-config experiment presets define the reduced comparison from the
+same Stage-5 BASE `model_12000.pt`: A fixed generated reference with tracker
+terrain/history and heading reward; B terrain-blind online generator with the
+legacy tracker and no heading reward/update; C full terrain architecture with
+no fine-tuning; D full terrain fine-tuning; E generator terrain only (tracker
+scan removed); and F full terrain setup with heading-reward weight zero. A, D,
+E, and F are planned for the same 501 logged-update budget; B/C use zero new
+updates. Only D's in-progress `model_12500.pt` snapshot exists so far. A/E/F
+training and all A-F common simulator evaluation are pending.
+
+A is intentionally based on the Stage-4 fixed generated-reference NPZ. Its
+heading is inferred from root XY velocity, then a 0.5 s displacement, then
+root yaw; the trajectory is not randomly yaw-rotated. Rotating only the
+heading would make positions/orientations/velocities inconsistent, while a
+correct augmentation must rotate the entire trajectory. A therefore does not
+share B-F's random-heading command distribution, limiting especially the
+interpretation of heading comparisons.
+
+`evaluate_wbt_terrain.py` supplies a shared fixed-difficulty protocol and
+records schema-versioned JSON, summary CSV, and per-episode CSV with checkpoint
+paths/hashes and raw numerators/denominators. The requested episode total must
+divide evenly by the number of active terrain types; the evaluator assigns an
+exact equal quota (default 100 episodes -> 25 each for flat/box/stair/hurdle)
+and excludes vectorized-step overflow episodes from every denominator. It
+disables adaptive curriculum/env-state restore, uses the episode-start target
+heading for signed progress, and records success/fall/timeout/bad-tracking,
+heading/tracking error, contact, episode length, and body-origin penetration
+proxies. An opt-in `rough` type supports unseen-terrain evaluation without
+changing the production four-type training distribution; fixed 0.30/0.60 m
+obstacle overrides are evaluation choices and have not been run.
+
+The evaluator can save the first threshold-qualified tracker-correction
+exemplar as compressed NPZ plus JSON metadata. Qualification only means that
+the reference body-origin penetration proxy is at least 0.02 m and the
+reference-minus-robot proxy improves by at least 0.01 m. It is neither
+collision-shape/mesh penetration nor causal evidence that the policy
+intentionally corrected a bad reference. If no frame qualifies, it records
+`found=false` and creates no NPZ. No common evaluation has run, so no exemplar
+result exists yet.
+
+`benchmark_inference_latency.py` implements warm-up and CUDA-event/host-clock
+timing for batch-one 2-step PyTorch generator inference, normalized tracker
+actor inference, and their sequential module calls, including checkpoint
+hashes and mean/median/p95/min/max/std output. Its scope explicitly excludes
+Isaac stepping, terrain raycasts, observation/reference assembly, transfers,
+ONNX/TensorRT, and a functional generator-to-tracker closed loop; sequential
+timing is only two modules called on one CUDA stream. No RTX 4090 benchmark has
+run, so module-only GPU latency and deployment/end-to-end latency remain
+pending. The A-F presets, quota/evaluator/serializer, rough opt-in, exemplar
+writer, and latency helpers passed their documented CPU tests; those tests do
+not constitute simulator evaluation or GPU timing.
+
 ## Known limitations / not yet verified
 
-- Terrain-aware closed-loop dataflow and PPO startup are validated, but no
-  terrain policy has been trained to convergence. The balanced curriculum and
-  its metrics are active, but positive obstacle success improvement is not yet
-  measured.
+- Terrain-aware closed-loop dataflow and PPO startup are validated, and the
+  1,024-env production run has produced intermediate checkpoints while still
+  running. It has not been completed or shown to converge; common-protocol
+  episode recovery, fall/contact reduction, and positive obstacle-success
+  improvement remain unmeasured.
 - 2-step DDIM quality is validated offline and used in closed-loop training;
-  deployment latency/export remains unverified.
+  a module-only PyTorch CUDA benchmark exists but has not been run. Simulator
+  end-to-end, ONNX/TensorRT, and deployment latency/export remain unverified.
 - Paperscale generation reaches 0.0546 m full-val MPJPE (terrain checkpoint
   0.0393 on its earlier fixed validation batch). Stage-8 fixed-history stress
   tests show a real terrain-conditioned response, but foot/knee direction and
@@ -636,7 +736,8 @@ the Stage-8 body-origin proxy.
   checkpoint. The generator uses only standard ops
   (Linear/LayerNorm/TransformerEncoder/sinusoidal embeddings), no known
   blockers, but unverified.
-- Terrain closed-loop convergence/evaluation, MuJoCo sim-to-sim, and
+- Stage-10 A/E/F training, all A-F common evaluation, 30/60 cm and unseen-rough
+  evaluation, terrain closed-loop convergence, MuJoCo sim-to-sim, and
   sim-to-real remain.
 
 ## Technical risks for the next stage
