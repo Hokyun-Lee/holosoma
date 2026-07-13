@@ -1068,6 +1068,76 @@ PYTHONPATH=src/holosoma ~/.holosoma_deps/miniconda3/envs/hssim/bin/python \
   --output-prefix logs/terrain_evaluations/stage10/fine_tune_seed_replication_v1/report/stage10_fine_tune_seed_replication_v1
 ```
 
+### Stage-9 contact-penalty pilot
+
+As an exploratory follow-up to the still-open combined fall/collision
+criterion, D fair was fine-tuned from the same Stage-5 BASE and optimizer for
+501 updates at training seed 42 with only the undesired-contact reward weight
+changed from `-0.1` to `-0.5` or `-1.0`. The robust+FK generator remained
+frozen with zero trainable parameters. The direct-online W&B runs are
+[`nuu4alsi`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/nuu4alsi)
+and [`j59hkr6v`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/j59hkr6v),
+both `finished`.
+
+Each pilot checkpoint was evaluated at evaluation seeds 42/43/44 for 100
+common-L1 episodes per seed with exact 25/25/25/25 terrain quotas. Raw pooling
+over the resulting 300 episodes gives:
+
+| contact weight | success | fall | episode any-contact | contact-step raw | success and no-contact |
+|---:|---:|---:|---:|---:|---:|
+| -0.1 baseline | 167/300 = 55.67% | 51/300 = 17.00% | 242/300 = 80.67% | 2,802/123,953 = 2.2605% | 53/300 = 17.67% |
+| -0.5 pilot | 171/300 = 57.00% | 81/300 = 27.00% | 137/300 = 45.67% | 511/125,981 = 0.4056% | 113/300 = 37.67% |
+| -1.0 pilot | 184/300 = 61.33% | 55/300 = 18.33% | 166/300 = 55.33% | 1,164/127,341 = 0.9141% | 118/300 = 39.33% |
+
+`Success and no-contact` is an exploratory conjunction and does not redefine
+the evaluator's registered success metric. Both stronger penalties reduce
+contact and improve this conjunction, but neither lowers falls relative to the
+`-0.1` baseline. The combined fall/collision checklist therefore remains open.
+This is one downstream training seed, and equal evaluation seeds are the same
+seeded protocol rather than episode-level CRN, so it is not a definitive reward
+selection study.
+
+The `-0.5`/`-1.0` tracker checkpoint SHA-256 values are
+`a0c50466a049b0013897d6fa0feca3e6c223567e2cf1918d811a726144124426`
+and `6ed89c2cf251c3703f9c9232e123f30c7ce4ae46cb626307a961fbafc8b6fb4c`.
+Their aggregate report JSON SHA-256 values are
+`79129cd2af5629c281b4e00156ab3a02c6473a7495673f3a20e7f5b2d325b6aa`
+and `a6249f91ea62831894579cbe1e782137e4b19d72c76fd5acb5fa45589ae4e901`.
+The [W&B evaluation run](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/9yp6ppsx)
+and [24-file artifact v0](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/artifacts/evaluation/stage9-contact-penalty-pilot-seed42-results/v0)
+were remotely verified; the custom artifact file-set SHA-256 is
+`c5d88ca8913d80320d1f99f5bc94cc609e92fe4f8bcab0c5ddef9c18b20ff691`.
+
+The `-1.0` setting was then repeated at downstream training seed 43 within the
+09:00 KST work window. Its direct-online [W&B run
+`zknco40j`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/zknco40j)
+finished normally. Checkpoint SHA-256 is
+`b3a5c7b1f21988187b94cd71f6c6240694b513515fa1954389eef4193f1da3a0`;
+the stored iteration is 12,500 and all 98 recursive tensors are finite. Three
+more common-L1 evaluations completed exact 25/25/25/25 quotas:
+
+| training seed 43 | success | fall | episode any-contact | contact-step raw | success and no-contact |
+|---|---:|---:|---:|---:|---:|
+| -0.1 baseline | 177/300 = 59.00% | 82/300 = 27.33% | 228/300 = 76.00% | 1,403/125,211 = 1.1205% | 60/300 = 20.00% |
+| -1.0 pilot | 173/300 = 57.67% | 48/300 = 16.00% | 139/300 = 46.33% | 564/128,139 = 0.4401% | 112/300 = 37.33% |
+
+Across training seeds 42 and 43, raw pooling gives baseline versus `-1.0`:
+success 344/600 (57.33%) versus 357/600 (59.50%), falls 133/600
+(22.17%) versus 103/600 (17.17%), episode contact 470/600 (78.33%)
+versus 305/600 (50.83%), contact steps 4,205/249,164 (1.6876%) versus
+1,728/255,480 (0.6764%), and clean success 113/600 (18.83%) versus 230/600
+(38.33%). The fall delta nevertheless changes sign by training seed: +1.33 pp
+at seed 42 and -11.33 pp at seed 43. This shared-BASE downstream `n=2` result
+is encouraging but does not close the combined fall/collision criterion.
+Seed-43 aggregate JSON SHA-256 is
+`f5bab9ac02a322794300e7264d1c7d6de4b772afa46d275dd1f257193271fa2b`.
+The combined [W&B evaluation run
+`4lqmzjts`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/4lqmzjts)
+and [36-file artifact v0](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/artifacts/evaluation/stage9-contact-penalty-pilot-trainseeds42-43-results/v0)
+were remotely verified. The custom manifest has 91,446,104 bytes and file-set
+SHA-256
+`866d98814ba50d8fc458af470be0ceca23250e4e222bdfeef2b0368197fd02d3`.
+
 The older 30-source/3,000-episode pool repeats ten training-seed-42 Stage-10
 identities across evaluation seeds. This new 27-source/2,700-episode report is
 the three-policy, three-fine-tune-seed, three-evaluation-seed common-L1 grid and

@@ -263,6 +263,57 @@ success = non-initial complete episode
 </section>
 
 <section>
+  <h2>Contact-penalty pilot <small>(탐색적·체크박스 미완료)</small></h2>
+  <p>D-fair의 contact reward weight <code>-0.1</code>만 <code>-0.5</code>/<code>-1.0</code>으로 바꿔 같은 Stage-5 BASE와 optimizer, frozen robust+FK generator에서 각각 1,024 env·501 PPO update를 실행했다. 두 run 모두 training seed 42이고 generator trainable parameter는 0이었다. <a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/nuu4alsi">weight −0.5 W&amp;B</a>와 <a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/j59hkr6v">weight −1.0 W&amp;B</a>는 direct-online <code>finished</code> 상태다.</p>
+  <p>각 checkpoint를 common L1에서 evaluation seed 42/43/44, seed당 100 episode(flat/box/stair/hurdle 25개씩)로 평가했다. 아래 값은 세 evaluator의 raw numerator/denominator를 합친 300-episode 결과다. <code>clean success</code>는 평가 후 추가로 계산한 <code>success AND no undesired-contact episode</code>이며 기본 success를 대체하지 않는다.</p>
+  <div class="table"><table>
+    <tr><th>Contact weight</th><th>Success</th><th>Fall</th><th>Episode any-contact</th><th>Contact-step raw</th><th>Clean success</th></tr>
+    <tr><td>−0.1, 기존 D fair</td><td>167/300 (55.67%)</td><td><b>51/300 (17.00%)</b></td><td>242/300 (80.67%)</td><td>2,802/123,953 (2.2605%)</td><td>53/300 (17.67%)</td></tr>
+    <tr><td>−0.5 pilot</td><td>171/300 (57.00%)</td><td>81/300 (27.00%)</td><td><b>137/300 (45.67%)</b></td><td><b>511/125,981 (0.4056%)</b></td><td>113/300 (37.67%)</td></tr>
+    <tr><td>−1.0 pilot</td><td><b>184/300 (61.33%)</b></td><td>55/300 (18.33%)</td><td>166/300 (55.33%)</td><td>1,164/127,341 (0.9141%)</td><td><b>118/300 (39.33%)</b></td></tr>
+  </table></div>
+  <div class="callout warn"><b>판정</b>: 두 pilot 모두 episode/step contact와 clean success를 개선했지만, fall은 기존 −0.1의 17.00%보다 −0.5에서 27.00%, −1.0에서 18.33%로 높았다. 따라서 <b>fall과 collision의 동시 감소는 아직 입증되지 않았고 체크박스를 완료하지 않는다.</b> 학습 seed가 하나뿐이며 같은 evaluation seed도 episode-level CRN이 아니므로 weight 선택의 확정 근거도 아니다.</div>
+  <p>−0.5/−1.0 checkpoint SHA-256은 각각 <code>a0c50466a049b0013897d6fa0feca3e6c223567e2cf1918d811a726144124426</code>, <code>6ed89c2cf251c3703f9c9232e123f30c7ce4ae46cb626307a961fbafc8b6fb4c</code>다. 평가 report는 <a href="../logs/terrain_evaluations/stage9/contact_penalty_pilot_v1/weight_m0p5/aggregate/report.md">−0.5</a>와 <a href="../logs/terrain_evaluations/stage9/contact_penalty_pilot_v1/weight_m1p0/aggregate/report.md">−1.0</a>에 있으며, JSON SHA-256은 <code>79129cd2af5629c281b4e00156ab3a02c6473a7495673f3a20e7f5b2d325b6aa</code>/<code>a6249f91ea62831894579cbe1e782137e4b19d72c76fd5acb5fa45589ae4e901</code>다. 원격 결과는 <a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/9yp6ppsx">W&amp;B evaluation run</a>과 <a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/artifacts/evaluation/stage9-contact-penalty-pilot-seed42-results/v0">24-file artifact v0</a>에 게시했고 file-set SHA-256은 <code>c5d88ca8913d80320d1f99f5bc94cc609e92fe4f8bcab0c5ddef9c18b20ff691</code>이다.</p>
+
+  <h3>−1.0 training-seed-43 반복</h3>
+  <p>09:00 전 남은 시간에 −1.0 설정을 training seed 43으로 독립 fine-tune하고 같은 evaluation seed 42/43/44 protocol로 300 episode를 추가했다. <a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/zknco40j">training W&amp;B run</a>은 <code>finished</code>이며, checkpoint는 iter 12,500, 98 tensor/3,377,569 element 전부 finite, SHA-256 <code>b3a5c7b1f21988187b94cd71f6c6240694b513515fa1954389eef4193f1da3a0</code>이다. 세 evaluator는 모두 <code>complete=true</code>, 각 terrain 25 episode를 만족했다.</p>
+  <div class="table"><table>
+    <tr><th>Training seed 43</th><th>Success</th><th>Fall</th><th>Episode any-contact</th><th>Contact-step raw</th><th>Clean success</th></tr>
+    <tr><td>−0.1 D fair</td><td>177/300 (59.00%)</td><td>82/300 (27.33%)</td><td>228/300 (76.00%)</td><td>1,403/125,211 (1.1205%)</td><td>60/300 (20.00%)</td></tr>
+    <tr><td>−1.0 pilot</td><td>173/300 (57.67%)</td><td>48/300 (16.00%)</td><td>139/300 (46.33%)</td><td>564/128,139 (0.4401%)</td><td>112/300 (37.33%)</td></tr>
+  </table></div>
+  <div class="table"><table>
+    <tr><th>Training seed 42+43 raw pool</th><th>Success</th><th>Fall</th><th>Episode any-contact</th><th>Contact-step raw</th><th>Clean success</th></tr>
+    <tr><td>−0.1 D fair</td><td>344/600 (57.33%)</td><td>133/600 (22.17%)</td><td>470/600 (78.33%)</td><td>4,205/249,164 (1.6876%)</td><td>113/600 (18.83%)</td></tr>
+    <tr><td>−1.0 pilot</td><td>357/600 (59.50%)</td><td>103/600 (17.17%)</td><td>305/600 (50.83%)</td><td>1,728/255,480 (0.6764%)</td><td>230/600 (38.33%)</td></tr>
+  </table></div>
+  <div class="callout warn"><b>반복 후 판정</b>: 두-seed raw pool에서는 −1.0이 success, fall, contact, clean success를 모두 개선했다. 그러나 training-seed별 fall delta는 seed 42에서 <code>+1.33%p</code>, seed 43에서 <code>−11.33%p</code>로 부호가 다르다. 반복 단위 <code>n=2</code>이고 같은 BASE·optimizer·upstream pipeline을 공유하므로 이 pool을 확정적 reward 선택이나 완료 증거로 쓰지 않는다. <b>fall/collision 감소 체크박스는 계속 비워 둔다.</b></div>
+  <p>Seed-43 aggregate <a href="../logs/terrain_evaluations/stage9/contact_penalty_pilot_v1/weight_m1p0/train_seed_43/aggregate/report.md">report</a> JSON SHA-256은 <code>f5bab9ac02a322794300e7264d1c7d6de4b772afa46d275dd1f257193271fa2b</code>다. 두 training seed 결과는 <a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/4lqmzjts">W&amp;B evaluation run</a>과 <a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/artifacts/evaluation/stage9-contact-penalty-pilot-trainseeds42-43-results/v0">36-file artifact v0</a>에도 게시했다. 원격 manifest 36개 파일/91,446,104 byte를 검증했고 file-set SHA-256은 <code>866d98814ba50d8fc458af470be0ceca23250e4e222bdfeef2b0368197fd02d3</code>다.</p>
+<pre><code>PY=~/.holosoma_deps/miniconda3/envs/hssim/bin/python
+BASE=logs/WholeBodyTracking/20260711_122501-g1_29dof_wbt_gen_manager-locomotion/model_12000.pt
+GEN=logs/motion_gen/terrain_robust_fk_4090/checkpoints/final.pt
+MOTION=data/motion_gen/processed_paperscale/lafan1_walk4_subject1.npz
+
+$PY src/holosoma/holosoma/train_agent.py \
+  exp:g1-29dof-wbt-ablation-d-full-finetune logger:wandb \
+  --training.num-envs 1024 --training.seed $TRAIN_SEED \
+  --training.checkpoint $BASE --algo.config.num-learning-iterations 501 \
+  --algo.config.save-interval 500 --algo.config.load-optimizer True \
+  --reward.terms.undesired-contacts.weight $CONTACT_WEIGHT \
+  --logger.mode online --logger.group stage9_contact_penalty_pilot \
+  --logger.video.enabled False \
+  --command.setup-terms.motion-command.params.motion-config.generator-checkpoint $GEN \
+  --command.setup-terms.motion-command.params.motion-config.motion-file $MOTION
+
+$PY src/holosoma/holosoma/evaluate_wbt_terrain.py \
+  --checkpoint $CHECKPOINT --experiment-preset g1_29dof_wbt_ablation_d_full_finetune \
+  --variant $VARIANT --scenario-label common_l1_contact_penalty_pilot \
+  --episode-count 100 --fixed-terrain-level 1 --seed $EVAL_SEED \
+  --generator-checkpoint $GEN --motion-file $MOTION \
+  --training.num-envs 64 --output-prefix $OUTPUT_PREFIX</code></pre>
+</section>
+
+<section>
   <h2>실행 명령과 검증</h2>
 <pre><code>PY=~/.holosoma_deps/miniconda3/envs/hssim/bin/python
 BASE=logs/WholeBodyTracking/20260711_122501-g1_29dof_wbt_gen_manager-locomotion/model_12000.pt
