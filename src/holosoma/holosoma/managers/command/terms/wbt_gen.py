@@ -40,6 +40,7 @@ from holosoma.managers.command.terms.wbt import MotionCommand
 from holosoma.managers.reward.terms.heading import velocity_heading_error_rad, velocity_heading_reward
 from holosoma.motion_gen.features import quat_conjugate, quat_mul, quat_normalize, quat_yaw
 from holosoma.motion_gen.sampling import MotionGenerator, MotionGeneratorInput
+from holosoma.motion_gen.terrain import ScanGrid, interpolate_scan_heights
 from holosoma.utils.rotations import quat_apply, quat_inverse, yaw_quat
 from holosoma.utils.rotations import quat_mul as quat_mul_sim
 
@@ -58,6 +59,53 @@ def _axis_angle_quat_wxyz(axis: tuple[float, float, float], angle: torch.Tensor)
     return torch.stack(
         [torch.cos(half), axis[0] * s, axis[1] * s, axis[2] * s], dim=-1
     )
+
+
+def _validate_nonnegative_finite(value: float, name: str) -> None:
+    """Validate an unpublished metric threshold exposed through config."""
+    if not math.isfinite(value) or value < 0.0:
+        raise ValueError(f"{name} must be finite and non-negative, got {value}")
+
+
+def _world_xy_to_scan_local(
+    world_xy: torch.Tensor,
+    anchor_xy: torch.Tensor,
+    anchor_yaw: torch.Tensor,
+) -> torch.Tensor:
+    """Express world XY points in the cached heading-aligned scan frame."""
+    delta = world_xy - anchor_xy.unsqueeze(1)
+    c = torch.cos(anchor_yaw).unsqueeze(1)
+    s = torch.sin(anchor_yaw).unsqueeze(1)
+    local_x = c * delta[..., 0] + s * delta[..., 1]
+    local_y = -s * delta[..., 0] + c * delta[..., 1]
+    return torch.stack([local_x, local_y], dim=-1)
+
+
+def _body_origin_penetration_proxy(
+    scan: torch.Tensor,
+    body_pos_w: torch.Tensor,
+    anchor_xy: torch.Tensor,
+    anchor_yaw: torch.Tensor,
+    grid: ScanGrid,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return scan-derived body-origin penetration and validity per body.
+
+    This compares each body *origin* z against bilinearly interpolated terrain
+    height.  It is deliberately named a proxy: rigid-body geometry is not
+    queried, so these values are neither collision distances nor contact state.
+    """
+    body_xy_local = _world_xy_to_scan_local(body_pos_w[..., :2], anchor_xy, anchor_yaw)
+    terrain_height, valid = interpolate_scan_heights(scan, body_xy_local, grid)
+    penetration = (terrain_height - body_pos_w[..., 2]).clamp_min(0.0)
+    return penetration * valid, valid
+
+
+def _masked_mean_max(values: torch.Tensor, valid: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reduce per-body diagnostics without treating out-of-scan points as zero samples."""
+    count = valid.sum(dim=-1)
+    mean = (values * valid).sum(dim=-1) / count.clamp_min(1)
+    maximum = values.masked_fill(~valid, 0.0).max(dim=-1).values
+    return torch.where(count > 0, mean, 0.0), torch.where(count > 0, maximum, 0.0)
 
 
 class GeneratedMotionCommand(MotionCommand):
@@ -82,6 +130,14 @@ class GeneratedMotionCommand(MotionCommand):
             raise ValueError("heading_reward_epsilon must be positive")
         if self.gen_cfg.heading_error_speed_threshold < 0.0:
             raise ValueError("heading_error_speed_threshold must be non-negative")
+        _validate_nonnegative_finite(
+            self.gen_cfg.body_origin_penetration_threshold_m,
+            "body_origin_penetration_threshold_m",
+        )
+        _validate_nonnegative_finite(
+            self.gen_cfg.body_origin_correction_min_improvement_m,
+            "body_origin_correction_min_improvement_m",
+        )
         self.generator = MotionGenerator.from_checkpoint(
             self.gen_cfg.generator_checkpoint, device=str(self.device), use_ema=self.gen_cfg.use_ema
         )
@@ -111,6 +167,14 @@ class GeneratedMotionCommand(MotionCommand):
                 )
             self._terrain_state = self._env.terrain_manager.get_state("locomotion_terrain")
             self._terrain_state.configure_local_height_scan(gen_data_cfg.scan_grid)
+            self._scan_grid = gen_data_cfg.scan_grid
+
+        # Reuse the active reward term rather than duplicating its body regex,
+        # force threshold, or contact-history convention.  This diagnostic is
+        # optional so a reward ablation that removes the term still runs.
+        self._undesired_contacts_term = None
+        if "undesired_contacts" in self._env.reward_manager.active_terms:
+            self._undesired_contacts_term = self._env.reward_manager.get_term("undesired_contacts")
 
         env_fps = 1.0 / self._env.dt
         if abs(env_fps - gen_data_cfg.fps) > 1e-3:
@@ -168,9 +232,8 @@ class GeneratedMotionCommand(MotionCommand):
         self._history = torch.zeros(N, self._past, self._feat_dim, device=dev)
         # A reset initially seeds ``_history`` from a motion clip so the
         # generator can provide a reference immediately.  Track measured
-        # simulator frames separately: the first non-bootstrap replan must
-        # wait until every history slot contains a distinct policy-step
-        # measurement, and subsequent replans are scheduled from that point.
+        # simulator frames separately so strict presets can prove that every
+        # subsequent 2 Hz replan uses actual policy-step measurements.
         self._measured_history_valid_count = torch.zeros(N, dtype=torch.long, device=dev)
         self._has_closed_loop_replan = torch.zeros(N, dtype=torch.bool, device=dev)
         self._bootstrap_replan_count = torch.zeros(N, dtype=torch.long, device=dev)
@@ -187,6 +250,7 @@ class GeneratedMotionCommand(MotionCommand):
             f"(step {self.generator.checkpoint_step}), replan every {self._replan_steps} steps, "
             f"{self.gen_cfg.denoise_steps}-step denoising, heading={self.gen_cfg.heading_mode}, "
             f"terrain={'sim_scan' if self._use_sim_terrain_scan else 'stage5_flat_zeros'}, "
+            f"measured_history_guard={self.gen_cfg.require_fully_measured_history}, "
             "trainable generator params=0"
         )
 
@@ -308,11 +372,12 @@ class GeneratedMotionCommand(MotionCommand):
     def _replan(self, env_ids: torch.Tensor, *, bootstrap: bool) -> None:
         """Generate a window and update per-environment replan instrumentation.
 
-        Bootstrap calls are allowed to consume the reset seed frames.  Every
-        other call is guarded so a generated window can never silently mix a
-        seed frame with a measured simulator frame.
+        Bootstrap calls are allowed to consume the reset seed frames.  A
+        strict preset guards every other call against silently mixing a seed
+        frame with a measured simulator frame.  The guard never changes the
+        fixed 2 Hz scheduling clock.
         """
-        if not bootstrap:
+        if not bootstrap and self.gen_cfg.require_fully_measured_history:
             valid = self._measured_history_valid_count[env_ids] >= self._past
             torch._assert_async(
                 valid.all(),
@@ -347,11 +412,7 @@ class GeneratedMotionCommand(MotionCommand):
         self._measured_history_valid_count.add_(1).clamp_(max=self._past)
 
         self.window_idx += 1
-        first_closed_loop_due = (~self._has_closed_loop_replan) & (
-            self._measured_history_valid_count >= self._past
-        )
-        periodic_due = self._has_closed_loop_replan & (self.window_idx >= self._replan_steps)
-        due = torch.where(first_closed_loop_due | periodic_due)[0]
+        due = torch.where(self.window_idx >= self._replan_steps)[0]
         if due.numel() > 0:
             self._replan(due, bootstrap=False)
 
@@ -460,6 +521,78 @@ class GeneratedMotionCommand(MotionCommand):
             torch.sin(yaw_delta),
             torch.cos(yaw_delta),
         ).abs()
+
+        anchor_xy = self._terrain_state.local_height_scan_root_xy
+        anchor_yaw = self._terrain_state.local_height_scan_root_yaw
+        reference_penetration, reference_valid = _body_origin_penetration_proxy(
+            scan,
+            self.body_pos_w,
+            anchor_xy,
+            anchor_yaw,
+            self._scan_grid,
+        )
+        robot_penetration, robot_valid = _body_origin_penetration_proxy(
+            scan,
+            self.robot_body_pos_w,
+            anchor_xy,
+            anchor_yaw,
+            self._scan_grid,
+        )
+        scan_valid = self._terrain_state.local_height_scan_valid.unsqueeze(-1)
+        reference_valid &= scan_valid
+        robot_valid &= scan_valid
+        reference_penetration *= reference_valid
+        robot_penetration *= robot_valid
+        reference_mean, reference_max = _masked_mean_max(
+            reference_penetration, reference_valid
+        )
+        robot_mean, robot_max = _masked_mean_max(robot_penetration, robot_valid)
+        self.metrics["terrain/reference_body_origin_penetration_mean_m"] = reference_mean
+        self.metrics["terrain/reference_body_origin_penetration_max_m"] = reference_max
+        self.metrics["terrain/robot_body_origin_penetration_mean_m"] = robot_mean
+        self.metrics["terrain/robot_body_origin_penetration_max_m"] = robot_max
+        self.metrics["terrain/reference_body_origin_scan_coverage"] = reference_valid.float().mean(
+            dim=-1
+        )
+        self.metrics["terrain/robot_body_origin_scan_coverage"] = robot_valid.float().mean(dim=-1)
+
+        # Compare only matching bodies for which both samples are inside the
+        # cached grid.  A positive value is a correlation-based proxy for the
+        # tracker avoiding a penetrating reference, not proof of intentional
+        # correction and not a geometry collision metric.
+        paired_valid = reference_valid & robot_valid
+        _, paired_reference_max = _masked_mean_max(reference_penetration, paired_valid)
+        _, paired_robot_max = _masked_mean_max(robot_penetration, paired_valid)
+        has_pair = paired_valid.any(dim=-1)
+        signed_improvement = torch.where(
+            has_pair,
+            paired_reference_max - paired_robot_max,
+            0.0,
+        )
+        correction_proxy = signed_improvement.clamp_min(0.0)
+        correction_case = (
+            has_pair
+            & (paired_reference_max >= self.gen_cfg.body_origin_penetration_threshold_m)
+            & (
+                signed_improvement
+                >= self.gen_cfg.body_origin_correction_min_improvement_m
+            )
+        )
+        self.metrics["terrain/body_origin_paired_scan_coverage"] = paired_valid.float().mean(
+            dim=-1
+        )
+        self.metrics["terrain/tracker_body_origin_penetration_improvement_m"] = (
+            signed_improvement
+        )
+        self.metrics["terrain/tracker_body_origin_correction_proxy_m"] = correction_proxy
+        self.metrics["terrain/tracker_body_origin_correction_case"] = correction_case.float()
+
+        if self._undesired_contacts_term is not None:
+            undesired_contact_count = self._undesired_contacts_term(self._env).float()
+            self.metrics["terrain/undesired_contact_body_count"] = undesired_contact_count
+            self.metrics["terrain/undesired_contact_any"] = (
+                undesired_contact_count > 0
+            ).float()
 
     # ------------------------------------------------------------------ reference properties
 

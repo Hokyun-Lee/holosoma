@@ -171,6 +171,16 @@ class GeneratedMotionConfig(MotionConfig):
     generator checkpoint.
     """
 
+    require_fully_measured_history: bool = False
+    """Require every past-state slot to be measured before a non-bootstrap
+    replan.
+
+    This is a strict runtime guard, not a different sampling clock: replans
+    still occur every ``replan_interval_s``.  It defaults off to preserve the
+    Stage-5 flat scheduler and is enabled by the terrain preset.  The paper
+    does not specify this assertion; exposing it is an implementation choice.
+    """
+
     heading_reward_epsilon: float = 1.0e-6
     """Positive denominator epsilon for the heading reward.
 
@@ -183,4 +193,22 @@ class GeneratedMotionConfig(MotionConfig):
 
     This affects metrics only, not the reward equation.  The value is an
     implementation choice because travel direction is undefined at rest.
+    """
+
+    body_origin_penetration_threshold_m: float = 0.02
+    """Minimum generated-reference body-origin penetration for reporting a
+    tracker correction case.
+
+    This is only a scan-derived diagnostic proxy, not a collision test.  The
+    paper does not publish such a threshold; the default is an implementation
+    choice exposed for evaluation and ablation.
+    """
+
+    body_origin_correction_min_improvement_m: float = 0.01
+    """Minimum reduction from generated-reference to measured-robot
+    body-origin penetration for reporting a tracker correction case.
+
+    This scan-derived diagnostic cannot establish that the policy deliberately
+    corrected the reference.  The unpublished default is an implementation
+    choice exposed for evaluation and ablation.
     """
