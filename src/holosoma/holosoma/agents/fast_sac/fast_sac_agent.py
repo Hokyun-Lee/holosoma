@@ -1028,6 +1028,8 @@ class FastSACAgent(BaseAlgo):
             obs, _, _, _ = self.env.step(actor_state["actions"])
             actor_state["obs"] = obs
             actor_state = self._post_eval_env_step(actor_state)
+            if actor_state.get("stop", False):
+                break
 
         self._post_evaluate_policy()
 

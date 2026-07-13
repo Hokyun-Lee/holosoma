@@ -201,6 +201,16 @@ class GeneratedMotionConfig(MotionConfig):
     use_ema: bool = True
     """Use the EMA weights from the generator checkpoint."""
 
+    deterministic_sampling: bool = False
+    """Use fixed-seed DDIM initial noise for reproducible evaluation.
+
+    Disabled by default to preserve the stochastic Stage-5--9 behavior.  The
+    common Stage-10 evaluator enables it explicitly.
+    """
+
+    sampling_seed: int = 0
+    """Initial-noise seed used when ``deterministic_sampling`` is enabled."""
+
     heading_mode: str = "random"
     """Target-heading conditioning per episode: "random" world direction or
     "current" (keep the facing direction at reset)."""

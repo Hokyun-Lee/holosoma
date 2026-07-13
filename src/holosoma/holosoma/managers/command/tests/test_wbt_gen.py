@@ -216,7 +216,12 @@ def test_generated_window_calls_two_step_denoising() -> None:
     cmd._headings = torch.tensor([[1.0, 0.0]])
     cmd._use_sim_terrain_scan = False
     cmd._terrain_zeros = torch.zeros(1, 0)
-    cmd.gen_cfg = SimpleNamespace(past_noise_std=0.0, denoise_steps=2)
+    cmd.gen_cfg = SimpleNamespace(
+        past_noise_std=0.1,
+        denoise_steps=2,
+        deterministic_sampling=True,
+        sampling_seed=17,
+    )
     cmd._env = SimpleNamespace(dt=0.02)
     cmd._sim_j_from_lay = torch.arange(layout.num_joints)
     cmd._tracked_b_from_lay = torch.arange(layout.num_bodies)
@@ -232,11 +237,11 @@ def test_generated_window_calls_two_step_denoising() -> None:
     cmd._win_body_lin_vel = torch.zeros_like(cmd._win_body_pos)
     cmd._win_ref_quat = torch.zeros(1, horizon, 4)
 
-    calls: list[tuple[int, bool, torch.Tensor]] = []
+    calls: list[tuple[int, bool, int, torch.Tensor]] = []
 
     class _RecordingGenerator:
-        def generate(self, inp, num_steps: int, deterministic: bool) -> MotionGeneratorOutput:
-            calls.append((num_steps, deterministic, inp.past_motion.clone()))
+        def generate(self, inp, num_steps: int, deterministic: bool, seed: int) -> MotionGeneratorOutput:
+            calls.append((num_steps, deterministic, seed, inp.past_motion.clone()))
             root_quat = torch.zeros(1, horizon, 4)
             root_quat[..., 0] = 1.0
             return MotionGeneratorOutput(
@@ -249,11 +254,14 @@ def test_generated_window_calls_two_step_denoising() -> None:
 
     cmd.generator = _RecordingGenerator()
     cmd._generate_window(torch.tensor([0]))
+    cmd._generate_window(torch.tensor([0]))
 
-    assert len(calls) == 1
+    assert len(calls) == 2
     assert calls[0][0] == 2
-    assert calls[0][1] is False
-    torch.testing.assert_close(calls[0][2], cmd._history)
+    assert calls[0][1] is True
+    assert calls[0][2] == 17
+    torch.testing.assert_close(calls[0][3], calls[1][3])
+    assert not torch.equal(calls[0][3], cmd._history)
 
 
 def test_body_origin_penetration_proxy_uses_scan_anchor_yaw_and_validity() -> None:

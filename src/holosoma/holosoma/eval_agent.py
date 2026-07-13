@@ -61,6 +61,7 @@ def run_eval_with_tyro(
     )
     algo.setup()
     algo.attach_checkpoint_metadata(saved_config, saved_wandb_path)
+    algo.attach_evaluation_metadata(tyro_config, checkpoint_path)
     algo.set_checkpoint_env_state_restore(checkpoint_cfg.restore_env_state)
     if not checkpoint_cfg.restore_env_state:
         logger.info(
@@ -75,23 +76,23 @@ def run_eval_with_tyro(
     exported_policy_name = Path(checkpoint_path).name  # example: model_5000.pt
     exported_onnx_name = exported_policy_name.replace(".pt", ".onnx")  # example: model_5000.onnx
 
-    if tyro_config.training.export_onnx:
-        exported_onnx_path = os.path.join(exported_policy_dir_path, exported_onnx_name)
-        if not hasattr(algo, "export"):
-            raise AttributeError(
-                f"{algo_class.__name__} is missing an `export` method required for ONNX export during evaluation."
-            )
+    try:
+        if tyro_config.training.export_onnx:
+            exported_onnx_path = os.path.join(exported_policy_dir_path, exported_onnx_name)
+            if not hasattr(algo, "export"):
+                raise AttributeError(
+                    f"{algo_class.__name__} is missing an `export` method required for ONNX export during evaluation."
+                )
 
-        algo.export(onnx_file_path=exported_onnx_path)  # type: ignore[attr-defined]
-        logger.info(f"Exported policy as onnx to: {exported_onnx_path}")
+            algo.export(onnx_file_path=exported_onnx_path)  # type: ignore[attr-defined]
+            logger.info(f"Exported policy as onnx to: {exported_onnx_path}")
 
-    algo.evaluate_policy(
-        max_eval_steps=tyro_config.training.max_eval_steps,
-    )
-
-    # Cleanup simulation app
-    if simulation_app:
-        close_simulation_app(simulation_app)
+        algo.evaluate_policy(
+            max_eval_steps=tyro_config.training.max_eval_steps,
+        )
+    finally:
+        if simulation_app:
+            close_simulation_app(simulation_app)
 
 
 def main() -> None:

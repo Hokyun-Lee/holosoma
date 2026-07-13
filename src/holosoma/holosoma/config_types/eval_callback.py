@@ -99,6 +99,37 @@ class PayloadCallbackConfig:
 
 
 @dataclass(frozen=True)
+class TerrainMetricsConfig:
+    """Settings for the common WBT terrain evaluator."""
+
+    enabled: bool = False
+    output_prefix: str = "terrain_evaluation"
+    variant: str = "unspecified"
+    scenario_label: str = ""
+    """Explicit label for non-curriculum single-terrain evaluations."""
+
+    episode_count: int = 100
+    success_distance_m: float = 1.5
+    fall_root_height_m: float = 0.45
+    fall_upright_cosine: float = 0.5
+    body_origin_penetration_threshold_m: float = 0.02
+    heading_speed_threshold_mps: float = 0.05
+    evaluation_seed: int = 42
+    fixed_terrain_level: int = 0
+    deterministic_generator: bool = True
+    generator_sampling_seed: int = 0
+    fail_on_incomplete: bool = True
+
+
+@dataclass(frozen=True)
+class TerrainMetricsCallbackConfig:
+    """Instantiation config for :class:`TerrainMetricsCallback`."""
+
+    _target_: str = "holosoma.agents.callbacks.terrain_metrics.TerrainMetricsCallback"
+    config: TerrainMetricsConfig = TerrainMetricsConfig()
+
+
+@dataclass(frozen=True)
 class EvalCallbacksConfig:
     """Container for all eval callback configs.
 
@@ -114,6 +145,9 @@ class EvalCallbacksConfig:
 
     payload: PayloadCallbackConfig = PayloadCallbackConfig()
     """Wrist payload simulation callback."""
+
+    terrain_metrics: TerrainMetricsCallbackConfig = TerrainMetricsCallbackConfig()
+    """Common target-heading terrain metrics and JSON/CSV output."""
 
     def collect_active_callbacks(self) -> dict:
         """Collect callback configs where config.enabled is True."""

@@ -130,6 +130,8 @@ class GeneratedMotionCommand(MotionCommand):
             raise ValueError("heading_reward_epsilon must be positive")
         if self.gen_cfg.heading_error_speed_threshold < 0.0:
             raise ValueError("heading_error_speed_threshold must be non-negative")
+        if self.gen_cfg.sampling_seed < 0:
+            raise ValueError("sampling_seed must be non-negative")
         _validate_nonnegative_finite(
             self.gen_cfg.body_origin_penetration_threshold_m,
             "body_origin_penetration_threshold_m",
@@ -251,6 +253,8 @@ class GeneratedMotionCommand(MotionCommand):
             f"{self.gen_cfg.denoise_steps}-step denoising, heading={self.gen_cfg.heading_mode}, "
             f"terrain={'sim_scan' if self._use_sim_terrain_scan else 'stage5_flat_zeros'}, "
             f"measured_history_guard={self.gen_cfg.require_fully_measured_history}, "
+            f"deterministic_sampling={self.gen_cfg.deterministic_sampling}, "
+            f"sampling_seed={self.gen_cfg.sampling_seed}, "
             "trainable generator params=0"
         )
 
@@ -302,7 +306,18 @@ class GeneratedMotionCommand(MotionCommand):
         past = self._history[env_ids].clone()
         if self.gen_cfg.past_noise_std > 0:
             # Paper: conditions are perturbed during training for robustness.
-            past = past + torch.randn_like(past) * self.gen_cfg.past_noise_std
+            condition_generator = None
+            if self.gen_cfg.deterministic_sampling:
+                condition_generator = torch.Generator(device=past.device.type).manual_seed(
+                    self.gen_cfg.sampling_seed + 1
+                )
+            condition_noise = torch.randn(
+                past.shape,
+                dtype=past.dtype,
+                device=past.device,
+                generator=condition_generator,
+            )
+            past = past + condition_noise * self.gen_cfg.past_noise_std
             qs = self.layout.root_quat_slice
             past[..., qs] = quat_normalize(past[..., qs])
 
@@ -326,7 +341,8 @@ class GeneratedMotionCommand(MotionCommand):
                 terrain_height=terrain_height,
             ),
             num_steps=self.gen_cfg.denoise_steps,
-            deterministic=False,
+            deterministic=self.gen_cfg.deterministic_sampling,
+            seed=self.gen_cfg.sampling_seed,
         )
 
         dt = self._env.dt

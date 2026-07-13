@@ -28,6 +28,8 @@ class BaseAlgo:
         self.is_main_process = self.gpu_global_rank == 0
         self._experiment_config: ExperimentConfig | None = None
         self._wandb_run_path: str | None = None
+        self._evaluation_config: ExperimentConfig | None = None
+        self._evaluation_checkpoint_path: str | None = None
         # Training resumes restore stateful curricula by default. Evaluation
         # may explicitly disable this because per-environment curriculum state
         # is intentionally strict and cannot be mapped to a different num_envs.
@@ -73,6 +75,11 @@ class BaseAlgo:
         if not isinstance(enabled, bool):
             raise TypeError(f"enabled must be a bool, got {type(enabled).__name__}")
         self._restore_checkpoint_env_state = enabled
+
+    def attach_evaluation_metadata(self, experiment_config: ExperimentConfig, checkpoint_path: str) -> None:
+        """Attach the effective eval config and resolved local checkpoint path."""
+        self._evaluation_config = experiment_config
+        self._evaluation_checkpoint_path = checkpoint_path
 
     def _checkpoint_metadata(self, iteration: int | None = None) -> dict[str, Any]:
         if self._experiment_config is None:

@@ -11,6 +11,16 @@ from holosoma.managers.curriculum.base import CurriculumTermBase
 from holosoma.utils.safe_torch_import import torch
 
 
+def target_heading_forward_progress_m(
+    root_xy: torch.Tensor,
+    episode_start_root_xy: torch.Tensor,
+    episode_target_heading_w: torch.Tensor,
+) -> torch.Tensor:
+    """Project world-XY displacement onto the episode-start target heading."""
+    displacement = root_xy - episode_start_root_xy
+    return torch.sum(displacement * episode_target_heading_w, dim=-1)
+
+
 class TerrainCurriculum(CurriculumTermBase):
     """Promote or demote per-environment terrain difficulty at episode ends.
 
@@ -349,8 +359,11 @@ class TerrainCurriculum(CurriculumTermBase):
             return
         self._require_setup()
         root_xy = self._robot_root_xy()
-        displacement = root_xy - self.episode_start_root_xy
-        forward_progress = torch.sum(displacement * self.episode_target_heading_w, dim=-1)
+        forward_progress = target_heading_forward_progress_m(
+            root_xy,
+            self.episode_start_root_xy,
+            self.episode_target_heading_w,
+        )
         self.max_episode_forward_progress_m = torch.maximum(
             self.max_episode_forward_progress_m,
             forward_progress.clamp_min(0.0),
