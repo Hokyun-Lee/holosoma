@@ -163,7 +163,7 @@ def test_non_stage10_defaults_preserve_legacy_sampling() -> None:
     assert not motion_config.deterministic_per_env_sampling
 
 
-def test_terrain_presets_enable_centered_full_episode_phase_sampling() -> None:
+def test_terrain_presets_center_resets_and_fixed_reference_keeps_full_horizon() -> None:
     fixed_config = g1_29dof_wbt_ablation_a_fixed_reference.command.setup_terms[
         "motion_command"
     ].params["motion_config"]
@@ -174,7 +174,11 @@ def test_terrain_presets_enable_centered_full_episode_phase_sampling() -> None:
     assert fixed_config.reanchor_motion_xy_on_reset
     assert fixed_config.phase_horizon_steps == 500
     assert generated_config.reanchor_motion_xy_on_reset
-    assert generated_config.phase_horizon_steps == 500
+    # GeneratedMotionCommand uses the clip only to seed reset history and does
+    # not advance it during the episode.  Keeping zero here preserves the
+    # existing 325-frame default seed; the Stage-10 evaluator forces its
+    # effective episode horizon for every variant.
+    assert generated_config.phase_horizon_steps == 0
 
 
 def test_effective_sim_rate_drives_forced_phase_horizon() -> None:
