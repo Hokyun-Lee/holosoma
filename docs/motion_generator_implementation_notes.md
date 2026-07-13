@@ -810,8 +810,10 @@ raises falls/contact. In the seed-42 primary row E exceeds fair-budget D (66%
 vs 54% success, 7% vs 17% fall, and lower step contact); evaluation seeds 43
 and 44 retain the same success direction. These results do **not** show a
 tracker-terrain-scan benefit, but one training seed cannot prove the scan is
-harmful. F survives but is stationary (seed-42 progress 0.082 m, heading error
-1.555 rad, 0% success), making heading reward essential for directed
+harmful. The later preregistered fine-tune-seed replication below has mixed
+E-minus-D signs and likewise supports neither benefit nor harm. F survives but
+is stationary (seed-42 progress 0.082 m, heading error 1.555 rad, 0% success),
+making heading reward essential for directed
 locomotion under this protocol. A uses one fixed clip rather than B-F's
 random-heading command distribution, limiting its absolute comparison; 10.26%
 of its valid windows naturally cross a tile boundary even after reset
@@ -910,8 +912,9 @@ All five success contrasts keep the same sign for all three evaluation seeds:
 Thus fine-tuning, heading reward, longer fine-tuning, E-over-D, and rough
 collapse are directionally stable to these evaluation seeds. This does not
 measure policy training variance: all evaluated checkpoints still come from
-one training seed. F remains effectively stationary at 1/300 pooled success,
-and E-over-D still fails to demonstrate tracker terrain-scan benefit.
+one training seed in this addendum. The later fine-tune-seed grid separately
+tests D/E/D-final downstream PPO variance and finds mixed E-minus-D signs. F
+remains effectively stationary at 1/300 pooled success.
 
 The added output sets and SHA-256 values are:
 
@@ -946,41 +949,143 @@ This protocol was written on 2026-07-14 **before inspecting simulator
 evaluation results** for the training-seed-43/44 policies. At preregistration
 time, only the D seed-43 fine-tune W&B run
 [`8ubs42lg`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/8ubs42lg)
-was in progress. No replication result or completion checkbox is changed yet.
+was in progress. The immutable preregistration is commit
+`b32c38af1acd0989cfa77f76be4ab0d8216d27b6`; the results below were collected
+afterward rather than used to rewrite that protocol.
 
 D/E fine-tune seeds 42–44 all restart from the same Stage-5 `BASE` checkpoint
 and its optimizer state. They are therefore closed-loop PPO fine-tune seed
 replications, not independent end-to-end pipeline seeds that repeat generator
 training, offline tracker pretraining, and data generation. For each fine-tune
-seed, D fair and E fair are the paired 501-logged-update tracker-terrain-
-observation contrast. D final is the 3,000-update duration diagnostic and is
-not substituted into the fair-budget D/E contrast.
+seed, D fair and E fair form the training-seed-matched tracker-terrain-
+observation contrast at 501 logged updates. D final is the 3,000-update
+duration diagnostic and is not substituted into the fair-budget D/E contrast.
 
 Each of D fair, E fair, and D final is evaluated at evaluation seeds 42, 43,
 and 44 on common L1 for exactly 100 episodes: flat/box/stair/hurdle have exact
 25/25/25/25 quotas. The common contract is deterministic generator/per-env
 sampling, uniform valid phase, reset XY reanchor, and phase horizon 500.
 `torch_deterministic=false`, so bitwise simulator determinism is not claimed.
-The expected grid is 27 sources: the existing nine common-L1 sources for
-training seed 42 are reused, and 18 sources are newly produced for training
-seeds 43 and 44.
+The completed grid has 27 sources and 2,700 episodes: the existing nine
+common-L1 sources for training seed 42 are reused, and 18 sources were newly
+produced for training seeds 43 and 44. Every source is `complete=true` with
+exact 25/25/25/25 flat/box/stair/hurdle quotas and 64 evaluation envs.
 
 Aggregation first sums raw numerators and denominators rather than averaging
-per-source rates. Interpretation first reports the paired E-fair-minus-D-fair
-success delta within each training seed, then its sign and range across the
-three fine-tune seeds. With `n=3`, this is descriptive replication only, not a
-confidence interval or significance test.
+per-source rates. Interpretation first reports the training-seed-matched
+E-fair-minus-D-fair success delta within each training seed, then its sign and
+range across the three fine-tune seeds. With `n=3`, this is descriptive
+replication only, not a confidence interval or significance test.
+
+### Fine-tune seed replication results
+
+Raw pooling is two-stage: first across evaluation seeds within one
+policy/training-seed identity, then across training seeds. Rounded source rates
+are never averaged, and step metrics retain their observed-step denominators.
+
+| policy | sources / episodes | success | fall | episode any-contact | contact-step raw | heading rad | body err m | length |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| D fair | 9 / 900 | 518/900 = 57.56% | 187/900 = 20.78% | 653/900 = 72.56% | 5,108/374,776 = 1.363% | 0.4287 | 0.04138 | 416.42 |
+| D final | 9 / 900 | 759/900 = 84.33% | 37/900 = 4.11% | 753/900 = 83.67% | 12,499/431,458 = 2.897% | 0.4189 | 0.04186 | 479.40 |
+| E fair | 9 / 900 | 548/900 = 60.89% | 127/900 = 14.11% | 635/900 = 70.56% | 3,404/377,977 = 0.901% | 0.4598 | 0.04371 | 419.97 |
+
+| contrast | seed-42 / seed-43 / seed-44 success delta | mean | sample SD | range | signs | raw-pooled delta |
+|---|---:|---:|---:|---:|---:|---:|
+| E fair minus D fair | +10.33 / -3.33 / +3.00 pp | +3.33 pp | 6.84 pp | [-3.33,+10.33] pp | 2+/0/1- | +3.33 pp |
+| D final minus D fair | +20.67 / +24.00 / +35.67 pp | +26.78 pp | 7.88 pp | [+20.67,+35.67] pp | 3+/0/0- | +26.78 pp |
+
+The E-minus-D sign reversal at fine-tune seed 43 means the seed-42 E advantage
+is not training-seed invariant. This replication supports neither a benefit nor
+harm from the tracker terrain scan. D-final minus D-fair success is positive for
+all three fine-tune seeds, but D final is the 3,000-update duration diagnostic,
+not a substitute for the 501-update fair-budget D/E contrast. Its pooled fall
+rate is lower while both episode and step contact rates are higher, so the
+combined fall/collision checklist remains open.
+
+| policy | fine-tune seed | checkpoint SHA-256 | W&B run | capture |
+|---|---:|---|---|---|
+| D fair | 42 | `2dd0b09c5b6141e1eb0dd627da32102bcbd32865f6a09659d09dd4847a9ba9e0` | [`8kh28k5w`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/8kh28k5w) | post-hoc backfill |
+| D fair | 43 | `fe228ae84b508a1e8c546cc32807e133ccdf79eaae887b8e30639828b17f9d33` | [`8ubs42lg`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/8ubs42lg) | direct online |
+| D fair | 44 | `f23522ba6eafa8ed8f7e0520d1083daf33c6727d17b0ab57cf910d7086ea6c81` | [`3g68sp98`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/3g68sp98) | direct online |
+| E fair | 42 | `96928c758b51d2c577b3d80ff548e213c1214c9ddf68b028cfd0f83bb39a2f4b` | [`hkqexdqe`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/hkqexdqe) | post-hoc backfill |
+| E fair | 43 | `a87f0d13777f93f44d06bd6eb467311543f88c1c8812c3021c11677b963699a6` | [`8j57ft6u`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/8j57ft6u) | direct online |
+| E fair | 44 | `e2cd7d2df20f78a8960466306a45b7f420ef1c4cdab466f004127f7d8c1c78a9` | [`d5tskuh5`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/d5tskuh5) | direct online |
+| D final | 42 | `d5850aad610b9bebf1613cd9473853225dbc06b23f007230d05e92bd328efad8` | [`8kh28k5w`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/8kh28k5w) | post-hoc backfill |
+| D final | 43 | `38db7ecd4159a368c9891f1999ccbcdaf99093d3ba49bd40a4d134961438a2e0` | [`8ubs42lg`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/8ubs42lg) | direct online |
+| D final | 44 | `9aab1c526dddf4bdc892035b017b7c0abcdd7d7470b1d2ea77c9e0e377610bcf` | [`3g68sp98`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/3g68sp98) | direct online |
+
+Seed-42 W&B records are post-hoc checkpoint backfills; seeds 43/44 were logged
+directly online. The capture distinction is retained in the manifest. All
+replicates share Stage-5 BASE SHA-256
+`fafb20e89962935d4c5980a6531c9cc538cf71fea541496a8723995e48c4819b`,
+its optimizer state, frozen generator SHA-256
+`7c63764b771ec43fb5d463d77b6860eee8e46f1db5c0b196554f98cc527ed5fa`,
+motion SHA-256
+`2ba2364641f7ba742fcb50382019e6340b0c68a92f79965b4839a68db3991a86`,
+and the upstream data/generator/offline-tracker pipeline. They are downstream
+PPO fine-tune replications, not independent end-to-end pipeline replications.
+
+The D/E reset-heading overlap audit also rules out an episode-level paired/CRN
+interpretation. In each of nine train/eval-seed comparisons the first
+vectorized reset headings matched exactly for 64/64 envs, but only 12 of 249
+later common env/episode identities matched. Different policy terminations
+change reset order and global RNG consumption. Equal evaluation seeds therefore
+mean the same seeded protocol only, not matching phase, full reset state,
+generator trajectory, or simulator noise. Reset phase/motion frame was not
+stored in the episode schema and could not be directly audited.
+
+Authoritative artifacts are:
+
+- manifest `logs/terrain_evaluations/stage10/fine_tune_seed_replication_v1/manifest.json`,
+  SHA-256 `70c21aa1a1cbefb5ddb52c467e257de3537b9dbf0739246ece9b34839f62c388`;
+  common-protocol SHA-256
+  `4f3b3c325f0aa9525f5eb8bb09ce44cda092211881712c7b91703893e31c0329`
+- aggregate JSON/CSV/Markdown SHA-256
+  `ec5faf203db83a2abf2601375f0a4fe797d5dd6580d92106757713567206ef54`,
+  `79f6267ea91db7b5ae2bd5dfd3790b714730362764f8be6ed2303b440fad50af`,
+  and `8fdb01878b3d18c27d7db91005e1f338ddf0feb407f19cce95d9ef557bcc9dc8`
+- reset-heading audit SHA-256
+  `a971c46528388143a842f3ab404f468b363064ffdd5491af41743d2c23d5a8a3`
+- [W&B publication run `gomqn9kf`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/gomqn9kf)
+  and [104-file result artifact v0](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/artifacts/evaluation/terrain-observation-ablation-trainseeds42-44-results/v0),
+  custom file-set SHA-256
+  `2cb7c719c6b6192407e1381ea602a0e6023136bd68b7726ba739da08ecf33977`
+
+The manifest aggregator was introduced in commit `6394978` and its effective
+environment-count validation was tightened in `adf90d9`. Its focused suite
+passed 52 tests and Ruff. The completed report was reproduced with:
+
+```bash
+PYTHONPATH=src/holosoma ~/.holosoma_deps/miniconda3/envs/hssim/bin/python \
+  -m pytest -q \
+  src/holosoma/holosoma/utils/tests/test_training_seed_evaluation_aggregation.py \
+  src/holosoma/holosoma/utils/tests/test_terrain_ablation_report.py
+# 52 passed
+
+PYTHONPATH=src/holosoma ~/.holosoma_deps/miniconda3/envs/hssim/bin/python \
+  -m holosoma.aggregate_training_seed_evaluations \
+  --manifest logs/terrain_evaluations/stage10/fine_tune_seed_replication_v1/manifest.json \
+  --output-prefix logs/terrain_evaluations/stage10/fine_tune_seed_replication_v1/report/stage10_fine_tune_seed_replication_v1
+```
+
+The older 30-source/3,000-episode pool repeats ten training-seed-42 Stage-10
+identities across evaluation seeds. This new 27-source/2,700-episode report is
+the three-policy, three-fine-tune-seed, three-evaluation-seed common-L1 grid and
+reuses nine old sources. Their episode counts must not be added as independent
+samples.
 
 ## Known limitations / not yet verified
 
-- Corrected terrain-aware closed-loop training and all Stage-10 rows completed.
-  Evaluation seeds 42/43/44 provide 3,000 pooled episodes, but every evaluated
-  checkpoint still comes from training seed 42. Evaluation replication does
-  not capture training-seed variance, so A-F differences and D fair-to-final
-  recovery have no multi-training-seed confidence interval.
-- E outperforms fair-budget D, so tracker terrain observation benefit is not
-  demonstrated. F's near-stationary survival shows heading reward is necessary
-  for directed locomotion in this protocol, not necessarily every protocol.
+- D fair/E fair/D final downstream closed-loop PPO was replicated at fine-tune
+  seeds 42/43/44, but all runs share one Stage-5 BASE, its optimizer state, the
+  frozen generator, and the upstream data/generator/offline-tracker pipeline.
+  A/B/C/F and the stress rows still have one training seed. This is descriptive
+  fine-tune `n=3`, not an end-to-end multi-seed confidence interval.
+- E-minus-D fair success deltas are +10.33/-3.33/+3.00 pp, so tracker terrain
+  observation benefit or harm is not demonstrated. Equal evaluation seeds are
+  not episode-level CRN/pairing. F's near-stationary survival shows heading
+  reward is necessary for directed locomotion in this protocol, not necessarily
+  every protocol.
 - D-final raises obstacle success and lowers falls, but episode/step/body
   contact all increase from D fair. The combined fall/collision checklist stays
   open. Episode contact is an OR, step contact is duration-normalized, and
@@ -1031,8 +1136,8 @@ results.
    collision-mesh penetration; geometry/contact replay is still needed.
 3. Receding-horizon distribution shift: structured condition noise is now
    implemented and narrows the matched noisy-validation gap. Corrected
-   closed-loop training and three-evaluation-seed fixed-level evaluation
-   completed, but multi-training-seed replication and tall-hurdle/rough
-   robustness are still required before calling it converged or robust.
+   closed-loop D/E fine-tuning has descriptive downstream seed `n=3`, but the
+   shared BASE/upstream pipeline and single-training-seed tall-hurdle/rough
+   stress remain before calling the system converged or robust.
 4. LAFAN1 license (CC BY-NC-ND) forbids redistribution of retargeted
    derivatives — generated models trained on it inherit non-commercial terms.

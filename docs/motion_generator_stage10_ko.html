@@ -32,7 +32,7 @@ footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted
 <body>
 <header class="container">
   <h1>10차: Ablation 및 공통 평가</h1>
-  <p>Seed-42 primary와 evaluation-seed 43/44 addendum, 총 3,000 episode,<br>obstacle/rough stress 및 RTX 4090 CUDA module latency 기록</p>
+  <p>Seed-42 primary·evaluation-seed addendum와 fine-tune-seed 42–44 replication,<br>obstacle/rough stress 및 RTX 4090 CUDA module latency 기록</p>
 </header>
 <main class="container">
 <section>
@@ -56,9 +56,10 @@ footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted
       <li><code>[x]</code> 30 cm / 60 cm obstacle 평가 완료</li>
       <li><code>[x]</code> unseen rough terrain 평가 완료</li>
       <li><code>[x]</code> 실제 RTX 4090 inference latency 측정 완료</li>
+      <li><code>[x]</code> D fair/E fair/D final fine-tune seed 42–44, evaluation seed 42–44의 27-source reproducibility grid 완료</li>
     </ul>
   </div>
-  <div class="callout ok"><b>평가 완료의 의미</b>: 위 8개 체크박스는 실행·산출물·quota 검증이 완료됐다는 뜻이지 모든 ablation 가설이 지지됐다는 뜻이 아니다. Tracker scan을 제거한 E가 fair-budget D보다 success가 높아 terrain observation 편익을 입증하지 못했고, tall hurdle과 unseen rough도 여전히 약하다. 동일한 training-seed 42 checkpoint를 evaluation seed 42/43/44로 반복했으므로 evaluation sampling 방향성은 확인했지만, <b>training seed는 하나</b>라 정책 학습 분산에 대한 통계적 우월성은 주장하지 않는다.</div>
+  <div class="callout ok"><b>평가 완료의 의미</b>: 체크박스는 실행·산출물·quota 검증이 완료됐다는 뜻이지 모든 ablation 가설이 지지됐다는 뜻이 아니다. D/E fair의 세 fine-tune seed raw pool은 E <code>60.89%</code> 대 D <code>57.56%</code>였지만 training-seed-matched delta는 <code>+10.33/−3.33/+3.00%p</code>로 부호가 섞였다. 따라서 tracker terrain observation ablation의 <b>재현 가능한 실행</b>은 완료했지만 scan의 편익이나 해로움을 입증하지 못했다. 이 <code>n=3</code>은 같은 Stage-5 BASE·optimizer·frozen generator를 공유한 downstream PPO fine-tune 반복이며 end-to-end 독립 pipeline seed가 아니다. Tall hurdle과 unseen rough도 여전히 약하다.</div>
 </section>
 
 <section>
@@ -113,7 +114,7 @@ lafan1_walk4_subject1_s500_rollout83x12_gen_mj.npz</code></pre>
 </section>
 
 <section>
-  <h2>Reduced fair-budget corrected 학습 결과</h2>
+  <h2>Reduced fair-budget corrected 학습 결과 <small>(training seed 42 primary)</small></h2>
   <p>Single RTX 4090에서 먼저 비교 가능한 최소 예산으로 <b>501 logged iterations</b>를 사용한다. PPO loop가 BASE iteration 12,000부터 12,500까지 inclusive하게 기록하는 예산이며, 논문값이 아닌 이 재현의 축소 선택이다.</p>
   <div class="table"><table>
     <tr><th>실험</th><th>corrected checkpoint</th><th>SHA-256</th><th>update</th></tr>
@@ -206,7 +207,7 @@ $PY src/holosoma/holosoma/train_agent.py \
   </table></div>
   <ul>
     <li>C→D fair는 success 0→54%, progress 0.207→2.345 m로 fine-tuning 효과를 보였지만 fall 17%와 contact가 함께 증가했다.</li>
-    <li>Seed-42 primary에서 E가 D fair보다 success 66% 대 54%, fall 7% 대 17%, contact-step 0.932% 대 2.597%로 좋았다. Seed 43/44에서도 success 방향이 같았으므로 <b>tracker terrain scan의 추가 편익을 입증하지 못했다</b>; 단, training seed가 하나라 scan이 해롭다는 인과 결론도 내리지 않는다.</li>
+    <li>Training-seed-42 primary에서 E가 D fair보다 success 66% 대 54%, fall 7% 대 17%, contact-step 0.932% 대 2.597%로 좋았고 같은 checkpoint의 evaluation seed 43/44에서도 success 방향은 같았다. 그러나 아래 fine-tune-seed replication에서는 E−D success delta가 <code>+10.33/−3.33/+3.00%p</code>로 부호가 섞였다. 따라서 <b>tracker terrain scan의 추가 편익도, scan이 해롭다는 결론도 입증하지 못했다</b>.</li>
     <li>F는 survival 99%지만 progress 0.082 m, heading error 1.555 rad, success 0%로 사실상 정지했다. 이 protocol의 directed motion에는 heading reward가 필수였다는 결과다.</li>
     <li>A는 fixed 단일 clip, B–F는 random heading generator라 command 분포가 다르므로 A와의 절대 비교는 제한적이다.</li>
   </ul>
@@ -334,17 +335,61 @@ $PY -m holosoma.aggregate_terrain_evaluations \
 </section>
 
 <section>
-  <h2>Fine-tune seed replication protocol — 평가 전 사전등록</h2>
-  <div class="callout warn"><b>사전등록 시점</b>: 아래 protocol은 training-seed 43/44 policy의 simulator 평가 결과를 보기 전에 2026-07-14 기록했다. 현재 D seed 43 fine-tune W&amp;B run <a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/8ubs42lg"><code>8ubs42lg</code></a>만 진행 중이며, 아직 이 replication의 평가 결과나 완료 체크박스를 추가·변경하지 않는다.</div>
+  <h2>Fine-tune seed replication — 사전등록 protocol과 완료 결과</h2>
+  <div class="callout warn"><b>사전등록 시점 보존</b>: 아래 protocol은 training-seed 43/44 policy의 simulator 평가 결과를 보기 전에 2026-07-14 commit <code>b32c38af1acd0989cfa77f76be4ab0d8216d27b6</code>로 기록했다. 당시에는 D seed 43 fine-tune W&amp;B run <a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/8ubs42lg"><code>8ubs42lg</code></a>만 진행 중이었다. 다음 결과는 그 뒤 계획대로 수집했으며 사전등록 문구를 결과에 맞춰 소급 변경하지 않는다.</div>
   <p>D/E fine-tune seed 42–44는 모두 동일한 Stage-5 <code>BASE</code> checkpoint와 그 optimizer state에서 시작한다. 따라서 세 seed는 데이터 수집부터 generator·offline tracker 사전학습까지 다시 수행한 독립적인 전체 pipeline seed가 아니라, <b>closed-loop PPO fine-tune seed replication</b>이다. 공통 BASE와 frozen generator 때문에 독립성의 범위를 그 이상으로 확대해 해석하지 않는다.</p>
   <div class="table"><table>
     <tr><th>Policy snapshot</th><th>Budget / 비교 역할</th><th>평가 protocol</th></tr>
     <tr><td>D fair</td><td>BASE 이후 501 logged update</td><td rowspan="3">evaluation seed 42/43/44 각각 common L1 100 episode, flat/box/stair/hurdle 정확히 25 episode씩</td></tr>
-    <tr><td>E fair</td><td>BASE 이후 501 logged update. D fair와 paired tracker-terrain-observation contrast</td></tr>
+    <tr><td>E fair</td><td>BASE 이후 501 logged update. D fair와 training-seed-matched tracker-terrain-observation contrast</td></tr>
     <tr><td>D final</td><td>BASE 이후 3,000 update. fair-budget ablation이 아닌 duration diagnostic</td></tr>
   </table></div>
-  <p>각 evaluation은 deterministic generator/per-env sampling, uniform valid phase, reset XY reanchor, <code>phase_horizon_steps=500</code>을 동일하게 고정한다. <code>torch_deterministic=false</code>이므로 bitwise 결정론은 주장하지 않는다. 완성될 예정인 grid는 policy training seed 42/43/44 × {D fair, E fair, D final} × evaluation seed 42/43/44의 <b>27 source</b>다. 기존 training-seed 42의 common-L1 9 source는 재사용하고, training-seed 43/44에서 18 source를 새로 만든다.</p>
-  <p>집계는 evaluator별 rate를 평균하지 않고 raw numerator/denominator를 먼저 합산한다. 먼저 각 training seed 안에서 paired <b>E fair − D fair</b> success delta를 계산하고, 세 delta의 범위와 부호를 보고한다. <code>n=3</code>인 축소 재현이므로 신뢰구간이나 유의성 검정 대신 descriptive replication으로만 해석한다.</p>
+  <p>각 evaluation은 deterministic generator/per-env sampling, uniform valid phase, reset XY reanchor, <code>phase_horizon_steps=500</code>, 64 env를 동일하게 고정한다. <code>torch_deterministic=false</code>이므로 bitwise 결정론은 주장하지 않는다. 완료 grid는 policy training seed 42/43/44 × {D fair, E fair, D final} × evaluation seed 42/43/44의 <b>27 source / 2,700 episode</b>다. 기존 training-seed-42 common-L1 9 source를 재사용하고 training-seed 43/44에서 18 source를 새로 만들었으며, 전부 <code>complete=true</code>와 type별 25/25/25/25 quota를 통과했다.</p>
+  <p>집계는 evaluator별 rate를 평균하지 않고 raw numerator/denominator를 먼저 합산한다. 각 policy/training seed 안에서 evaluation seed 세 개를 먼저 합친 뒤 training seed를 합쳤다. Contrast의 반복 단위는 episode가 아니라 <b>fine-tune training seed, n=3</b>이며 신뢰구간·유의성 검정 없이 descriptive statistics만 보고한다.</p>
+
+  <h3>세 fine-tune seed raw-pooled 결과</h3>
+  <div class="table"><table>
+    <tr><th>Policy</th><th>Success</th><th>Fall</th><th>Episode any-contact</th><th>Contact-step raw</th><th>Heading rad</th><th>Body err m</th><th>Length</th></tr>
+    <tr><td>D fair</td><td>518/900 = 57.56%</td><td>187/900 = 20.78%</td><td>653/900 = 72.56%</td><td>5,108/374,776 = 1.363%</td><td>0.4287</td><td>0.04138</td><td>416.42</td></tr>
+    <tr><td>D final</td><td><b>759/900 = 84.33%</b></td><td><b>37/900 = 4.11%</b></td><td>753/900 = 83.67%</td><td>12,499/431,458 = 2.897%</td><td>0.4189</td><td>0.04186</td><td>479.40</td></tr>
+    <tr><td>E fair</td><td>548/900 = 60.89%</td><td>127/900 = 14.11%</td><td>635/900 = 70.56%</td><td>3,404/377,977 = 0.901%</td><td>0.4598</td><td>0.04371</td><td>419.97</td></tr>
+  </table></div>
+  <p>D final은 D fair보다 success와 episode length가 높고 fall은 낮지만, episode any-contact와 duration-normalized contact-step은 모두 높다. 따라서 긴 fine-tuning의 success 회복은 관찰됐어도 fall/collision 동시 감소나 clean crossing은 입증하지 않는다. D final은 501-update fair-budget 행이 아니라 <b>3,000-update duration diagnostic</b>이다.</p>
+
+  <h3>Training-seed별 checkpoint와 success</h3>
+  <div class="table"><table>
+    <tr><th>Policy</th><th>Fine-tune seed</th><th>Success over eval seeds 42–44</th><th>Checkpoint SHA-256</th><th>W&amp;B run / capture</th></tr>
+    <tr><td>D fair</td><td>42</td><td>167/300 = 55.67%</td><td><code>2dd0b09c5b6141e1eb0dd627da32102bcbd32865f6a09659d09dd4847a9ba9e0</code></td><td><a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/8kh28k5w"><code>8kh28k5w</code></a> / post-hoc backfill</td></tr>
+    <tr><td>D fair</td><td>43</td><td>177/300 = 59.00%</td><td><code>fe228ae84b508a1e8c546cc32807e133ccdf79eaae887b8e30639828b17f9d33</code></td><td><a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/8ubs42lg"><code>8ubs42lg</code></a> / direct online</td></tr>
+    <tr><td>D fair</td><td>44</td><td>174/300 = 58.00%</td><td><code>f23522ba6eafa8ed8f7e0520d1083daf33c6727d17b0ab57cf910d7086ea6c81</code></td><td><a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/3g68sp98"><code>3g68sp98</code></a> / direct online</td></tr>
+    <tr><td>E fair</td><td>42</td><td>198/300 = 66.00%</td><td><code>96928c758b51d2c577b3d80ff548e213c1214c9ddf68b028cfd0f83bb39a2f4b</code></td><td><a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/hkqexdqe"><code>hkqexdqe</code></a> / post-hoc backfill</td></tr>
+    <tr><td>E fair</td><td>43</td><td>167/300 = 55.67%</td><td><code>a87f0d13777f93f44d06bd6eb467311543f88c1c8812c3021c11677b963699a6</code></td><td><a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/8j57ft6u"><code>8j57ft6u</code></a> / direct online</td></tr>
+    <tr><td>E fair</td><td>44</td><td>183/300 = 61.00%</td><td><code>e2cd7d2df20f78a8960466306a45b7f420ef1c4cdab466f004127f7d8c1c78a9</code></td><td><a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/d5tskuh5"><code>d5tskuh5</code></a> / direct online</td></tr>
+    <tr><td>D final</td><td>42</td><td>229/300 = 76.33%</td><td><code>d5850aad610b9bebf1613cd9473853225dbc06b23f007230d05e92bd328efad8</code></td><td><a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/8kh28k5w"><code>8kh28k5w</code></a> / post-hoc backfill</td></tr>
+    <tr><td>D final</td><td>43</td><td>249/300 = 83.00%</td><td><code>38db7ecd4159a368c9891f1999ccbcdaf99093d3ba49bd40a4d134961438a2e0</code></td><td><a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/8ubs42lg"><code>8ubs42lg</code></a> / direct online</td></tr>
+    <tr><td>D final</td><td>44</td><td>281/300 = 93.67%</td><td><code>9aab1c526dddf4bdc892035b017b7c0abcdd7d7470b1d2ea77c9e0e377610bcf</code></td><td><a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/3g68sp98"><code>3g68sp98</code></a> / direct online</td></tr>
+  </table></div>
+  <p>Seed 42의 W&amp;B record는 완료 checkpoint를 사후 업로드한 backfill이고, seed 43/44는 학습 중 직접 online logging한 run이다. Capture 방식 차이를 숨기지 않으며 checkpoint SHA와 source run ID는 27-entry manifest가 권위 있는 provenance다.</p>
+
+  <h3>Descriptive training-seed-matched success contrast</h3>
+  <div class="table"><table>
+    <tr><th>Contrast</th><th>Seed 42 / 43 / 44 delta</th><th>Mean ± sample SD</th><th>Range / signs</th><th>Raw-pooled delta</th></tr>
+    <tr><td>E fair − D fair</td><td>+10.33 / −3.33 / +3.00%p</td><td>+3.33 ± 6.84%p</td><td>[−3.33,+10.33], 2+/0 zero/1−</td><td>+3.33%p</td></tr>
+    <tr><td>D final − D fair</td><td>+20.67 / +24.00 / +35.67%p</td><td>+26.78 ± 7.88%p</td><td>[+20.67,+35.67], 3+/0/0−</td><td>+26.78%p</td></tr>
+  </table></div>
+  <p>E−D의 부호가 fine-tune seed 43에서 뒤집혔으므로 seed-42 primary의 E 우위는 training-seed invariant가 아니다. 이 결과는 tracker terrain scan의 편익도 해로움도 지지하지 않는다. D-final−D-fair success delta는 3/3 positive지만 동일 D run의 두 시점과 서로 다른 update budget을 비교한 duration 결과일 뿐, fair-budget terrain-observation ablation에 대신 쓰지 않는다.</p>
+
+  <div class="callout warn"><b>같은 evaluation seed는 episode-level pairing이 아니다</b>: D/E reset-heading audit의 9개 비교에서 첫 vectorized reset heading은 매번 <code>64/64</code> exact match였지만, 이후 공통 env/episode identity 249개 중 exact heading match는 <code>12</code>개뿐이었다. Policy별 termination 시점이 달라진 뒤 global RNG 소비와 reset 순서가 갈라지기 때문이다. 따라서 같은 evaluation seed는 <b>same seeded protocol</b>일 뿐 episode common-random-number, reset phase, full state, generator trajectory 또는 simulator noise pairing이 아니다. Evaluator schema에는 reset phase/motion frame이 없어 phase equality도 직접 audit하지 못했다.</div>
+  <div class="callout warn"><b>독립성 범위</b>: 모든 fine-tune seed는 Stage-5 BASE SHA-256 <code>fafb20e89962935d4c5980a6531c9cc538cf71fea541496a8723995e48c4819b</code>, 그 optimizer state, frozen generator SHA-256 <code>7c63764b771ec43fb5d463d77b6860eee8e46f1db5c0b196554f98cc527ed5fa</code>, motion SHA-256 <code>2ba2364641f7ba742fcb50382019e6340b0c68a92f79965b4839a68db3991a86</code>와 upstream data/generator/offline-tracker pipeline을 공유한다. 따라서 전체 HoloSoma pipeline의 독립 재현이나 episode-level 신뢰구간으로 해석하지 않는다.</div>
+
+  <h3>산출물·hash·W&amp;B publication</h3>
+  <ul>
+    <li><a href="../logs/terrain_evaluations/stage10/fine_tune_seed_replication_v1/manifest.json">27-source manifest</a> SHA-256 <code>70c21aa1a1cbefb5ddb52c467e257de3537b9dbf0739246ece9b34839f62c388</code>; common protocol SHA-256 <code>4f3b3c325f0aa9525f5eb8bb09ce44cda092211881712c7b91703893e31c0329</code></li>
+    <li><a href="../logs/terrain_evaluations/stage10/fine_tune_seed_replication_v1/report/stage10_fine_tune_seed_replication_v1.json">aggregate JSON</a> <code>ec5faf203db83a2abf2601375f0a4fe797d5dd6580d92106757713567206ef54</code> · <a href="../logs/terrain_evaluations/stage10/fine_tune_seed_replication_v1/report/stage10_fine_tune_seed_replication_v1.csv">CSV</a> <code>79f6267ea91db7b5ae2bd5dfd3790b714730362764f8be6ed2303b440fad50af</code> · <a href="../logs/terrain_evaluations/stage10/fine_tune_seed_replication_v1/report/stage10_fine_tune_seed_replication_v1.md">MD</a> <code>8fdb01878b3d18c27d7db91005e1f338ddf0feb407f19cce95d9ef557bcc9dc8</code></li>
+    <li><a href="../logs/terrain_evaluations/stage10/fine_tune_seed_replication_v1/reset_heading_pairing_audit.json">reset-heading pairing audit</a> SHA-256 <code>a971c46528388143a842f3ab404f468b363064ffdd5491af41743d2c23d5a8a3</code></li>
+    <li><a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/gomqn9kf">W&amp;B publication run <code>gomqn9kf</code></a> (finished) · <a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/artifacts/evaluation/terrain-observation-ablation-trainseeds42-44-results/v0">104-file artifact v0</a>; custom file-set SHA-256 <code>2cb7c719c6b6192407e1381ea602a0e6023136bd68b7726ba739da08ecf33977</code></li>
+  </ul>
+  <p>기존 <code>corrected_eval_seeds42_44_summary</code>의 <b>30 source / 3,000 episode</b>는 training-seed-42 checkpoint 10개를 evaluation seed 세 개로 반복한 Stage-10 전체 row pool이다. 이 절의 <b>27 source / 2,700 episode</b>는 D fair/E fair/D final 세 policy의 fine-tune seed 42–44 × evaluation seed 42–44 common-L1 grid다. 기존 9 source를 재사용하므로 두 episode 수를 독립 표본처럼 더하지 않는다.</p>
 </section>
 
 <section>
@@ -399,6 +444,8 @@ $PY -m holosoma.motion_gen.scripts.benchmark_inference_latency \
     <tr><td><code>d748e46</code></td><td>generated terrain training에서 짧은 reset seed를 보존하도록 horizon 0 고정</td></tr>
     <tr><td><code>523b197</code></td><td>501-step timeout record와 500 command advance를 분리해 1-env evaluator upper bound만 episode당 501로 정정</td></tr>
     <tr><td><code>6c7aacc</code></td><td>episode OR, contact-step fraction, undesired-contact bodies/step을 report에서 명시적으로 분리</td></tr>
+    <tr><td><code>b32c38a</code></td><td>training-seed-43/44 simulator 결과 확인 전 27-source fine-tune seed replication protocol 사전등록</td></tr>
+    <tr><td><code>6394978</code>, <code>adf90d9</code></td><td>manifest-authoritative training/evaluation-seed raw pool, pseudoreplication guard, training-seed-matched descriptive contrast, evaluation env-count validation</td></tr>
   </table></div>
 <pre><code>PY=~/.holosoma_deps/miniconda3/envs/hssim/bin/python
 
@@ -416,18 +463,30 @@ $PY -m pytest -q \
   src/holosoma/holosoma/config_types/tests/test_terrain_evaluator_config.py
 # 15 passed
 
+# training-seed manifest + strict aggregate regression
+PYTHONPATH=src/holosoma $PY -m pytest -q \
+  src/holosoma/holosoma/utils/tests/test_training_seed_evaluation_aggregation.py \
+  src/holosoma/holosoma/utils/tests/test_terrain_ablation_report.py
+# 52 passed
+
+# completed 27-source training/evaluation-seed grid의 offline strict aggregate
+PYTHONPATH=src/holosoma $PY -m holosoma.aggregate_training_seed_evaluations \
+  --manifest logs/terrain_evaluations/stage10/fine_tune_seed_replication_v1/manifest.json \
+  --output-prefix logs/terrain_evaluations/stage10/fine_tune_seed_replication_v1/report/stage10_fine_tune_seed_replication_v1
+# source_count=27, policy_training_seed_count=9, exit 0
+
 # 별도 read-only 확인
 # BASE: iter 12000, actor (512,154), critic (512,286)
 # pre-fix D snapshot (integrity-only): iter 12500, actor (512,702), critic (512,834)
 # 30 cm list override와 rough single-type template config parse 성공</code></pre>
-  <p>위 관련 suite는 총 <code>88 passed</code>였고 수정 Python 파일 Ruff도 통과했다. Timeout upper-bound 후속 수정은 별도로 <code>15 passed</code>와 Ruff 통과를 확인했다. 이후 실제 corrected 학습 4개, evaluator 30개(각 evaluation seed당 10개), per-seed strict aggregate 3개, raw-pooled aggregate, exemplar validation/render, RTX 4090 benchmark가 모두 정상 종료했다.</p>
+  <p>위 관련 suite는 총 <code>88 passed</code>였고 수정 Python 파일 Ruff도 통과했다. Timeout upper-bound 후속 수정은 별도로 <code>15 passed</code>와 Ruff 통과를 확인했다. Training-seed/strict-aggregate focused test는 위 명령으로 <code>52 passed</code>였고 해당 training-seed aggregator 코드와 test는 Ruff check/format을 통과했다. 기존 corrected 학습 4개와 evaluator 30개에 더해 D/E fine-tune seed43/44 학습 4개와 evaluator 18개가 정상 종료했고, 27-source manifest aggregate와 reset-heading audit도 완료됐다.</p>
 </section>
 
 <section>
   <h2>남은 문제</h2>
   <ul>
-    <li>Evaluation seed는 42/43/44로 반복했지만 모든 policy checkpoint의 training seed는 42 하나다. 따라서 policy 학습 분산을 포함한 multi-training-seed 신뢰구간은 없다.</li>
-    <li>E가 D fair보다 좋아 tracker terrain scan의 편익이 입증되지 않았다. 동일 command identity를 더 강하게 paired-control한 재평가가 필요하다.</li>
+    <li>D fair/E fair/D final의 downstream closed-loop PPO는 fine-tune seed 42/43/44로 반복했지만 모두 같은 Stage-5 BASE·optimizer·generator와 upstream pipeline을 공유한다. A/B/C/F와 stress row도 training seed 42뿐이므로 end-to-end multi-seed 신뢰구간은 없다.</li>
+    <li>E−D fair success delta는 fine-tune seed별 <code>+10.33/−3.33/+3.00%p</code>로 부호가 섞여 tracker terrain scan의 편익이나 해로움이 입증되지 않았다. 같은 evaluation seed도 episode-level CRN이 아니므로 더 강한 explicit reset/trajectory pairing은 별도 작업이다.</li>
     <li>Three-seed pooled hurdle은 30 cm success 2/75·contact-step 23.92%, 60 cm success 0/75·contact-step 41.95%이고 unseen rough도 success 26/300에 그쳤다. “깨끗한 obstacle crossing”은 아직 달성하지 못했다.</li>
     <li>Qualified exemplar는 body-origin height proxy뿐이라 causal tracker correction, collision mesh penetration, 실제 접촉 해소를 증명하지 않는다.</li>
     <li>Generator+tracker ONNX/TensorRT export, simulator 포함 end-to-end latency, MuJoCo sim-to-sim, 실기 G1 검증은 다음 단계다.</li>

@@ -47,9 +47,10 @@ footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted
       <li><code>[ ]</code> fall/collision 감소 — fall은 <code>17%→4%</code>였지만 contact는 동시에 증가</li>
       <li><code>[x]</code> obstacle success rate 증가 — box <code>24%→84%</code>, hurdle <code>4%→52%</code></li>
       <li><code>[ ]</code> tracker가 잘못된 reference를 수정하는 사례 — proxy가 아닌 사례 검증 필요</li>
+      <li><code>[x]</code> D fair/E fair/D final fine-tune seed 42–44 reproducibility grid — 27 source / 2,700 episode</li>
     </ul>
   </div>
-  <div class="callout ok"><b>Corrected production과 평가 완료</b>: reset-XY 정렬 후 D run <code>20260713_124451-...</code>이 1,024 env, 3,000 PPO update를 자연 종료하고 <code>model_14999.pt</code>를 저장했다. Checkpoint·optimizer·normalizer·env state는 전부 finite이고 generator는 끝까지 frozen이었다. Seed 42, fixed level 1, terrain별 25 episode의 Stage-10 공통 평가에서 fair-budget <code>model_12500.pt</code>보다 final의 episode length·success·fall·box/hurdle success가 회복했다. 다만 episode any-contact <code>77%→99%</code>, contact-step fraction <code>2.60%→5.15%</code>로 collision/contact 감소는 실패했고, 시각화된 correction exemplar도 body-origin 높이 proxy일 뿐이므로 두 체크박스는 비워 둔다.</div>
+  <div class="callout ok"><b>Corrected production과 평가 완료</b>: reset-XY 정렬 후 training-seed-42 D run <code>20260713_124451-...</code>이 1,024 env, 3,000 PPO update를 자연 종료하고 <code>model_14999.pt</code>를 저장했다. Checkpoint·optimizer·normalizer·env state는 전부 finite이고 generator는 끝까지 frozen이었다. 이후 같은 Stage-5 BASE·optimizer·frozen generator에서 D/E fine-tune seed 42–44를 평가한 27-source common-L1 grid도 완료했다. D-final−D-fair success delta는 seed별 <code>+20.67/+24.00/+35.67%p</code>였지만 raw-pooled episode any-contact <code>72.56%→83.67%</code>, contact-step <code>1.363%→2.897%</code>로 증가했다. 시각화된 correction exemplar도 body-origin 높이 proxy일 뿐이므로 fall/collision과 causal-correction 두 체크박스는 비워 둔다.</div>
 </section>
 
 <section>
@@ -210,7 +211,7 @@ success = non-initial complete episode
 </section>
 
 <section>
-  <h2>Corrected D production 최종 결과</h2>
+  <h2>Corrected D production 최종 결과 <small>(training seed 42 primary)</small></h2>
   <p>최종 tracker는 <code>logs/WholeBodyTracking/20260713_124451-g1_29dof_wbt_ablation_d_full_terrain_ft-locomotion/model_14999.pt</code>, SHA-256 <code>d5850aad610b9bebf1613cd9473853225dbc06b23f007230d05e92bd328efad8</code>이다. 저장된 <code>iter</code>/<code>iteration</code>은 둘 다 14,999이고 actor/critic input은 702/834다. CPU audit에서 model <code>17 tensor / 1,119,803 element</code>, optimizer <code>51 / 2,239,623</code>, normalizer <code>8 / 4,610</code>, curriculum+env state <code>22 / 13,533</code>의 non-finite element가 모두 0이었다.</p>
   <p>Runtime과 serialized config는 robust+FK generator step 10,000/EMA, <code>trainable generator params=0</code>, <code>terrain=sim_scan</code>, <code>measured_history_guard=True</code>, random heading, 25-step replan, 2-step DDIM, <code>replan_interval_s=0.5</code>, <code>use_sim_terrain_scan=true</code>, <code>require_fully_measured_history=true</code>, <code>past_noise_std=0.0</code>, training reset <code>reanchor=true / phase_horizon_steps=0</code>을 일치하게 남겼다. Training의 sampling은 deterministic 평가 mode가 아니며, 논문에 공개되지 않은 1,024 env·3,000 update·scan grid·PPO 설정은 이 재현의 구현 선택이다.</p>
   <div class="table"><table>
@@ -239,7 +240,26 @@ success = non-initial complete episode
     <tr><td>contact-step fraction</td><td>1078/41506 (2.597%)</td><td>2440/47386 (5.149%)</td></tr>
     <tr><td>undesired-contact bodies/step</td><td>1182/41506 (0.02848)</td><td>2516/47386 (0.05310)</td></tr>
   </table></div>
-  <div class="callout warn"><b>판정</b>: episode length 회복과 고정 L1 obstacle success 증가는 이 single-seed 평가에서 관찰됐다. 반면 fall과 contact를 하나로 묶은 요구는 충족하지 않았다. 또한 final은 fair-budget 스냅샷보다 2,499 update를 더 학습했으므로, A–F 501-update 비교 행에 final을 섞어 우월성을 주장하지 않는다.</div>
+  <div class="callout warn"><b>Seed-42 primary 판정</b>: episode length 회복과 고정 L1 obstacle success 증가는 이 training-seed-42 평가에서 먼저 관찰됐고, 아래 fine-tune-seed replication에서 success 방향을 다시 확인했다. 반면 fall과 contact를 하나로 묶은 요구는 충족하지 않았다. 또한 final은 fair-budget 스냅샷보다 2,499 update를 더 학습했으므로, A–F 501-update 비교 행에 final을 섞어 우월성을 주장하지 않는다.</div>
+</section>
+
+<section>
+  <h2>Fine-tune training-seed replication addendum</h2>
+  <p>평가 결과를 보기 전에 고정한 protocol에 따라 D fair, E fair, D final을 fine-tune seed 42/43/44와 evaluation seed 42/43/44의 common L1에서 평가했다. 각 source는 100 episode, flat/box/stair/hurdle 25개씩이고 총 <b>27 source / 2,700 episode</b>다. 각 policy/training seed에서 evaluation seed 세 개의 raw numerator/denominator를 먼저 합치고, 그 뒤 training seed를 합쳤다.</p>
+  <div class="table"><table>
+    <tr><th>Policy</th><th>Success</th><th>Fall</th><th>Episode any-contact</th><th>Contact-step raw</th><th>Mean length</th></tr>
+    <tr><td>D fair, 501 update</td><td>518/900 (57.56%)</td><td>187/900 (20.78%)</td><td>653/900 (72.56%)</td><td>5,108/374,776 (1.363%)</td><td>416.42</td></tr>
+    <tr><td>D final, 3,000 update</td><td>759/900 (84.33%)</td><td>37/900 (4.11%)</td><td>753/900 (83.67%)</td><td>12,499/431,458 (2.897%)</td><td>479.40</td></tr>
+    <tr><td>E fair, 501 update</td><td>548/900 (60.89%)</td><td>127/900 (14.11%)</td><td>635/900 (70.56%)</td><td>3,404/377,977 (0.901%)</td><td>419.97</td></tr>
+  </table></div>
+  <div class="table"><table>
+    <tr><th>Success contrast</th><th>Fine-tune seed 42 / 43 / 44</th><th>Mean ± sample SD</th><th>부호</th></tr>
+    <tr><td>E fair − D fair</td><td>+10.33 / −3.33 / +3.00%p</td><td>+3.33 ± 6.84%p</td><td>2 positive / 1 negative</td></tr>
+    <tr><td>D final − D fair</td><td>+20.67 / +24.00 / +35.67%p</td><td>+26.78 ± 7.88%p</td><td>3/3 positive</td></tr>
+  </table></div>
+  <p>D final의 terrain별 raw-pooled success는 flat/box/stair/hurdle <code>96.44/82.22/96.89/61.78%</code>이고 D fair는 <code>95.56/36.89/94.67/3.11%</code>다. 따라서 common-L1 obstacle success와 episode length 회복은 세 fine-tune seed 묶음에서도 관찰됐다. 그러나 D final은 fair보다 2,499 update 뒤의 <b>3,000-update duration diagnostic</b>이며, episode/step contact가 함께 증가했으므로 fall/collision 감소 체크박스는 계속 미완료다.</p>
+  <div class="callout warn"><b>통계·pairing 범위</b>: 반복 단위는 episode 2,700개가 아니라 shared-BASE downstream PPO fine-tune seed <code>n=3</code>이며 descriptive 결과만 보고한다. 세 seed 모두 같은 Stage-5 BASE와 optimizer state, frozen generator, upstream data/generator/offline tracker를 공유하므로 end-to-end 독립 pipeline 반복이 아니다. 같은 evaluation seed도 same seeded protocol일 뿐 episode-level common random numbers가 아니다. D/E의 첫 reset heading은 9개 비교 모두 64/64 일치했지만 이후 공통 env/episode identity 249개 중 exact match는 12개였고, reset phase는 schema에 없어 직접 audit하지 못했다.</div>
+  <p>전체 checkpoint SHA, source JSON SHA, W&amp;B capture 방식과 training-seed-matched contrast는 <a href="motion_generator_stage10_ko.html">Stage 10 문서</a> 및 <a href="../logs/terrain_evaluations/stage10/fine_tune_seed_replication_v1/report/stage10_fine_tune_seed_replication_v1.md">aggregate report</a>에 기록했다. Body-origin correction metric은 이 replication에서도 상관 기반 proxy일 뿐 collision geometry·contact-force replay·policy 의도를 보여 주지 않으므로 causal tracker-correction 체크박스도 그대로 비워 둔다.</p>
 </section>
 
 <section>
@@ -310,9 +330,9 @@ $PY -m pytest -q \
 <section>
   <h2>남은 문제와 완료 조건</h2>
   <ul>
-    <li>Stage-10 A–F/D-final/stress 공통 평가는 완료했지만 모든 학습과 평가가 seed 42 하나이다. Episode 수를 늘려도 checkpoint/training-seed 변동을 포함하지 않으므로 multi-seed 반복이 남았다.</li>
+    <li>D fair/E fair/D final의 closed-loop PPO fine-tune seed 42/43/44 반복은 완료했지만 모두 같은 Stage-5 BASE·optimizer·frozen generator와 upstream pipeline을 공유한다. A/B/C/F와 30/60 cm·rough stress도 training seed 42뿐이므로 end-to-end multi-seed 반복은 남았다.</li>
     <li>Episode any-contact과 contact-step fraction을 언제나 별도 denominator로 보고하고, success를 clean obstacle crossing으로 바꾸어 말하지 않는다.</li>
-    <li>30/60 cm hurdle success가 0/25이고 step contact가 22.46%/39.57%이므로 hurdle traversal과 contact 감소가 남았다. Unseen rough L9도 success 8%, fall 25%로 붕괴했다.</li>
+    <li>Evaluation seed 42–44 raw pool에서 30 cm hurdle은 success 2/75·step contact 23.92%, 60 cm hurdle은 0/75·41.95%였고 unseen rough L9도 success 26/300에 그쳤다. 이 stress row는 fine-tune training seed 42 하나이므로 hurdle traversal과 robust multi-seed 검증이 남았다.</li>
     <li>Correction proxy 시각화는 6개를 검증했지만 collision shape, mesh intersection, contact force, action causality를 함께 replay해야 “tracker가 잘못된 reference를 수정했다”를 체크할 수 있다.</li>
     <li>Body-origin penetration은 계속 proxy다. Collision shape/mesh penetration의 정량 평가는 별도 geometry 계측이 필요하다.</li>
   </ul>
