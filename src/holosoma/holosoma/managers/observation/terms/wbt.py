@@ -118,6 +118,22 @@ def actions(env: WholeBodyTrackingManager) -> torch.Tensor:
     return env.action_manager.action
 
 
+def terrain_height_scan(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Current root-yaw-aligned absolute terrain heights.
+
+    The returned tensor is the same cache consumed by
+    ``GeneratedMotionCommand``.  Values are raw world-Z metres here; PPO's
+    empirical observation normalizer is applied later by the algorithm.
+    """
+    terrain_state = env.terrain_manager.get_state("locomotion_terrain")
+    if not getattr(terrain_state, "local_height_scan_configured", False):
+        raise RuntimeError("Terrain height scan observation requires a configured local scan")
+    scan = terrain_state.local_height_scan
+    if scan.ndim != 2 or scan.shape[0] != env.num_envs:
+        raise ValueError(f"Expected terrain scan shape ({env.num_envs}, G), got {tuple(scan.shape)}")
+    return scan
+
+
 #########################################################################################################
 ## terms specific to Whole Body Tracking
 #########################################################################################################

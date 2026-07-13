@@ -3,8 +3,8 @@ from __future__ import annotations
 import time
 
 import torch
-
 from holosoma.envs.base_task.base_task import BaseTask
+from holosoma.utils.rotations import get_euler_xyz
 
 # from holosoma.envs.legged_base_task.legged_robot_base import LeggedRobotBase
 from holosoma.utils.simulator_config import SimulatorType
@@ -39,8 +39,20 @@ class WholeBodyTrackingManager(BaseTask):
         self.default_dof_pos_base = self.default_dof_pos_base.unsqueeze(0)  # (1, num_dof)
         self.default_dof_pos = self.default_dof_pos_base.repeat(self.num_envs, 1).clone()  # (num_envs, num_dof)
 
-    def _pre_compute_observations_callback(self):
-        self.base_quat[:] = self.simulator.base_quat[:]
+    def _pre_compute_observations_callback(self, env_ids=None):
+        if env_ids is None:
+            idx = slice(None)
+            scan_env_ids = None
+        else:
+            scan_env_ids = env_ids.to(device=self.device, dtype=torch.long).reshape(-1)
+            idx = scan_env_ids
+        self.base_quat[idx] = self.simulator.base_quat[idx]
+
+        terrain_state = self.terrain_manager.get_state("locomotion_terrain")
+        if getattr(terrain_state, "local_height_scan_configured", False):
+            root_states = self.simulator.robot_root_states[idx]
+            root_yaw = get_euler_xyz(root_states[:, 3:7], w_last=True)[2]
+            terrain_state.update_local_height_scan(root_states[:, :2], root_yaw, scan_env_ids)
 
     def _reset_buffers_callback(self, env_ids, target_buf=None):
         self.need_to_refresh_envs[env_ids] = True
@@ -58,7 +70,7 @@ class WholeBodyTrackingManager(BaseTask):
         self.simulator.clear_contact_forces_history(env_ids)
         self.need_to_refresh_envs[env_ids] = False
         self.simulator.refresh_sim_tensors()
-        self._pre_compute_observations_callback()
+        self._pre_compute_observations_callback(env_ids)
 
     def _get_average_episode_tracker(self):
         tracker = self.curriculum_manager.get_term("average_episode_tracker")

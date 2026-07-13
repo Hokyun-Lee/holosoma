@@ -162,3 +162,11 @@ class GeneratedMotionConfig(MotionConfig):
     """Gaussian noise added to the measured past-state conditioning
     (paper perturbs generator conditions during training; scale is an
     implementation choice)."""
+
+    use_sim_terrain_scan: bool = False
+    """Condition the generator on the simulator's current local height scan.
+
+    Disabled by default to preserve the Stage-5 flat experiment exactly;
+    the Stage-6 terrain preset enables it and requires a scan-trained
+    generator checkpoint.
+    """

@@ -116,10 +116,26 @@ class TerrainLocomotion(TerrainTermBase):
         return self._local_height_scan
 
     @property
+    def local_height_scan_configured(self) -> bool:
+        return hasattr(self, "_local_scan_grid")
+
+    @property
     def local_height_scan_valid(self) -> torch.Tensor:
         if not hasattr(self, "_local_height_scan_valid"):
             raise RuntimeError("Local height scan is not configured. Call configure_local_height_scan() first.")
         return self._local_height_scan_valid
+
+    @property
+    def local_height_scan_root_xy(self) -> torch.Tensor:
+        if not hasattr(self, "_local_scan_root_xy"):
+            raise RuntimeError("Local height scan is not configured. Call configure_local_height_scan() first.")
+        return self._local_scan_root_xy
+
+    @property
+    def local_height_scan_root_yaw(self) -> torch.Tensor:
+        if not hasattr(self, "_local_scan_root_yaw"):
+            raise RuntimeError("Local height scan is not configured. Call configure_local_height_scan() first.")
+        return self._local_scan_root_yaw
 
     def update_heights(self, env_ids=None):
         idx = env_ids if env_ids is not None else slice(None)
@@ -183,6 +199,15 @@ class TerrainLocomotion(TerrainTermBase):
         self._local_height_scan_valid[env_ids] = True
         return heights
 
+    def invalidate_local_height_scan(self, env_ids: torch.Tensor | None = None) -> None:
+        """Mark cached scans stale, typically immediately before an env reset."""
+        if not hasattr(self, "_local_height_scan_valid"):
+            return
+        if env_ids is None:
+            self._local_height_scan_valid[:] = False
+        else:
+            self._local_height_scan_valid[env_ids.to(device=self.device, dtype=torch.long)] = False
+
     def save_local_height_scan_debug(self, path: str | Path, env_id: int = 0) -> Path:
         """Persist one cached scan for coordinate/order inspection."""
         if not hasattr(self, "_local_scan_grid"):
@@ -242,7 +267,7 @@ class TerrainLocomotion(TerrainTermBase):
         y = points_1d
         x = points_1d
 
-        grid_x, grid_y = torch.meshgrid(x, y)
+        grid_x, grid_y = torch.meshgrid(x, y, indexing="ij")
 
         num_base_height_points = grid_x.numel()
         points = torch.zeros(

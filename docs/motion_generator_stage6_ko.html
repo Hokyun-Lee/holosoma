@@ -52,9 +52,9 @@ footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted
     </ul>
     <h3>Task 6.3 — Generator/tracker 연결</h3>
     <ul>
-      <li>☐ generator dummy terrain 제거</li><li>☐ tracker terrain observation 추가</li>
-      <li>☐ shape/device/normalization 검증</li><li>☐ terrain sensitivity 검증</li>
-      <li>☐ PPO 시작 검증</li>
+      <li>☑ generator dummy terrain 제거</li><li>☑ tracker terrain observation 추가</li>
+      <li>☑ shape/device/normalization 검증</li><li>☑ terrain sensitivity 검증</li>
+      <li>☑ PPO 시작 검증</li>
     </ul>
   </div>
 </section>
@@ -129,6 +129,56 @@ $PY -m holosoma.motion_gen.scripts.validate_sim_height_scan \
   <p>GPU 진단 장면은 한 scan 안의 서로 겹치지 않는 y lane에 30 cm box, 10→20→30 cm stair, 60 cm hurdle을 배치했다. 같은 mesh와 robot을 world에서 90° 회전·이동한 뒤에도 local scan 차이는 최대 <code>2.289×10⁻⁵ m</code>였다. 오차는 z=100 m에서 시작하는 float32 ray hit의 수치 오차 범위다. 저장된 <code>height_scan_debug.npz</code>는 <code>terrain_height (1,289)</code>, <code>world_xy (1,289,2)</code>, grid, flatten 순서, 단위 metadata를 포함한다.</p>
 
   <div class="callout warn"><b>범위 구분</b>: 위 box/stair/hurdle mesh는 scan 좌표·raycast 검증용 deterministic diagnostic이다. Task 6.1의 학습 preset은 아직 기존 flat/rough/depression mix이며, positive obstacle 생성과 난이도 curriculum은 Task 7.3에서 별도로 구현한다. Task 6.2는 scan 취득 API와 검증을 완료했고 generator/tracker가 이 cache를 실제로 소비하는 변경은 Task 6.3이다.</div>
+</section>
+
+<section>
+  <h2>Task 6.3 결과 <small>(2026-07-13)</small></h2>
+  <p>Terrain preset에서는 generator의 zero placeholder를 제거하고, 매 policy step simulator root pose로 갱신한 <code>TerrainLocomotion</code> cache 하나를 generator와 tracker가 함께 소비하도록 연결했다. Stage-5 flat preset은 재현성과 기존 checkpoint 호환성을 위해 명시적으로 zero scan을 계속 사용한다.</p>
+
+  <div class="table"><table>
+    <tr><th>경로</th><th>계약</th></tr>
+    <tr><td>simulator → scan</td><td><code>robot_root_states</code>의 world XY와 Isaac 경계의 <code>xyzw</code> quaternion을 yaw로 변환한다. 내부 generator quaternion은 계속 <code>wxyz</code>다.</td></tr>
+    <tr><td>scan → generator</td><td>2 Hz replan 직전에 due env subset을 실측 root pose로 다시 raycast한다. checkpoint grid의 <code>(N,289)</code> absolute world-Z metre를 normalization 없이 그대로 입력한다.</td></tr>
+    <tr><td>scan → tracker</td><td>같은 cache의 current frame만 actor/critic observation 끝에 붙인다. actor <code>154→443</code>, critic <code>286→575</code>; device는 simulator와 같은 <code>cuda:0</code>다.</td></tr>
+    <tr><td>tracker normalization</td><td>observation term 자체 scale은 1.0이며 PPO empirical normalizer에서 처리한다. legacy checkpoint 확장 시 새 289개 채널은 mean=0, variance/std=1로 시작한다.</td></tr>
+    <tr><td>cache freshness</td><td>50 Hz observation callback에서 전 env를 갱신하고, reset 직전 invalid 처리 후 reset subset만 새 pose로 갱신한다. replan 때 valid mask를 검사한다.</td></tr>
+  </table></div>
+
+  <h3>기존 tracker checkpoint 확장</h3>
+  <p><code>model_12000.pt</code>에는 terrain 채널이 없으므로 terrain preset만 <code>checkpoint_load_mode="expand_input"</code>을 사용한다. 허용 범위는 actor/critic 첫 Linear의 <em>append-only input suffix</em> 하나뿐이다. 기존 weight는 정확히 복사하고 새 column은 0, AdamW moment도 0으로 채운다. 따라서 로드 직후에는 terrain 값과 무관하게 기존 policy 출력이 보존되고, PPO가 새 column을 학습한다. 다른 key·hidden width·비-suffix shape 변화는 오류로 거부한다. Flat preset의 기본값은 계속 <code>strict</code>다.</p>
+  <div class="callout warn"><b>Normalizer 구현 선택</b>: 현 empirical normalizer는 feature별 count가 아니라 scalar count 하나를 쓴다. 기존 채널 통계를 보존하려고 checkpoint의 큰 count를 유지하고 새 terrain 채널만 identity 통계로 넣었다. 따라서 초기 terrain 채널은 사실상 raw metre scale이고 새 통계 적응은 느리다. 이는 논문 명시값이 아닌 warm-start 안정성 선택이며, 추후 독립 terrain normalizer ablation 대상이다.</div>
+
+  <h3>검증 명령</h3>
+<pre><code># 동일 history/heading/seed, zero scan 대 30 cm obstacle scan
+$PY -m holosoma.motion_gen.scripts.validate_generator_terrain_condition
+# feature mean/max |Δ| = 0.00878762 / 0.06616688
+# root    mean/max |Δ| = 0.00468405 / 0.01772400
+# joint   mean/max |Δ| = 0.01603699 / 0.06616688
+# body    mean/max |Δ| = 0.00464505 / 0.02888148
+
+# old checkpoint warm-start + 실제 scan + PPO 2 iterations
+$PY src/holosoma/holosoma/train_agent.py exp:g1-29dof-wbt-gen-terrain logger:disabled \
+  --training.num-envs 64 --training.checkpoint=$TRACKER \
+  --algo.config.num-learning-iterations 2 --algo.config.save-interval 999999 \
+  --command.setup-terms.motion-command.params.motion-config.generator-checkpoint=$GEN \
+  --command.setup-terms.motion-command.params.motion-config.motion-file=$SEED
+
+# 전체 관련 CPU regression
+$PY -m pytest src/holosoma/holosoma/motion_gen/tests \
+  src/holosoma/holosoma/config_types/tests \
+  src/holosoma/holosoma/agents/ppo/tests/test_checkpoint_expansion.py -q
+# 51 passed</code></pre>
+
+  <h3>실행 결과</h3>
+  <ul>
+    <li><code>20260713_075346-g1_29dof_wbt_gen_terrain_manager-locomotion</code>: iteration 12,000–12,001 완료, expanded model/normalizer/optimizer를 포함한 <code>model_12001.pt</code> 저장. 2회 update 뒤 새 terrain weight가 actor max <code>0.002571</code>, critic max <code>0.003237</code>로 0에서 변해 실제 학습 연결을 확인했다.</li>
+    <li><code>20260713_075552-g1_29dof_wbt_gen_terrain_manager-locomotion</code>: 실제 sim scan의 평균 절댓값 <code>0.0290 m</code>, env별 평균 range <code>0.0368 m</code>; scan anchor와 현재 root의 XY/yaw error는 모두 로그 정밀도 <code>0.0000</code>이었다.</li>
+    <li><code>20260713_075823-g1_29dof_wbt_gen_manager-locomotion</code>: Task-6.3 뒤 flat preset을 다시 1 iteration 실행했다. <code>terrain=stage5_flat_zeros</code>, actor 154/critic 286, strict checkpoint·optimizer load, <code>model_12000.pt</code> 저장을 확인했다.</li>
+    <li>관련 test <code>51 passed</code>, 수정 Python 파일 전체 Ruff 통과, generator는 두 Isaac run 모두 trainable parameter 0이었다.</li>
+  </ul>
+
+  <div class="callout ok"><b>Task 6 완료</b>: 실제 simulator terrain scan이 frozen 2-step generator와 PPO tracker 양쪽에 같은 좌표·flatten·단위로 들어가고, legacy tracker warm-start와 flat regression까지 실제 실행으로 확인했다.</div>
+  <div class="callout warn"><b>남은 범위</b>: 현재 학습 mesh는 기존 flat/rough/depression mix다. 30 cm synthetic sensitivity는 조건 경로가 살아 있음을 보일 뿐 장애물 극복 품질을 뜻하지 않는다. Positive box/stair/hurdle, 난이도 증가, terrain별 success logging은 Task 7.3에서 구현한다.</div>
 </section>
 
 <footer>HoloSoma motion_gen · Stage 6 진행 문서 · 이전: <a href="motion_generator_closedloop_ko.html">Stage 5 폐루프</a></footer>

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import field
-from typing import Any, List, Union
+from typing import Any, List, Literal, Union
 
 from pydantic.dataclasses import dataclass
 
@@ -170,6 +170,14 @@ class PPOConfig:
 
     load_optimizer: bool = True
     """Whether to load optimizer state."""
+
+    checkpoint_load_mode: Literal["strict", "expand_input"] = "strict"
+    """Checkpoint compatibility policy.
+
+    ``expand_input`` permits only an appended suffix of actor/critic input
+    features.  It zero-initializes the new first-layer columns and optimizer
+    moments while preserving all old weights and normalizer statistics.
+    """
 
     init_noise_std: float = 0.8
     """Initial noise standard deviation."""

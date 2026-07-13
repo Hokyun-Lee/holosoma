@@ -37,7 +37,7 @@ from loguru import logger
 from holosoma.config_types.command import GeneratedMotionConfig
 from holosoma.managers.command.base import CommandTermBase
 from holosoma.managers.command.terms.wbt import MotionCommand
-from holosoma.motion_gen.features import quat_conjugate, quat_mul, quat_normalize
+from holosoma.motion_gen.features import quat_conjugate, quat_mul, quat_normalize, quat_yaw
 from holosoma.motion_gen.sampling import MotionGenerator, MotionGeneratorInput
 from holosoma.utils.rotations import quat_apply, quat_inverse, yaw_quat
 from holosoma.utils.rotations import quat_mul as quat_mul_sim
@@ -93,6 +93,19 @@ class GeneratedMotionCommand(MotionCommand):
         self._past = gen_data_cfg.past_frames
         self._horizon = gen_data_cfg.future_frames
         self._feat_dim = self.layout.dim
+        self._use_sim_terrain_scan = self.gen_cfg.use_sim_terrain_scan
+        if self._use_sim_terrain_scan:
+            if not gen_data_cfg.use_terrain_scan:
+                raise ValueError(
+                    "use_sim_terrain_scan requires a generator checkpoint trained with terrain scans"
+                )
+            if gen_data_cfg.terrain_dim != gen_data_cfg.scan_grid.dim:
+                raise ValueError(
+                    f"Generator terrain_dim {gen_data_cfg.terrain_dim} does not match "
+                    f"scan grid dim {gen_data_cfg.scan_grid.dim}"
+                )
+            self._terrain_state = self._env.terrain_manager.get_state("locomotion_terrain")
+            self._terrain_state.configure_local_height_scan(gen_data_cfg.scan_grid)
 
         env_fps = 1.0 / self._env.dt
         if abs(env_fps - gen_data_cfg.fps) > 1e-3:
@@ -150,13 +163,15 @@ class GeneratedMotionCommand(MotionCommand):
         self._history = torch.zeros(N, self._past, self._feat_dim, device=dev)
         self._headings = torch.zeros(N, 2, device=dev)
         self._arange = torch.arange(N, device=dev)
-        self._terrain_zeros = torch.zeros(N, gen_data_cfg.terrain_dim, device=dev)
+        if not self._use_sim_terrain_scan:
+            self._terrain_zeros = torch.zeros(N, gen_data_cfg.terrain_dim, device=dev)
 
         self._seed_mode = False
         logger.info(
             f"[GeneratedMotionCommand] frozen generator @ {self.gen_cfg.generator_checkpoint} "
             f"(step {self.generator.checkpoint_step}), replan every {self._replan_steps} steps, "
             f"{self.gen_cfg.denoise_steps}-step denoising, heading={self.gen_cfg.heading_mode}, "
+            f"terrain={'sim_scan' if self._use_sim_terrain_scan else 'stage5_flat_zeros'}, "
             "trainable generator params=0"
         )
 
@@ -195,6 +210,13 @@ class GeneratedMotionCommand(MotionCommand):
 
     # ------------------------------------------------------------------ replan
 
+    def _update_terrain_from_sim(self, env_ids: torch.Tensor) -> torch.Tensor:
+        """Refresh scans from the measured simulator root pose (xyzw at this boundary)."""
+        root_states = self._env.simulator.robot_root_states[env_ids]
+        root_xy = root_states[:, :2]
+        root_yaw = quat_yaw(_wxyz(root_states[:, 3:7]))
+        return self._terrain_state.update_local_height_scan(root_xy, root_yaw, env_ids)
+
     @torch.no_grad()
     def _replan(self, env_ids: torch.Tensor) -> None:
         past = self._history[env_ids].clone()
@@ -204,11 +226,24 @@ class GeneratedMotionCommand(MotionCommand):
             qs = self.layout.root_quat_slice
             past[..., qs] = quat_normalize(past[..., qs])
 
+        if self._use_sim_terrain_scan:
+            # WBT refreshes the shared cache every policy step for tracker
+            # observations. Query the due subset again from the measured root
+            # so direct command stepping cannot silently use stale data.
+            self._update_terrain_from_sim(env_ids)
+            valid = self._terrain_state.local_height_scan_valid[env_ids]
+            if not bool(valid.all()):
+                invalid_count = int((~valid).sum())
+                raise RuntimeError(f"Cannot replan with {invalid_count} stale local terrain scans")
+            terrain_height = self._terrain_state.local_height_scan[env_ids]
+        else:
+            terrain_height = self._terrain_zeros[env_ids]
+
         out = self.generator.generate(
             MotionGeneratorInput(
                 past_motion=past,
                 target_heading=self._headings[env_ids],
-                terrain_height=self._terrain_zeros[env_ids],
+                terrain_height=terrain_height,
             ),
             num_steps=self.gen_cfg.denoise_steps,
             deterministic=False,
@@ -272,6 +307,9 @@ class GeneratedMotionCommand(MotionCommand):
             tk = torch.clamp(t - (self._past - 1 - k), min=start)
             self._history[env_ids, k] = self._seed_features(env_ids, tk)
 
+        if self._use_sim_terrain_scan:
+            self._terrain_state.invalidate_local_height_scan(env_ids)
+
         if self.gen_cfg.heading_mode == "random":
             yaw = torch.rand(env_ids.numel(), device=self.device) * 2 * math.pi
             self._headings[env_ids] = torch.stack([torch.cos(yaw), torch.sin(yaw)], dim=-1)
@@ -318,6 +356,25 @@ class GeneratedMotionCommand(MotionCommand):
         self.body_pos_relative_w = (
             rob_pos_r + delta_pos_w_height + quat_apply(delta_quat_w, self.body_pos_w - ref_pos_r, w_last=True)
         )
+
+    def update_metrics(self) -> None:
+        super().update_metrics()
+        if not self._use_sim_terrain_scan:
+            return
+        scan = self._terrain_state.local_height_scan
+        root_states = self._env.simulator.robot_root_states
+        current_yaw = quat_yaw(_wxyz(root_states[:, 3:7]))
+        yaw_delta = current_yaw - self._terrain_state.local_height_scan_root_yaw
+        self.metrics["terrain/scan_abs_mean"] = scan.abs().mean(dim=-1)
+        self.metrics["terrain/scan_range"] = scan.max(dim=-1).values - scan.min(dim=-1).values
+        self.metrics["terrain/scan_anchor_xy_error"] = torch.linalg.vector_norm(
+            root_states[:, :2] - self._terrain_state.local_height_scan_root_xy,
+            dim=-1,
+        )
+        self.metrics["terrain/scan_anchor_yaw_error"] = torch.atan2(
+            torch.sin(yaw_delta),
+            torch.cos(yaw_delta),
+        ).abs()
 
     # ------------------------------------------------------------------ reference properties
 

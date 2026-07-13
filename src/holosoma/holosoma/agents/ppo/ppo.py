@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import itertools
 import os
 from typing import TypedDict
@@ -7,12 +8,6 @@ from typing import TypedDict
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from loguru import logger
-from rich.console import Console
-from torch import nn
-from torch.distributions import Normal, kl_divergence
-from torch.utils.tensorboard import SummaryWriter as TensorboardSummaryWriter
-
 from holosoma.agents.base_algo.base_algo import BaseAlgo
 from holosoma.agents.callbacks.base_callback import RLEvalCallback
 from holosoma.agents.modules.augmentation_utils import SymmetryUtils
@@ -33,6 +28,11 @@ from holosoma.utils.inference_helpers import (
     get_control_gains_from_config,
     get_urdf_text_from_robot_config,
 )
+from loguru import logger
+from rich.console import Console
+from torch import nn
+from torch.distributions import Normal, kl_divergence
+from torch.utils.tensorboard import SummaryWriter as TensorboardSummaryWriter
 
 console = Console()
 
@@ -99,6 +99,140 @@ class EmpiricalNormalization(nn.Module):
         self._var.copy_(M2 / new_count)
         self._std.copy_(self._var.sqrt())
         self.count.copy_(new_count)
+
+
+def _expand_tensor_suffix(
+    source: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    fill_value: float,
+) -> torch.Tensor:
+    """Copy a tensor into a larger last-dimension prefix."""
+    if source.ndim != target.ndim or source.shape[:-1] != target.shape[:-1]:
+        raise ValueError(f"Cannot suffix-expand tensor {tuple(source.shape)} to {tuple(target.shape)}")
+    if source.shape[-1] >= target.shape[-1]:
+        raise ValueError(f"Suffix expansion requires growth, got {tuple(source.shape)} to {tuple(target.shape)}")
+    expanded = torch.full_like(target, fill_value)
+    expanded[..., : source.shape[-1]] = source.to(device=target.device, dtype=target.dtype)
+    return expanded
+
+
+def _load_module_with_input_expansion(
+    module: nn.Module,
+    source_state: dict[str, torch.Tensor],
+    *,
+    allowed_weight_key: str,
+    label: str,
+) -> bool:
+    """Strict-load a module except for one appended first-layer input suffix."""
+    target_state = module.state_dict()
+    if set(source_state) != set(target_state):
+        missing = sorted(set(target_state) - set(source_state))
+        unexpected = sorted(set(source_state) - set(target_state))
+        raise RuntimeError(f"{label} checkpoint keys differ: missing={missing}, unexpected={unexpected}")
+
+    migrated: dict[str, torch.Tensor] = {}
+    expanded_keys = []
+    for key, target in target_state.items():
+        source = source_state[key]
+        if source.shape == target.shape:
+            migrated[key] = source
+        elif key == allowed_weight_key and source.ndim == 2:
+            try:
+                migrated[key] = _expand_tensor_suffix(source, target, fill_value=0.0)
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"{label} input layer is not a suffix expansion: "
+                    f"{tuple(source.shape)} vs {tuple(target.shape)}"
+                ) from exc
+            expanded_keys.append(key)
+        else:
+            raise RuntimeError(
+                f"{label} checkpoint shape mismatch for {key}: "
+                f"{tuple(source.shape)} vs {tuple(target.shape)}"
+            )
+    if len(expanded_keys) > 1:
+        raise RuntimeError(f"{label} expanded more than one input tensor: {expanded_keys}")
+    module.load_state_dict(migrated, strict=True)
+    if expanded_keys:
+        source_width = source_state[allowed_weight_key].shape[-1]
+        target_width = target_state[allowed_weight_key].shape[-1]
+        logger.info(f"Expanded {label} input suffix {source_width} -> {target_width}; new columns initialized to zero")
+    return bool(expanded_keys)
+
+
+def _load_normalizer_with_input_expansion(
+    normalizer: nn.Module,
+    source_state: dict[str, torch.Tensor],
+    *,
+    label: str,
+) -> bool:
+    """Expand empirical-normalizer feature suffix with identity statistics."""
+    target_state = normalizer.state_dict()
+    if set(source_state) != set(target_state):
+        raise RuntimeError(f"{label} normalizer checkpoint keys differ")
+
+    migrated: dict[str, torch.Tensor] = {}
+    expanded_keys = []
+    fill_values = {"_mean": 0.0, "_var": 1.0, "_std": 1.0}
+    for key, target in target_state.items():
+        source = source_state[key]
+        if source.shape == target.shape:
+            migrated[key] = source
+        elif key in fill_values:
+            migrated[key] = _expand_tensor_suffix(source, target, fill_value=fill_values[key])
+            expanded_keys.append(key)
+        else:
+            raise RuntimeError(
+                f"{label} normalizer shape mismatch for {key}: "
+                f"{tuple(source.shape)} vs {tuple(target.shape)}"
+            )
+    if expanded_keys and set(expanded_keys) != set(fill_values):
+        raise RuntimeError(f"{label} normalizer must expand mean/var/std together, got {expanded_keys}")
+    normalizer.load_state_dict(migrated, strict=True)
+    if expanded_keys:
+        logger.info(f"Expanded {label} normalizer suffix with mean=0, variance/std=1")
+    return bool(expanded_keys)
+
+
+def _load_optimizer_with_input_expansion(
+    optimizer: torch.optim.Optimizer,
+    source_state: dict,
+    *,
+    label: str,
+) -> int:
+    """Zero-pad optimizer moments for parameters whose input suffix grew."""
+    migrated = copy.deepcopy(source_state)
+    target_params = [param for group in optimizer.param_groups for param in group["params"]]
+    source_ids = [param_id for group in migrated["param_groups"] for param_id in group["params"]]
+    if len(source_ids) != len(target_params):
+        raise RuntimeError(
+            f"{label} optimizer parameter count changed: {len(source_ids)} vs {len(target_params)}"
+        )
+
+    expanded_tensors = 0
+    for source_id, target_param in zip(source_ids, target_params):
+        parameter_state = migrated["state"].get(source_id, {})
+        for state_name, value in tuple(parameter_state.items()):
+            if not isinstance(value, torch.Tensor) or value.ndim == 0 or value.shape == target_param.shape:
+                continue
+            try:
+                parameter_state[state_name] = _expand_tensor_suffix(
+                    value,
+                    torch.zeros_like(target_param, device=value.device, dtype=value.dtype),
+                    fill_value=0.0,
+                )
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"{label} optimizer state mismatch for {state_name}: "
+                    f"{tuple(value.shape)} vs {tuple(target_param.shape)}"
+                ) from exc
+            expanded_tensors += 1
+
+    optimizer.load_state_dict(migrated)
+    if expanded_tensors:
+        logger.info(f"Expanded {expanded_tensors} {label} optimizer moment tensors with zero suffixes")
+    return expanded_tensors
 
 
 class Minibatch(TypedDict):
@@ -651,15 +785,56 @@ class PPO(BaseAlgo):
         if ckpt_path is not None:
             logger.info(f"Loading checkpoint from {ckpt_path}")
             loaded_dict = torch.load(ckpt_path, map_location=self.device)
-            self.actor.load_state_dict(loaded_dict["actor_model_state_dict"])
-            self.critic.load_state_dict(loaded_dict["critic_model_state_dict"])
+            expand_input = self.config.checkpoint_load_mode == "expand_input"
+            if expand_input:
+                _load_module_with_input_expansion(
+                    self.actor,
+                    loaded_dict["actor_model_state_dict"],
+                    allowed_weight_key="actor_module.module.0.weight",
+                    label="actor",
+                )
+                _load_module_with_input_expansion(
+                    self.critic,
+                    loaded_dict["critic_model_state_dict"],
+                    allowed_weight_key="critic_module.module.0.weight",
+                    label="critic",
+                )
+            else:
+                self.actor.load_state_dict(loaded_dict["actor_model_state_dict"])
+                self.critic.load_state_dict(loaded_dict["critic_model_state_dict"])
             if self.empirical_normalization and loaded_dict.get("actor_obs_normalizer_state_dict") is not None:
-                self.actor_obs_normalizer.load_state_dict(loaded_dict["actor_obs_normalizer_state_dict"])
+                if expand_input:
+                    _load_normalizer_with_input_expansion(
+                        self.actor_obs_normalizer,
+                        loaded_dict["actor_obs_normalizer_state_dict"],
+                        label="actor",
+                    )
+                else:
+                    self.actor_obs_normalizer.load_state_dict(loaded_dict["actor_obs_normalizer_state_dict"])
             if self.empirical_normalization and loaded_dict.get("critic_obs_normalizer_state_dict") is not None:
-                self.critic_obs_normalizer.load_state_dict(loaded_dict["critic_obs_normalizer_state_dict"])
+                if expand_input:
+                    _load_normalizer_with_input_expansion(
+                        self.critic_obs_normalizer,
+                        loaded_dict["critic_obs_normalizer_state_dict"],
+                        label="critic",
+                    )
+                else:
+                    self.critic_obs_normalizer.load_state_dict(loaded_dict["critic_obs_normalizer_state_dict"])
             if self.config.load_optimizer:
-                self.actor_optimizer.load_state_dict(loaded_dict["actor_optimizer_state_dict"])
-                self.critic_optimizer.load_state_dict(loaded_dict["critic_optimizer_state_dict"])
+                if expand_input:
+                    _load_optimizer_with_input_expansion(
+                        self.actor_optimizer,
+                        loaded_dict["actor_optimizer_state_dict"],
+                        label="actor",
+                    )
+                    _load_optimizer_with_input_expansion(
+                        self.critic_optimizer,
+                        loaded_dict["critic_optimizer_state_dict"],
+                        label="critic",
+                    )
+                else:
+                    self.actor_optimizer.load_state_dict(loaded_dict["actor_optimizer_state_dict"])
+                    self.critic_optimizer.load_state_dict(loaded_dict["critic_optimizer_state_dict"])
                 self.actor_learning_rate = loaded_dict["actor_optimizer_state_dict"]["param_groups"][0]["lr"]
                 self.critic_learning_rate = loaded_dict["critic_optimizer_state_dict"]["param_groups"][0]["lr"]
                 logger.info("Optimizer loaded from checkpoint")

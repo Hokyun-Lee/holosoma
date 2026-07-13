@@ -274,11 +274,54 @@ reset-facing direction. Stage 5 has no fixed-vector selector or manual
 immediate-reset key, and Isaac Sim's W/S/Q/E command keys do not feed
 `GeneratedMotionCommand`.
 
+## Stage 6: simulator terrain connection (2026-07-13, docs/motion_generator_stage6_ko.html)
+
+Stage 5 remains an unchanged flat baseline, while the new
+`exp:g1-29dof-wbt-gen-terrain` preset uses the existing procedural trimesh and
+the terrain-trained generator. The simulator scan contract is taken directly
+from the generator checkpoint: root-XY/root-yaw local frame, x
+`[-0.3, 1.3]`, y `[-0.8, 0.8]`, 0.1 m spacing, 17x17=289 values,
+x-major/y-fastest flattening, raw absolute world-Z metres. A GPU Warp-raycast
+diagnostic containing a box, stairs, and a hurdle measured flat/obstacle/yaw
+maximum errors of 1.53e-5 / 1.53e-5 / 2.29e-5 m and saved a debug NPZ.
+These grid values are implementation choices inherited from Stage 3, not
+paper-specified constants.
+
+`TerrainLocomotion` now owns one per-environment scan cache shared by the
+frozen generator and tracker. The WBT observation callback refreshes it every
+50 Hz policy step from measured simulator root states; the 2 Hz generator
+replan refreshes its due subset again and rejects stale scans. Isaac root
+quaternions are converted from xyzw at the simulator boundary; motion-gen
+internals remain wxyz. Tracker observations append only the current 289-value
+scan: actor 154->443 and critic 286->575. Raw values enter the observation
+term at scale 1 and PPO applies its empirical normalization.
+
+Warm-starting the Stage-5 `model_12000.pt` required a deliberately narrow,
+opt-in `checkpoint_load_mode="expand_input"`: only the appended input suffix
+of each first Linear may grow. Old columns are copied exactly; new columns and
+AdamW moments are zero-filled; new normalizer entries start at mean 0 and
+variance/std 1. The old scalar normalizer count is retained to preserve old
+statistics, so the new channels initially remain near raw metre scale and
+adapt slowly (an implementation choice and future ablation). Strict loading
+remains the global and flat-preset default.
+
+Real Isaac validation with 64 envs resumed the old checkpoint for two PPO
+iterations (`20260713_075346-*`), saved the fully expanded model/normalizers/
+optimizer, and changed the initially-zero terrain weights (actor max 0.002571,
+critic max 0.003237). A second diagnostic run logged actual scan abs mean
+0.0290 m, range 0.0368 m, and zero displayed root-XY/yaw anchor errors. With
+the same history, heading, seed, and 2-step deterministic sampler, replacing a
+flat scan by a synthetic 30 cm obstacle changed generated features by mean
+0.00879 / max 0.06617. The post-change flat regression strict-loaded the old
+154/286 checkpoint and completed one PPO iteration (`20260713_075823-*`).
+Related tests: 51 passed, Ruff clean. The current terrain mix is still the old
+flat/rough/depression set; positive box/stair/hurdle curriculum is Stage 7.3.
+
 ## Known limitations / not yet verified
 
-- The generator is terrain-conditioned and validated offline, but the stage-5
-  simulator integration still feeds a flat zero scan; terrain-aware closed-loop
-  tracking is not yet validated.
+- Terrain-aware closed-loop dataflow and PPO startup are validated, but no
+  terrain policy has been trained to convergence and positive obstacle success
+  is not yet measured.
 - 2-step DDIM quality is validated offline and used in closed-loop training;
   deployment latency/export remains unverified.
 - Paperscale generation reaches 0.0546 m full-val MPJPE (terrain checkpoint
@@ -293,7 +336,8 @@ immediate-reset key, and Isaac Sim's W/S/Q/E command keys do not feed
   checkpoint. The generator uses only standard ops
   (Linear/LayerNorm/TransformerEncoder/sinusoidal embeddings), no known
   blockers, but unverified.
-- Terrain closed-loop tracking, MuJoCo sim-to-sim, and sim-to-real remain.
+- Terrain closed-loop convergence/evaluation, MuJoCo sim-to-sim, and
+  sim-to-real remain.
 
 ## Technical risks for the next stage
 
