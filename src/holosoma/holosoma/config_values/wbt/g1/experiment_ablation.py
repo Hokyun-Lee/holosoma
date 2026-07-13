@@ -40,6 +40,15 @@ def _with_training_name(experiment, name: str):
     return replace(experiment, training=replace(experiment.training, name=name))
 
 
+def _with_generator_past_noise(command, past_noise_std: float):
+    setup_terms = dict(command.setup_terms)
+    motion_term = setup_terms["motion_command"]
+    params = dict(motion_term.params)
+    params["motion_config"] = replace(params["motion_config"], past_noise_std=past_noise_std)
+    setup_terms["motion_command"] = replace(motion_term, params=params)
+    return replace(command, setup_terms=setup_terms)
+
+
 # A: fixed reference + physical curriculum + tracker scan/history + heading
 # reward. BASE inputs are expanded, then the tracker is terrain fine-tuned.
 g1_29dof_wbt_ablation_a_fixed_reference = replace(
@@ -53,13 +62,15 @@ g1_29dof_wbt_ablation_a_fixed_reference = replace(
 
 # B: online generator and tracker are terrain blind. The physical balanced
 # terrain remains present for evaluation, but curriculum adaptation and PPO
-# updates are disabled by default.
+# updates are disabled by default. Condition noise is not a requested ablation
+# axis: training/evaluation comparisons use clean measured past state, while B
+# retains the canonical Stage-5 command's zero terrain scan.
 g1_29dof_wbt_ablation_b_generator_blind = replace(
     _with_training_name(
         g1_29dof_wbt_gen_terrain,
         "g1_29dof_wbt_ablation_b_generator_blind_no_terrain_ft",
     ),
-    command=g1_29dof_wbt_gen_command,
+    command=_with_generator_past_noise(g1_29dof_wbt_gen_command, 0.0),
     observation=g1_29dof_wbt_gen.observation,
     curriculum=_with_terrain_curriculum_enabled(False),
     reward=_with_heading_weight(g1_29dof_wbt_gen_terrain, 0.0),

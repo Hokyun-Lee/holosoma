@@ -62,6 +62,21 @@ def test_ablation_b_is_generator_and_tracker_terrain_blind_update0() -> None:
     assert cfg.algo.config.num_learning_iterations == 0
 
 
+def test_ablation_generators_use_clean_past_without_mutating_canonical_flat() -> None:
+    canonical_flat = _parse("g1-29dof-wbt-gen")
+    ablations = (
+        _parse("g1-29dof-wbt-ablation-b-generator-blind"),
+        _parse("g1-29dof-wbt-ablation-c-full-no-finetune"),
+        _parse("g1-29dof-wbt-ablation-d-full-finetune"),
+        _parse("g1-29dof-wbt-ablation-e-generator-terrain-only"),
+        _parse("g1-29dof-wbt-ablation-f-no-heading-reward"),
+    )
+
+    assert _motion_cfg(canonical_flat).past_noise_std == 0.01
+    assert _motion_cfg(ablations[0]).use_sim_terrain_scan is False
+    assert all(_motion_cfg(cfg).past_noise_std == 0.0 for cfg in ablations)
+
+
 def test_ablation_c_and_d_share_full_architecture_but_d_updates() -> None:
     cfg_c = _parse("g1-29dof-wbt-ablation-c-full-no-finetune")
     cfg_d = _parse("g1-29dof-wbt-ablation-d-full-finetune")
