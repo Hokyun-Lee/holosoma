@@ -98,6 +98,36 @@ class TerrainLocomotion(TerrainTermBase):
         return self._env_origins
 
     @property
+    def terrain_levels(self) -> torch.Tensor:
+        """Current curriculum row for each environment."""
+        self._require_curriculum_layout()
+        return self._terrain_levels
+
+    @property
+    def terrain_type_ids(self) -> torch.Tensor:
+        """Stable curriculum terrain-type index for each environment."""
+        self._require_curriculum_layout()
+        return self._terrain_type_ids
+
+    @property
+    def terrain_columns(self) -> torch.Tensor:
+        """Stable curriculum column for each environment."""
+        self._require_curriculum_layout()
+        return self._terrain_columns
+
+    @property
+    def terrain_type_names(self) -> tuple[str, ...]:
+        """Terrain type names indexed by :attr:`terrain_type_ids`."""
+        self._require_curriculum_layout()
+        return self._terrain_type_names
+
+    @property
+    def num_curriculum_levels(self) -> int:
+        """Number of available terrain difficulty rows."""
+        self._require_curriculum_layout()
+        return int(self._curriculum_origin_grid.shape[0])
+
+    @property
     def custom_origins(self) -> bool:
         return self._custom_origins
 
@@ -232,13 +262,72 @@ class TerrainLocomotion(TerrainTermBase):
         """
         self._custom_origins = True
 
-        if self._cfg.spawn.randomize_tiles:
+        if self.terrain.curriculum_enabled:
+            self._initialize_curriculum_origins()
+        elif self._cfg.spawn.randomize_tiles:
             # Training mode: random terrain tiles for curriculum learning
             self._env_origins[:] = torch.from_numpy(self.terrain.sample_env_origins()).to(self.device).to(torch.float)
         else:
             # Eval mode: all robots at tile (0,0) for deterministic evaluation
             origin_0_0 = torch.from_numpy(self.terrain._env_origins[0, 0]).to(self.device).to(torch.float)
             self._env_origins[:] = origin_0_0  # Broadcast to all robots
+
+    def _initialize_curriculum_origins(self) -> None:
+        """Assign balanced, fixed terrain types/columns and start every env at level zero."""
+        self._terrain_type_names = self.terrain.terrain_type_names
+        names_by_column = self.terrain.terrain_types_by_column
+        columns_by_type = [
+            [column for column, name in enumerate(names_by_column) if name == type_name]
+            for type_name in self._terrain_type_names
+        ]
+        if any(not columns for columns in columns_by_type):
+            raise ValueError("Every curriculum terrain type must own at least one column.")
+
+        type_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long) % len(self._terrain_type_names)
+        columns = [
+            columns_by_type[type_id][env_id // len(self._terrain_type_names) % len(columns_by_type[type_id])]
+            for env_id, type_id in enumerate(type_ids.cpu().tolist())
+        ]
+        self._terrain_type_ids = type_ids
+        self._terrain_columns = torch.tensor(columns, device=self.device, dtype=torch.long)
+        self._terrain_levels = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
+        self._curriculum_origin_grid = torch.from_numpy(self.terrain.origin_grid).to(
+            device=self.device,
+            dtype=torch.float,
+        )
+        self._env_origins[:] = self._curriculum_origin_grid[0, self._terrain_columns]
+
+    def set_curriculum_origins(self, env_ids: torch.Tensor, levels: torch.Tensor | int) -> None:
+        """Move a subset to requested rows while keeping their terrain types fixed."""
+        self._require_curriculum_layout()
+        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long).reshape(-1)
+        levels = torch.as_tensor(levels, device=self.device, dtype=torch.long).reshape(-1)
+        if levels.numel() == 1 and env_ids.numel() != 1:
+            levels = levels.expand(env_ids.numel())
+        if levels.numel() != env_ids.numel():
+            raise ValueError(f"levels ({levels.numel()}) must match env_ids ({env_ids.numel()}).")
+        if env_ids.numel() == 0:
+            return
+        if bool(torch.any((env_ids < 0) | (env_ids >= self.num_envs))):
+            raise IndexError("env_ids contains an environment outside the configured range.")
+        if bool(torch.any((levels < 0) | (levels >= self.num_curriculum_levels))):
+            raise IndexError("levels contains a row outside the curriculum grid.")
+
+        self._terrain_levels[env_ids] = levels
+        origins = self._curriculum_origin_grid[levels, self._terrain_columns[env_ids]]
+        self._env_origins[env_ids] = origins
+
+        simulator = getattr(self.env, "simulator", None)
+        scene = getattr(simulator, "scene", None)
+        scene_origins = getattr(scene, "env_origins", None)
+        if scene_origins is not None:
+            scene_ids = env_ids.to(device=scene_origins.device)
+            scene_origins[scene_ids] = origins.to(device=scene_origins.device, dtype=scene_origins.dtype)
+        self.invalidate_local_height_scan(env_ids)
+
+    def _require_curriculum_layout(self) -> None:
+        if not self.terrain.curriculum_enabled:
+            raise RuntimeError("Terrain curriculum layout is not enabled for this terrain term.")
 
     def _init_base_height_points(self):
         """Returns points at which the height measurments are sampled (in base frame)

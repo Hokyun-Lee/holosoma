@@ -108,6 +108,55 @@ class SpawnCfg:
 
 
 @dataclass(frozen=True)
+class TerrainCurriculumLayoutCfg:
+    """Opt-in deterministic terrain layout for locomotion curricula.
+
+    All geometry and difficulty values are implementation choices because the
+    source paper does not publish them.  They are kept here, rather than in the
+    terrain generator, so experiments can override them from the CLI.
+    """
+
+    enabled: bool = False
+    """Use row-wise difficulty and column-wise terrain-type assignment."""
+
+    terrain_types: list[str] = field(default_factory=lambda: ["flat", "box", "stair", "hurdle"])
+    """Terrain types assigned cyclically by column."""
+
+    difficulty_min: float = 0.0
+    """Difficulty assigned to the first row."""
+
+    difficulty_max: float = 1.0
+    """Difficulty assigned to the final row."""
+
+    spawn_clearance_radius: float = 1.0
+    """Half-width in metres of the central square forced to exactly zero height."""
+
+    box_height_range: list[float] = field(default_factory=lambda: [0.05, 0.30])
+    """Box height range in metres from easiest to hardest row."""
+
+    box_size: float = 0.6
+    """Square box side length in metres."""
+
+    box_spacing: float = 1.4
+    """Centre-to-centre box spacing in metres."""
+
+    stair_height_range: list[float] = field(default_factory=lambda: [0.05, 0.35])
+    """Maximum stair elevation range in metres from easiest to hardest row."""
+
+    stair_step_width: float = 0.4
+    """Radial width in metres of each concentric square stair tread."""
+
+    hurdle_height_range: list[float] = field(default_factory=lambda: [0.05, 0.35])
+    """Hurdle height range in metres from easiest to hardest row."""
+
+    hurdle_width: float = 0.2
+    """Radial thickness in metres of each concentric square hurdle."""
+
+    hurdle_spacing: float = 1.0
+    """Radial spacing in metres between concentric square hurdles."""
+
+
+@dataclass(frozen=True)
 class TerrainTermCfg:
     """Configuration for the terrain manager.
 
@@ -165,6 +214,9 @@ class TerrainTermCfg:
 
     spawn: SpawnCfg = field(default_factory=SpawnCfg)
     """Spawn behavior configuration."""
+
+    curriculum_layout: TerrainCurriculumLayoutCfg = field(default_factory=TerrainCurriculumLayoutCfg)
+    """Optional deterministic terrain-type/difficulty grid for terrain curricula."""
 
     # Dictionary keys must match terrain generation function names (without '_terrain_func' suffix)
     # See terrain.py for available terrain types and their corresponding functions

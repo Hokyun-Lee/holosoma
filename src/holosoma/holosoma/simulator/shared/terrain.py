@@ -48,7 +48,7 @@ class Terrain(TerrainInterface):
         self._env_length: int = max(1, int(self._cfg.terrain_length * self._cfg.scale_factor))
         self._env_width: int = max(1, int(self._cfg.terrain_width * self._cfg.scale_factor))
 
-        if self._type in ["none"]:
+        if self._type == "none":
             # a fully-managed terrain isn't supported for these types, so just return
             return
 
@@ -130,7 +130,15 @@ class Terrain(TerrainInterface):
 
         self._height_field_raw: np.ndarray = np.zeros((self._tot_rows, self._tot_cols), dtype=np.int16)
         self._max_slope: float = self._cfg.max_slope
-        self.randomized_terrain()
+        self._curriculum_enabled = self._cfg.curriculum_layout.enabled
+        self._terrain_type_names: tuple[str, ...] = tuple(self._terrain_types)
+        self._terrain_types_by_column: tuple[str, ...] = ()
+        self._row_difficulties = np.empty(0, dtype=np.float32)
+        if self._curriculum_enabled:
+            self._initialize_curriculum_layout()
+            self.curriculum_terrain()
+        else:
+            self.randomized_terrain()
 
         vertices, triangles = terrain_utils.convert_heightfield_to_trimesh(
             self._height_field_raw, self._horizontal_scale, self._vertical_scale, self._slope_threshold
@@ -138,6 +146,68 @@ class Terrain(TerrainInterface):
         mesh: trimesh.Trimesh = trimesh.Trimesh(vertices=vertices, faces=triangles)
         mesh.vertices[..., :2] -= self._border_size
         return mesh
+
+    def _initialize_curriculum_layout(self) -> None:
+        """Validate and cache the opt-in deterministic curriculum layout."""
+        if self._type != "trimesh":
+            raise ValueError("Curriculum layout requires mesh_type='trimesh'.")
+
+        layout = self._cfg.curriculum_layout
+        type_names = tuple(layout.terrain_types)
+        if not type_names:
+            raise ValueError("curriculum_layout.terrain_types must not be empty.")
+        if len(set(type_names)) != len(type_names):
+            raise ValueError("curriculum_layout.terrain_types must contain unique names.")
+        if self._num_cols < len(type_names):
+            raise ValueError(
+                f"Curriculum layout needs at least one column per terrain type: "
+                f"num_cols={self._num_cols}, types={len(type_names)}."
+            )
+        supported = {"flat", "box", "stair", "hurdle"}
+        unsupported = set(type_names).difference(supported)
+        if unsupported:
+            raise ValueError(f"Unsupported curriculum terrain types: {sorted(unsupported)}")
+        if not 0.0 <= layout.difficulty_min <= layout.difficulty_max <= 1.0:
+            raise ValueError("Curriculum difficulty range must satisfy 0 <= min <= max <= 1.")
+        if layout.spawn_clearance_radius < 0.0:
+            raise ValueError("spawn_clearance_radius must be non-negative.")
+        max_clearance = 0.5 * min(self._env_length, self._env_width) - self._horizontal_scale
+        if layout.spawn_clearance_radius > max_clearance:
+            raise ValueError(
+                f"spawn_clearance_radius must leave obstacle space inside the tile; "
+                f"got {layout.spawn_clearance_radius}, maximum {max_clearance}."
+            )
+
+        self._validate_positive_range("box_height_range", layout.box_height_range)
+        self._validate_positive_range("stair_height_range", layout.stair_height_range)
+        self._validate_positive_range("hurdle_height_range", layout.hurdle_height_range)
+        for name, value in (
+            ("box_size", layout.box_size),
+            ("box_spacing", layout.box_spacing),
+            ("stair_step_width", layout.stair_step_width),
+            ("hurdle_width", layout.hurdle_width),
+            ("hurdle_spacing", layout.hurdle_spacing),
+        ):
+            if value <= 0.0:
+                raise ValueError(f"{name} must be positive, got {value}.")
+        if layout.box_size > layout.box_spacing:
+            raise ValueError("box_size must not exceed box_spacing.")
+        if layout.hurdle_width > layout.hurdle_spacing:
+            raise ValueError("hurdle_width must not exceed hurdle_spacing.")
+
+        self._terrain_type_names = type_names
+        self._terrain_types_by_column = tuple(type_names[col % len(type_names)] for col in range(self._num_cols))
+        self._row_difficulties = np.linspace(
+            layout.difficulty_min,
+            layout.difficulty_max,
+            self._num_rows,
+            dtype=np.float32,
+        )
+
+    @staticmethod
+    def _validate_positive_range(name: str, values: list[float]) -> None:
+        if len(values) != 2 or values[0] <= 0.0 or values[1] < values[0]:
+            raise ValueError(f"{name} must be [positive_min, max] with max >= min, got {values}.")
 
     def sample_env_origins(self) -> np.ndarray:
         if self._type == "load_obj":
@@ -151,6 +221,31 @@ class Terrain(TerrainInterface):
             (self._num_robots / self._num_cols),
         ).astype(np.int32)
         return origin_grid[terrain_levels, terrain_types]
+
+    @property
+    def curriculum_enabled(self) -> bool:
+        """Whether deterministic row/column curriculum layout is active."""
+        return getattr(self, "_curriculum_enabled", False)
+
+    @property
+    def terrain_type_names(self) -> tuple[str, ...]:
+        """Stable terrain type names used by curriculum consumers."""
+        return self._terrain_type_names
+
+    @property
+    def terrain_types_by_column(self) -> tuple[str, ...]:
+        """Terrain type name assigned to each curriculum column."""
+        return self._terrain_types_by_column
+
+    @property
+    def row_difficulties(self) -> np.ndarray:
+        """Linear difficulty value assigned to each curriculum row."""
+        return self._row_difficulties
+
+    @property
+    def origin_grid(self) -> np.ndarray:
+        """Terrain origin grid with shape ``(num_rows, num_cols, 3)``."""
+        return self._env_origins
 
     @property
     def mesh(self) -> trimesh.Trimesh:
@@ -223,6 +318,13 @@ class Terrain(TerrainInterface):
             self.add_terrain_to_map(terrain, int(i), int(j))
         print("\n generated all randomized terrains!")
 
+    def curriculum_terrain(self) -> None:
+        """Generate the deterministic column-type and row-difficulty layout."""
+        for row, difficulty in enumerate(self._row_difficulties):
+            for col, terrain_type in enumerate(self._terrain_types_by_column):
+                terrain = self.make_terrain(terrain_type, float(difficulty))
+                self.add_terrain_to_map(terrain, row, col)
+
     def make_terrain(self, terrain_type: str, difficulty: float) -> Any:
         """Create a single sub-terrain of the specified type and difficulty.
 
@@ -293,6 +395,76 @@ class Terrain(TerrainInterface):
             Difficulty level in range [0, 1], unused for flat terrain.
         """
         terrain.height_field_raw[:] = 0.0
+
+    def _box_terrain_func(self, terrain: Any, difficulty: float) -> None:
+        """Create regularly spaced, positive square boxes with a clear spawn area."""
+        layout = self._cfg.curriculum_layout
+        terrain.height_field_raw[:] = 0
+        height = self._curriculum_height_units(layout.box_height_range, difficulty, terrain.vertical_scale)
+        size = self._metres_to_cells(layout.box_size, terrain.horizontal_scale)
+        spacing = self._metres_to_cells(layout.box_spacing, terrain.horizontal_scale)
+
+        x_indices = np.arange(terrain.width) - terrain.width // 2
+        y_indices = np.arange(terrain.length) - terrain.length // 2
+        x_mask = np.mod(x_indices + size // 2, spacing) < size
+        y_mask = np.mod(y_indices + size // 2, spacing) < size
+        terrain.height_field_raw[np.ix_(x_mask, y_mask)] = height
+        self._clear_curriculum_spawn_area(terrain)
+
+    def _stair_terrain_func(self, terrain: Any, difficulty: float) -> None:
+        """Create positive concentric stairs rising away from the spawn area."""
+        layout = self._cfg.curriculum_layout
+        terrain.height_field_raw[:] = 0
+        max_height = self._curriculum_height_units(layout.stair_height_range, difficulty, terrain.vertical_scale)
+        step_width = self._metres_to_cells(layout.stair_step_width, terrain.horizontal_scale)
+        clearance = math.ceil(layout.spawn_clearance_radius / terrain.horizontal_scale)
+        x_distance = np.abs(np.arange(terrain.width) - terrain.width // 2)[:, None]
+        y_distance = np.abs(np.arange(terrain.length) - terrain.length // 2)[None, :]
+        distance = np.maximum(np.maximum(x_distance, y_distance) - clearance, 0)
+        stair_levels = np.ceil(distance / step_width).astype(np.int32)
+        num_levels = int(stair_levels.max())
+        if num_levels > 0:
+            heights = np.rint(stair_levels * max_height / num_levels).astype(np.int16)
+            heights[(stair_levels > 0) & (heights == 0)] = 1
+            terrain.height_field_raw[:] = heights
+        self._clear_curriculum_spawn_area(terrain)
+
+    def _hurdle_terrain_func(self, terrain: Any, difficulty: float) -> None:
+        """Create positive square-ring hurdles with a clear spawn area."""
+        layout = self._cfg.curriculum_layout
+        terrain.height_field_raw[:] = 0
+        height = self._curriculum_height_units(layout.hurdle_height_range, difficulty, terrain.vertical_scale)
+        width = self._metres_to_cells(layout.hurdle_width, terrain.horizontal_scale)
+        spacing = self._metres_to_cells(layout.hurdle_spacing, terrain.horizontal_scale)
+
+        x_indices = np.abs(np.arange(terrain.width) - terrain.width // 2)[:, None]
+        y_indices = np.abs(np.arange(terrain.length) - terrain.length // 2)[None, :]
+        radius = np.maximum(x_indices, y_indices)
+        hurdle_mask = np.mod(radius, spacing) < width
+        terrain.height_field_raw[hurdle_mask] = height
+        self._clear_curriculum_spawn_area(terrain)
+
+    @staticmethod
+    def _metres_to_cells(value: float, horizontal_scale: float) -> int:
+        """Quantize positive geometry to at least one heightfield cell."""
+        return max(1, round(value / horizontal_scale))
+
+    @staticmethod
+    def _curriculum_height_units(height_range: list[float], difficulty: float, vertical_scale: float) -> int:
+        """Interpolate and quantize a positive curriculum height."""
+        difficulty = float(np.clip(difficulty, 0.0, 1.0))
+        height_metres = height_range[0] + difficulty * (height_range[1] - height_range[0])
+        return max(1, round(height_metres / vertical_scale))
+
+    def _clear_curriculum_spawn_area(self, terrain: Any) -> None:
+        """Force the configured central square to exactly zero height."""
+        clearance = math.ceil(self._cfg.curriculum_layout.spawn_clearance_radius / terrain.horizontal_scale)
+        center_x = terrain.width // 2
+        center_y = terrain.length // 2
+        terrain.height_field_raw[
+            max(0, center_x - clearance) : min(terrain.width, center_x + clearance + 1),
+            max(0, center_y - clearance) : min(terrain.length, center_y + clearance + 1),
+        ] = 0
 
     def _rough_terrain_func(self, terrain: Any, difficulty: float) -> None:
         """Generate rough terrain with random height variations below ground level.
@@ -429,7 +601,7 @@ class Terrain(TerrainInterface):
         length = terrain.length
         x = np.arange(0, width)
         y = np.arange(0, length)
-        xx, yy = np.meshgrid(x, y, sparse=True)
+        xx, _yy = np.meshgrid(x, y, sparse=True)
         xx = xx.reshape(width, 1)
         max_height = int(slope * (terrain.horizontal_scale / terrain.vertical_scale) * width)
         terrain.height_field_raw[:width, np.arange(length)] += (max_height * xx / width).astype(
