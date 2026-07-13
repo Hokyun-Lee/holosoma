@@ -770,12 +770,13 @@ All outputs are rooted at
 `logs/terrain_evaluations/stage10/corrected_seed42_v1/`. Ten evaluator calls
 exited zero with `complete=true` and 100/100 episodes. Common A-F, D-final,
 30 cm, and 60 cm each use exactly 25 flat/box/stair/hurdle episodes; rough uses
-100 rough episodes. The common protocol uses fixed L1, evaluation/training seed
-42, uniform valid phase, XY reanchor, horizon 500, deterministic generator and
-per-env sampling, and generator seed 0. `torch_deterministic=false`, and there
-is only one training/evaluation seed, so no bitwise or multi-seed confidence
-claim is made. Timeout records 501 simulator steps while the command advances
-500 times before reset.
+100 rough episodes. The preregistered primary protocol uses fixed L1,
+evaluation seed 42, training seed 42, uniform valid phase, XY reanchor, horizon
+500, deterministic generator and per-env sampling, and generator seed 0.
+Evaluation seeds 43 and 44 were added later with the same policy checkpoints
+and protocol. `torch_deterministic=false`, so no bitwise claim is made; there
+are three evaluation seeds but only one training seed. Timeout records 501
+simulator steps while the command advances 500 times before reset.
 
 The fresh strict 10-source/5-group report has no protocol mismatch and is:
 
@@ -805,14 +806,16 @@ steps. None is a mesh-penetration or clean-crossing metric.
 | F | 0% | 0% | 99% | 62% | 179/49,632 = 0.361% | 1.555 | 0.0206 | 0.082 | 496.32 |
 
 C-to-D shows that fine-tuning changes directed progress/success, but also
-raises falls/contact. E exceeds fair-budget D (66% vs 54% success, 7% vs 17%
-fall, and lower step contact), so this single-seed experiment does **not** show
-a tracker-terrain-scan benefit; it also cannot prove the scan is harmful. F
-survives but is stationary (0.082 m progress, 1.555 rad heading error, 0%
-success), making heading reward essential for directed locomotion under this
-protocol. A uses one fixed clip rather than B-F's random-heading command
-distribution, limiting its absolute comparison; 10.26% of its valid windows
-naturally cross a tile boundary even after reset reanchoring.
+raises falls/contact. In the seed-42 primary row E exceeds fair-budget D (66%
+vs 54% success, 7% vs 17% fall, and lower step contact); evaluation seeds 43
+and 44 retain the same success direction. These results do **not** show a
+tracker-terrain-scan benefit, but one training seed cannot prove the scan is
+harmful. F survives but is stationary (seed-42 progress 0.082 m, heading error
+1.555 rad, 0% success), making heading reward essential for directed
+locomotion under this protocol. A uses one fixed clip rather than B-F's
+random-heading command distribution, limiting its absolute comparison; 10.26%
+of its valid windows naturally cross a tile boundary even after reset
+reanchoring.
 
 D-final fixed-L1 is 82% success, 4% fall, 89% survival, 99/100 episode contact,
 2,440/47,386 = 5.149% contact steps, 2,516/47,386 = 0.05310 bodies/step,
@@ -859,19 +862,91 @@ W&B project/group is `hkleetony-dyros/WholeBodyTracking` /
 [E `hkqexdqe`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/hkqexdqe),
 [successful F `qrk3845o`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/qrk3845o),
 [evaluation `jcrms4zx`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/jcrms4zx),
-and [artifact `stage10-corrected-evaluation-seed42:v0`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/artifacts/evaluation/stage10-corrected-evaluation-seed42/v0).
-The failed F offline id `x3xmyiya` was not synchronized. The artifact contains
-the 40 evaluation files uploaded before the six local visual PNG/JSON sets were
-added, so the local output tree is authoritative for those visuals. Commit
-`6c7aacc` makes the three contact denominators explicit in code and fresh
-reports.
+[artifact `stage10-corrected-evaluation-seed42:v0`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/artifacts/evaluation/stage10-corrected-evaluation-seed42/v0),
+and [24-file analysis artifact v0](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/artifacts/evaluation-analysis/stage10-corrected-evaluation-seed42-analysis/v0).
+The analysis resume preserved all 387 existing summary keys and added 21
+contact/report/proxy keys; it includes all six NPZ/JSON/PNG visual sets. The
+failed F offline id `x3xmyiya` was not synchronized. Commit `6c7aacc` makes the
+three contact denominators explicit in code and fresh reports.
+
+### Evaluation-seed 43/44 addendum and raw pooling
+
+The seed-42 tables above remain the preregistered primary result. The same
+training-seed-42 checkpoints were evaluated again with evaluation seeds 43 and
+44. Each seed has ten complete 100-episode sources: four-terrain identities
+have exact 25/25/25/25 quotas and rough has 100 episodes. Across seeds 42–44,
+the pooled report therefore covers 30 sources and 3,000 episodes, with 75
+episodes per terrain/identity or 300 rough episodes. Pooling sums raw
+numerators and denominators; it never averages per-seed rates.
+
+| variant | pooled success | per-seed success range | episode any-contact | contact-step raw |
+|---|---:|---:|---:|---:|
+| A | 76/300 (25.3%) | 22–30% | 269/300 | 2,802/113,174 (2.48%) |
+| B | 0/300 | 0–0% | 155/300 | 558/146,513 (0.38%) |
+| C | 0/300 | 0–0% | 158/300 | 584/146,514 (0.40%) |
+| D fair | 167/300 (55.7%) | 54–57% | 242/300 | 2,802/123,953 (2.26%) |
+| E | 198/300 (66.0%) | 64–68% | 219/300 | 1,276/129,297 (0.99%) |
+| F | 1/300 (0.3%) | 0–1% | 185/300 | 750/146,953 (0.51%) |
+| D final L1 | 229/300 (76.3%) | 73–82% | 297/300 | 8,845/140,944 (6.28%) |
+| D final 30 cm | 214/300 (71.3%) | 68–74% | 299/300 | 13,763/141,651 (9.72%) |
+| D final 60 cm | 204/300 (68.0%) | 65–70% | 295/300 | 22,190/145,524 (15.25%) |
+| D final rough L9 | 26/300 (8.7%) | 8–10% | 298/300 | 15,548/115,790 (13.43%) |
+
+Episode any-contact is still an episode OR; contact-step is a
+duration-normalized raw step fraction. The pooled JSON/CSV separately retains
+undesired-contact bodies/step numerator and step denominator. These columns do
+not establish clean crossings.
+
+All five success contrasts keep the same sign for all three evaluation seeds:
+
+| contrast | seed-delta range | raw-pooled delta |
+|---|---:|---:|
+| D fair minus C | +54–57 percentage points | +55.7 pp |
+| D fair minus F | +54–57 pp | +55.3 pp |
+| E minus D fair | +7–12 pp | +10.3 pp |
+| D final minus D fair | +16–28 pp | +20.7 pp |
+| D final L1 minus rough | +63–74 pp | +67.7 pp |
+
+Thus fine-tuning, heading reward, longer fine-tuning, E-over-D, and rough
+collapse are directionally stable to these evaluation seeds. This does not
+measure policy training variance: all evaluated checkpoints still come from
+one training seed. F remains effectively stationary at 1/300 pooled success,
+and E-over-D still fails to demonstrate tracker terrain-scan benefit.
+
+The added output sets and SHA-256 values are:
+
+- seed 43 prefix
+  `logs/terrain_evaluations/stage10/corrected_eval_seed43_v1/report/stage10_corrected_eval_seed43_v1_contact_clarified`:
+  JSON `fd78092e46b1a9fdcfecfa715a6022c73c17da9901ae30e17519714c545aa34c`,
+  CSV `01ded5e633fd4f17486b5f1b60ee3789832198e96a971bac55e742e1e8254b65`,
+  Markdown `2812e84c8f80a545ad75a538c2fecdb138aa7f8669f1c7980e0f0e6b153505f7`.
+- seed 44 prefix
+  `logs/terrain_evaluations/stage10/corrected_eval_seed44_v1/report/stage10_corrected_eval_seed44_v1_contact_clarified`:
+  JSON `d877342278fe59719fc0d427a0fb8e2dd4d07e19fa2bb7372d96af0ad0fa1357`,
+  CSV `205094147c582c2d8c2c7aa406ed32327fcc570992719570bec9762e8792681e`,
+  Markdown `57be995d918fc49aba736221819bbd27bff7f86a1f593a13cebebf2cefe24159`.
+- raw-pooled prefix
+  `logs/terrain_evaluations/stage10/corrected_eval_seeds42_44_summary/stage10_corrected_eval_seeds42_44_pooled_raw`:
+  JSON `fa1202894d95dabe4ebc5eb521bbc7aaa63ab8076e5094721164fabb073f8997`,
+  CSV `74254648effe0683cd0941facf3d94a28ec37451fad4470d703479e499d6bbac`,
+  Markdown `8a6105a45ce88935868238f3688bf686ea70f0de855f8ca66a056fb726f2df7c`.
+
+W&B provenance is [seed-43 run `qbqazh4x`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/qbqazh4x)
+with [39-file results artifact v0](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/artifacts/evaluation/stage10-corrected-evaluation-seed43-results/v0),
+and [seed-44 run `i644g8ug`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/i644g8ug)
+with [42-file results artifact v0](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/artifacts/evaluation/stage10-corrected-evaluation-seed44-results/v0).
+Both are finished in the same project/group. The seed-44 artifact metadata
+records seeds `[42,43,44]`, 30 sources, and 3,000 episodes, and its `combined/`
+directory contains the pooled JSON/CSV/Markdown. Latency is neither pooled nor
+rerun; the seed-42 RTX 4090 module benchmark remains the latency result.
 
 ## Known limitations / not yet verified
 
-- Corrected terrain-aware closed-loop training and all Stage-10 rows completed,
-  but every checkpoint/evaluation uses training/evaluation seed 42 once.
-  Episode counts do not capture training-seed variance, so A-F differences and
-  D fair-to-final recovery have no multi-seed confidence interval.
+- Corrected terrain-aware closed-loop training and all Stage-10 rows completed.
+  Evaluation seeds 42/43/44 provide 3,000 pooled episodes, but every evaluated
+  checkpoint still comes from training seed 42. Evaluation replication does
+  not capture training-seed variance, so A-F differences and D fair-to-final
+  recovery have no multi-training-seed confidence interval.
 - E outperforms fair-budget D, so tracker terrain observation benefit is not
   demonstrated. F's near-stationary survival shows heading reward is necessary
   for directed locomotion in this protocol, not necessarily every protocol.
@@ -879,9 +954,11 @@ reports.
   contact all increase from D fair. The combined fall/collision checklist stays
   open. Episode contact is an OR, step contact is duration-normalized, and
   neither proves or disproves a clean crossing.
-- 30/60 cm hurdle success is 0/25 with 22.462%/39.571% contact-step fractions;
-  unseen rough L9 collapses to 8% success and 25% falls. Terrain closed-loop
-  behavior is therefore not robust to these stresses.
+- In the seed-42 primary row, 30/60 cm hurdle success is 0/25 with
+  22.462%/39.571% contact-step fractions. Three-seed pooling gives 30 cm hurdle
+  2/75 success with 23.92% contact steps, 60 cm hurdle 0/75 with 41.95%, and
+  unseen rough only 26/300 success. Terrain closed-loop behavior is therefore
+  not robust to these stresses.
 - Six exemplar visuals pass schema/hash/finite/scan validation but remain
   body-origin height proxies. Collision-shape/mesh intersection, contact-force
   replay, and policy-intent causality are not verified.
@@ -923,8 +1000,8 @@ results.
    collision-mesh penetration; geometry/contact replay is still needed.
 3. Receding-horizon distribution shift: structured condition noise is now
    implemented and narrows the matched noisy-validation gap. Corrected
-   closed-loop training and fixed-level evaluation completed, but multi-seed
-   evaluation and tall-hurdle/rough robustness are still required before
-   calling it converged or robust.
+   closed-loop training and three-evaluation-seed fixed-level evaluation
+   completed, but multi-training-seed replication and tall-hurdle/rough
+   robustness are still required before calling it converged or robust.
 4. LAFAN1 license (CC BY-NC-ND) forbids redistribution of retargeted
    derivatives — generated models trained on it inherit non-commercial terms.

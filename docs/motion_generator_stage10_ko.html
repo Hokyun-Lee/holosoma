@@ -32,7 +32,7 @@ footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted
 <body>
 <header class="container">
   <h1>10차: Ablation 및 공통 평가</h1>
-  <p>A–F corrected common protocol 1,000 episode, obstacle/rough stress와<br>RTX 4090 PyTorch CUDA module latency의 최종 실행 기록</p>
+  <p>Seed-42 primary와 evaluation-seed 43/44 addendum, 총 3,000 episode,<br>obstacle/rough stress 및 RTX 4090 CUDA module latency 기록</p>
 </header>
 <main class="container">
 <section>
@@ -58,7 +58,7 @@ footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted
       <li><code>[x]</code> 실제 RTX 4090 inference latency 측정 완료</li>
     </ul>
   </div>
-  <div class="callout ok"><b>평가 완료의 의미</b>: 위 8개 체크박스는 실행·산출물·quota 검증이 완료됐다는 뜻이지 모든 ablation 가설이 지지됐다는 뜻이 아니다. 실제로 tracker scan을 제거한 E가 fair-budget D보다 success가 높아 terrain observation 편익을 입증하지 못했고, 30/60 cm hurdle success는 둘 다 0이며 unseen rough는 붕괴했다. 모든 학습/평가는 seed 42 한 번이므로 multi-seed 통계적 우월성 주장은 하지 않는다.</div>
+  <div class="callout ok"><b>평가 완료의 의미</b>: 위 8개 체크박스는 실행·산출물·quota 검증이 완료됐다는 뜻이지 모든 ablation 가설이 지지됐다는 뜻이 아니다. Tracker scan을 제거한 E가 fair-budget D보다 success가 높아 terrain observation 편익을 입증하지 못했고, tall hurdle과 unseen rough도 여전히 약하다. 동일한 training-seed 42 checkpoint를 evaluation seed 42/43/44로 반복했으므로 evaluation sampling 방향성은 확인했지만, <b>training seed는 하나</b>라 정책 학습 분산에 대한 통계적 우월성은 주장하지 않는다.</div>
 </section>
 
 <section>
@@ -192,7 +192,7 @@ $PY src/holosoma/holosoma/train_agent.py \
     <tr><td>C/D/E/F generated terrain</td><td><code>true / 0</code></td><td><code>true / effective 500</code> 강제</td></tr>
   </table></div>
   <div class="callout"><b>결과 확인 전 고정한 primary row: level 1</b>. 수정 전 D의 공정-budget snapshot <code>model_12500.pt</code>를 사전 점검했을 때 obstacle current-level 분포는 box L0/L1=175/81, stair=200/56, hurdle=191/65였고 current L2 env는 없었다. 누적 L2 episode도 각각 20/10/2개뿐이었다. 이 snapshot은 terrain 성능용으로는 superseded되었지만, 어느 difficulty를 primary로 사전 등록할지 정한 시점의 학습 노출 근거는 이대로 보존한다. A–F 공통 primary는 네 terrain type을 모두 <code>fixed-terrain-level 1</code>에서 평가하고, L2 이상은 별도 extrapolation stress로만 해석한다. Flat은 level에 따라 geometry가 변하지 않으므로 높은 flat level을 obstacle 숙련도로 세지 않는다. 이 level 선택과 해석은 A–F simulator 결과를 실행하기 전에 기록했다.</div>
-  <div class="callout ok"><b>최종 protocol 완료</b>: <code>logs/terrain_evaluations/stage10/corrected_seed42_v1/</code> 아래 10개 평가가 모두 exit 0, <code>complete=true</code>, 100/100 episode로 끝났다. Common A–F, D-final, 30 cm, 60 cm은 flat/box/stair/hurdle을 정확히 25개씩 배정했고 rough는 단일 type 100개다. 공통 조건은 evaluation seed 42, uniform valid phase, XY reanchor, horizon 500, deterministic generator/per-env sampling, generator seed 0이다. <code>torch_deterministic=false</code>이고 학습·평가 모두 단일 seed이므로 bitwise 재현성과 신뢰구간은 주장하지 않는다. 예전 4-episode smoke는 protocol 개발 provenance로만 남는다.</div>
+  <div class="callout ok"><b>Seed-42 primary protocol 완료</b>: <code>logs/terrain_evaluations/stage10/corrected_seed42_v1/</code> 아래 10개 평가가 모두 exit 0, <code>complete=true</code>, 100/100 episode로 끝났다. Common A–F, D-final, 30 cm, 60 cm은 flat/box/stair/hurdle을 정확히 25개씩 배정했고 rough는 단일 type 100개다. 공통 조건은 evaluation seed 42, uniform valid phase, XY reanchor, horizon 500, deterministic generator/per-env sampling, generator seed 0이다. <code>torch_deterministic=false</code>이므로 bitwise 동일성을 주장하지 않는다. 이 사전등록 primary 표는 그대로 보존하고, seed 43/44 반복과 raw pooling은 아래 addendum에 분리한다.</div>
 
   <h3>A–F common level-1 결과</h3>
   <div class="table"><table>
@@ -206,7 +206,7 @@ $PY src/holosoma/holosoma/train_agent.py \
   </table></div>
   <ul>
     <li>C→D fair는 success 0→54%, progress 0.207→2.345 m로 fine-tuning 효과를 보였지만 fall 17%와 contact가 함께 증가했다.</li>
-    <li>E가 D fair보다 success 66% 대 54%, fall 7% 대 17%, contact-step 0.932% 대 2.597%로 좋았다. 따라서 이 단일-seed 비교에서는 <b>tracker terrain scan의 추가 편익을 입증하지 못했다</b>; 반대로 scan이 해롭다는 인과 결론도 내리지 않는다.</li>
+    <li>Seed-42 primary에서 E가 D fair보다 success 66% 대 54%, fall 7% 대 17%, contact-step 0.932% 대 2.597%로 좋았다. Seed 43/44에서도 success 방향이 같았으므로 <b>tracker terrain scan의 추가 편익을 입증하지 못했다</b>; 단, training seed가 하나라 scan이 해롭다는 인과 결론도 내리지 않는다.</li>
     <li>F는 survival 99%지만 progress 0.082 m, heading error 1.555 rad, success 0%로 사실상 정지했다. 이 protocol의 directed motion에는 heading reward가 필수였다는 결과다.</li>
     <li>A는 fixed 단일 clip, B–F는 random heading generator라 command 분포가 다르므로 A와의 절대 비교는 제한적이다.</li>
   </ul>
@@ -286,6 +286,54 @@ $PY -m holosoma.aggregate_terrain_evaluations \
 </section>
 
 <section>
+  <h2>Evaluation-seed addendum: 43/44와 raw pooling</h2>
+  <p>위 seed-42 표를 사전등록 primary 결과로 유지한 채, <b>같은 training-seed 42 checkpoint</b>를 evaluation seed 43과 44로 각각 반복했다. 각 seed는 10개 evaluation × 100 episode = 1,000 episode이며 모두 <code>complete=true</code>다. Four-terrain identity는 seed마다 type별 정확히 25 episode, rough-only는 100 episode다. 세 seed를 합치면 30 source / 3,000 episode, four-terrain row당 type별 75 episode, rough 300 episode다.</p>
+  <div class="callout ok"><b>Pooling contract</b>: pooled 값은 seed별 rate의 평균이 아니라 각 evaluator의 <b>raw numerator와 raw denominator를 먼저 합산</b>해 다시 계산했다. Episode metric은 episode denominator, step metric은 실제 recorded-step denominator를 유지한다. Evaluation seed만 42/43/44로 달라졌고 training seed, checkpoint, quota, phase/reanchor/horizon과 deterministic per-env sampling contract는 같다.</div>
+
+  <div class="table"><table>
+    <tr><th>Variant</th><th>Pooled success</th><th>Seed success range</th><th>Episode any-contact</th><th>Contact-step raw</th></tr>
+    <tr><td>A</td><td>76/300 = 25.3%</td><td>22–30%</td><td>269/300 = 89.7%</td><td>2,802/113,174 = 2.48%</td></tr>
+    <tr><td>B</td><td>0/300 = 0%</td><td>0–0%</td><td>155/300 = 51.7%</td><td>558/146,513 = 0.38%</td></tr>
+    <tr><td>C</td><td>0/300 = 0%</td><td>0–0%</td><td>158/300 = 52.7%</td><td>584/146,514 = 0.40%</td></tr>
+    <tr><td>D fair</td><td>167/300 = 55.7%</td><td>54–57%</td><td>242/300 = 80.7%</td><td>2,802/123,953 = 2.26%</td></tr>
+    <tr><td>E</td><td>198/300 = 66.0%</td><td>64–68%</td><td>219/300 = 73.0%</td><td>1,276/129,297 = 0.99%</td></tr>
+    <tr><td>F</td><td>1/300 = 0.3%</td><td>0–1%</td><td>185/300 = 61.7%</td><td>750/146,953 = 0.51%</td></tr>
+    <tr><td>D final L1</td><td><b>229/300 = 76.3%</b></td><td>73–82%</td><td>297/300 = 99.0%</td><td><b>8,845/140,944 = 6.28%</b></td></tr>
+    <tr><td>D final 30 cm</td><td><b>214/300 = 71.3%</b></td><td>68–74%</td><td>299/300 = 99.7%</td><td><b>13,763/141,651 = 9.72%</b></td></tr>
+    <tr><td>D final 60 cm</td><td><b>204/300 = 68.0%</b></td><td>65–70%</td><td>295/300 = 98.3%</td><td><b>22,190/145,524 = 15.25%</b></td></tr>
+    <tr><td>D final rough L9</td><td><b>26/300 = 8.7%</b></td><td>8–10%</td><td>298/300 = 99.3%</td><td><b>15,548/115,790 = 13.43%</b></td></tr>
+  </table></div>
+  <p>Episode any-contact는 episode OR이고 contact-step은 duration-normalized fraction이다. Pooled JSON/CSV는 여기에 더해 undesired-contact bodies/step의 raw numerator/step denominator도 별도 보존한다. 세 contact column을 서로 대체하거나 clean crossing으로 해석하지 않는다.</p>
+
+  <h3>결론 방향의 evaluation-seed 범위</h3>
+  <div class="table"><table>
+    <tr><th>Success contrast</th><th>Seed 42–44 delta range</th><th>Raw-pooled delta</th><th>방향</th></tr>
+    <tr><td>D fair − C (fine-tuning)</td><td>+54–57%p</td><td>+55.7%p</td><td>3/3 positive</td></tr>
+    <tr><td>D fair − F (heading reward)</td><td>+54–57%p</td><td>+55.3%p</td><td>3/3 positive</td></tr>
+    <tr><td>E − D fair (tracker scan 제거)</td><td>+7–12%p</td><td>+10.3%p</td><td>3/3 positive</td></tr>
+    <tr><td>D final − D fair (긴 fine-tuning)</td><td>+16–28%p</td><td>+20.7%p</td><td>3/3 positive</td></tr>
+    <tr><td>D final L1 − unseen rough</td><td>+63–74%p</td><td>+67.7%p</td><td>3/3 positive</td></tr>
+  </table></div>
+  <p>따라서 fine-tuning과 heading reward의 방향, E가 D fair보다 높은 현상, 긴 fine-tuning 회복, unseen rough 붕괴는 세 evaluation seed에서 모두 같은 부호다. 이는 evaluation sampling seed에 대한 방향 일관성이지 서로 독립적으로 학습한 policy 세 개의 통계가 아니다. 특히 F는 pooled success 1/300으로 사실상 정지했고, E&gt;D는 tracker terrain scan의 추가 편익을 여전히 지지하지 않는다.</p>
+
+  <h3>산출물과 SHA-256</h3>
+  <div class="table"><table>
+    <tr><th>Output set</th><th>JSON SHA-256</th><th>CSV SHA-256</th><th>Markdown SHA-256</th></tr>
+    <tr><td>Seed 43<br><a href="../logs/terrain_evaluations/stage10/corrected_eval_seed43_v1/report/stage10_corrected_eval_seed43_v1_contact_clarified.json">JSON</a> · <a href="../logs/terrain_evaluations/stage10/corrected_eval_seed43_v1/report/stage10_corrected_eval_seed43_v1_contact_clarified.csv">CSV</a> · <a href="../logs/terrain_evaluations/stage10/corrected_eval_seed43_v1/report/stage10_corrected_eval_seed43_v1_contact_clarified.md">MD</a></td><td><code>fd78092e46b1a9fdcfecfa715a6022c73c17da9901ae30e17519714c545aa34c</code></td><td><code>01ded5e633fd4f17486b5f1b60ee3789832198e96a971bac55e742e1e8254b65</code></td><td><code>2812e84c8f80a545ad75a538c2fecdb138aa7f8669f1c7980e0f0e6b153505f7</code></td></tr>
+    <tr><td>Seed 44<br><a href="../logs/terrain_evaluations/stage10/corrected_eval_seed44_v1/report/stage10_corrected_eval_seed44_v1_contact_clarified.json">JSON</a> · <a href="../logs/terrain_evaluations/stage10/corrected_eval_seed44_v1/report/stage10_corrected_eval_seed44_v1_contact_clarified.csv">CSV</a> · <a href="../logs/terrain_evaluations/stage10/corrected_eval_seed44_v1/report/stage10_corrected_eval_seed44_v1_contact_clarified.md">MD</a></td><td><code>d877342278fe59719fc0d427a0fb8e2dd4d07e19fa2bb7372d96af0ad0fa1357</code></td><td><code>205094147c582c2d8c2c7aa406ed32327fcc570992719570bec9762e8792681e</code></td><td><code>57be995d918fc49aba736221819bbd27bff7f86a1f593a13cebebf2cefe24159</code></td></tr>
+    <tr><td>Seeds 42–44 raw pooled<br><a href="../logs/terrain_evaluations/stage10/corrected_eval_seeds42_44_summary/stage10_corrected_eval_seeds42_44_pooled_raw.json">JSON</a> · <a href="../logs/terrain_evaluations/stage10/corrected_eval_seeds42_44_summary/stage10_corrected_eval_seeds42_44_pooled_raw.csv">CSV</a> · <a href="../logs/terrain_evaluations/stage10/corrected_eval_seeds42_44_summary/stage10_corrected_eval_seeds42_44_pooled_raw.md">MD</a></td><td><code>fa1202894d95dabe4ebc5eb521bbc7aaa63ab8076e5094721164fabb073f8997</code></td><td><code>74254648effe0683cd0941facf3d94a28ec37451fad4470d703479e499d6bbac</code></td><td><code>8a6105a45ce88935868238f3688bf686ea70f0de855f8ca66a056fb726f2df7c</code></td></tr>
+  </table></div>
+  <p>Seed-42 clarified JSON SHA-256 <code>61984e070a206c728a1c9c407342ceda9413a79e86b27529d27aed94ed977fe1</code>도 pooled report의 input provenance에 고정돼 있다. Pooled report는 latency를 포함하거나 재사용하지 않으며 위 seed-42 RTX 4090 module timing은 별도 결과로 유지한다.</p>
+
+  <h3>W&amp;B provenance</h3>
+  <ul>
+    <li><a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/qbqazh4x">Seed-43 run <code>qbqazh4x</code></a> · <a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/artifacts/evaluation/stage10-corrected-evaluation-seed43-results/v0">seed43 results artifact v0</a> (39 files)</li>
+    <li><a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/i644g8ug">Seed-44 run <code>i644g8ug</code></a> · <a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/artifacts/evaluation/stage10-corrected-evaluation-seed44-results/v0">seed44 results artifact v0</a> (42 files)</li>
+  </ul>
+  <p>두 run은 project <code>hkleetony-dyros/WholeBodyTracking</code>, group <code>stage10_corrected_seed42</code>, state <code>finished</code>다. Seed-44 artifact metadata는 <code>combined_evaluation_seeds=[42,43,44]</code>, <code>combined_source_count=30</code>, <code>combined_episode_count=3000</code>을 기록하며 <code>combined/</code> 아래 pooled JSON/CSV/MD 세 파일을 포함한다.</p>
+</section>
+
+<section>
   <h2>RTX 4090 PyTorch CUDA latency</h2>
   <p><code>benchmark_inference_latency.py</code>는 GPU에 미리 올라간 tensor를 입력으로 세 workload를 각각 warm-up/측정한다: frozen 2-step generator, empirical normalization을 포함한 deterministic tracker actor, 두 module의 sequential call. CUDA event와 synchronized host clock으로 mean/median/p95/min/max/population std를 JSON에 기록하고, <code>tracker + generator / 25</code>의 policy-step당 amortized estimate도 별도 표기한다.</p>
   <div class="table"><table>
@@ -317,9 +365,9 @@ $PY -m holosoma.motion_gen.scripts.benchmark_inference_latency \
   <ul>
     <li><a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/8kh28k5w">D corrected training</a></li>
     <li><a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/9i00geyd">A corrected training</a> · <a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/hkqexdqe">E corrected training</a> · <a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/qrk3845o">F successful retry</a></li>
-    <li><a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/jcrms4zx">Stage-10 evaluation/report run</a> · <a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/artifacts/evaluation/stage10-corrected-evaluation-seed42/v0">evaluation artifact v0</a></li>
+    <li><a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/jcrms4zx">Stage-10 seed-42 evaluation/report run</a> · <a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/artifacts/evaluation/stage10-corrected-evaluation-seed42/v0">evaluation artifact v0</a> · <a href="https://wandb.ai/hkleetony-dyros/WholeBodyTracking/artifacts/evaluation-analysis/stage10-corrected-evaluation-seed42-analysis/v0">analysis artifact v0</a></li>
   </ul>
-  <p>Evaluation run은 finished 상태이며 summary 384/387 key와 40-file artifact를 올렸다. 시각화 PNG/JSON은 artifact 생성 뒤 로컬에서 검증·추가됐으므로 위 로컬 경로가 최종 출처다. 첫 실패 F의 offline run id <code>x3xmyiya</code>는 sync되지 않아 서버 run으로 인용하지 않는다.</p>
+  <p>Seed-42 evaluation run은 finished 상태이며 기존 387 summary key를 보존한 채 contact clarification용 21개 key를 추가해 총 408개다. Original evaluation artifact는 40 files, 후속 analysis artifact는 clarified report 3개, 6 exemplar×NPZ/JSON/PNG, latency, 당시 Stage-9/10 snapshot을 합친 24 files다. 첫 실패 F의 offline run id <code>x3xmyiya</code>는 sync되지 않아 서버 run으로 인용하지 않는다.</p>
 </section>
 
 <section>
@@ -358,15 +406,15 @@ $PY -m pytest -q \
 # BASE: iter 12000, actor (512,154), critic (512,286)
 # pre-fix D snapshot (integrity-only): iter 12500, actor (512,702), critic (512,834)
 # 30 cm list override와 rough single-type template config parse 성공</code></pre>
-  <p>위 관련 suite는 총 <code>88 passed</code>였고 수정 Python 파일 Ruff도 통과했다. Timeout upper-bound 후속 수정은 별도로 <code>15 passed</code>와 Ruff 통과를 확인했다. 이후 실제 corrected 학습 4개, evaluator 10개, strict aggregate, exemplar validation/render, RTX 4090 benchmark가 모두 정상 종료했다.</p>
+  <p>위 관련 suite는 총 <code>88 passed</code>였고 수정 Python 파일 Ruff도 통과했다. Timeout upper-bound 후속 수정은 별도로 <code>15 passed</code>와 Ruff 통과를 확인했다. 이후 실제 corrected 학습 4개, evaluator 30개(각 evaluation seed당 10개), per-seed strict aggregate 3개, raw-pooled aggregate, exemplar validation/render, RTX 4090 benchmark가 모두 정상 종료했다.</p>
 </section>
 
 <section>
   <h2>남은 문제</h2>
   <ul>
-    <li>Seed 42 한 번뿐이므로 A–F 차이와 D fair→final 회복에 multi-seed 신뢰구간이 없다.</li>
+    <li>Evaluation seed는 42/43/44로 반복했지만 모든 policy checkpoint의 training seed는 42 하나다. 따라서 policy 학습 분산을 포함한 multi-training-seed 신뢰구간은 없다.</li>
     <li>E가 D fair보다 좋아 tracker terrain scan의 편익이 입증되지 않았다. 동일 command identity를 더 강하게 paired-control한 재평가가 필요하다.</li>
-    <li>30/60 cm hurdle success가 모두 0이고 contact가 높으며 unseen rough가 붕괴했다. “깨끗한 obstacle crossing”은 아직 달성하지 못했다.</li>
+    <li>Three-seed pooled hurdle은 30 cm success 2/75·contact-step 23.92%, 60 cm success 0/75·contact-step 41.95%이고 unseen rough도 success 26/300에 그쳤다. “깨끗한 obstacle crossing”은 아직 달성하지 못했다.</li>
     <li>Qualified exemplar는 body-origin height proxy뿐이라 causal tracker correction, collision mesh penetration, 실제 접촉 해소를 증명하지 않는다.</li>
     <li>Generator+tracker ONNX/TensorRT export, simulator 포함 end-to-end latency, MuJoCo sim-to-sim, 실기 G1 검증은 다음 단계다.</li>
   </ul>
