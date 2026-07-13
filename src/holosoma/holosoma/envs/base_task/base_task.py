@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import numpy as np
-
 from holosoma.config_types.env import EnvConfig
 from holosoma.config_types.full_sim import FullSimConfig
 from holosoma.managers.action import ActionManager
