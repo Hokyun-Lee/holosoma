@@ -109,6 +109,7 @@ def _payload(
     contact_step_denominator: int,
     fixed_level: int = 1,
     torch_deterministic: bool = False,
+    num_envs: int = 64,
 ) -> dict[str, Any]:
     terrain_types = ("box", "stair")
     per_type_quota = 2
@@ -164,6 +165,7 @@ def _payload(
                 "training": {
                     "seed": evaluation_seed,
                     "torch_deterministic": torch_deterministic,
+                    "num_envs": num_envs,
                 },
                 "simulator": {
                     "config": {
@@ -237,6 +239,7 @@ def _entry(
     contact_step_denominator: int = 20,
     fixed_level: int = 1,
     torch_deterministic: bool = False,
+    num_envs: int = 64,
     checkpoint_capture_kind: str = "fair-501-logged-updates",
 ) -> dict[str, Any]:
     checkpoint = tmp_path / "checkpoints" / f"{policy_id}_{training_seed}.pt"
@@ -263,6 +266,7 @@ def _entry(
                 contact_step_denominator=contact_step_denominator,
                 fixed_level=fixed_level,
                 torch_deterministic=torch_deterministic,
+                num_envs=num_envs,
             )
         ),
         encoding="utf-8",
@@ -349,6 +353,7 @@ def test_two_stage_raw_pooling_weighted_steps_contrast_and_outputs(
     report = build_training_seed_report(manifest)
     assert report["source_count"] == 8
     assert report["protocol_provenance"]["torch_deterministic"] is False
+    assert report["protocol_provenance"]["num_envs"] == 64
     assert report["identity_contract"]["policy_id_authority"] == "manifest"
     assert report["pooling_contract"]["numerator_summation"] == "math.fsum"
     assert report["contrast_inference_contract"]["episode_level_confidence_interval"] is False
@@ -422,10 +427,13 @@ def test_two_stage_raw_pooling_weighted_steps_contrast_and_outputs(
     assert len(source_row["source_json_sha256"]) == 64
     assert len(source_row["checkpoint_sha256"]) == 64
     assert json.loads(source_row["protocol_json"])["torch_deterministic"] is False
+    assert source_row["num_envs"] == "64"
+    assert json.loads(source_row["protocol_json"])["num_envs"] == 64
     protocol_row = next(row for row in rows if row["record_type"] == "protocol_provenance")
     assert json.loads(protocol_row["protocol_json"])["fixed_terrain_level"] == 1
     markdown = outputs["markdown"].read_text()
     assert "not episode-level confidence intervals" in markdown
+    assert "Effective evaluation `num_envs`: `64`" in markdown
     assert "E_fair - D_fair" in markdown
     assert "opaque-source-label" in markdown
     assert source_row["source_json_sha256"] in markdown
@@ -462,6 +470,7 @@ def test_manifest_identity_and_hash_validation(tmp_path: Path, failure: str) -> 
     [
         ({"fixed_level": 2}, "fixed_terrain_level"),
         ({"torch_deterministic": True}, "torch_deterministic"),
+        ({"num_envs": 32}, "num_envs"),
     ],
 )
 def test_only_evaluation_seed_may_vary_in_protocol(

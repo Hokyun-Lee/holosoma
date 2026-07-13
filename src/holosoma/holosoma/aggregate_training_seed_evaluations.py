@@ -38,6 +38,7 @@ EPISODE_DENOMINATOR_METRICS = (
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _COMMON_PROTOCOL_FIELDS = tuple(field for field in PROTOCOL_FIELDS if field != "evaluation_seed") + (
     "torch_deterministic",
+    "num_envs",
 )
 
 
@@ -58,6 +59,7 @@ class _ManifestEntry:
     generator_checkpoint_path: str | None
     generator_checkpoint_sha256: str | None
     torch_deterministic: bool
+    num_envs: int
     protocol: dict[str, Any]
     quota: dict[str, Any]
     overall_metrics: dict[str, dict[str, Any]]
@@ -136,7 +138,7 @@ def _read_json(path: Path, context: str) -> Mapping[str, Any]:
     return _mapping(payload, str(path))
 
 
-def _source_torch_deterministic(source_path: Path) -> bool:
+def _source_training_settings(source_path: Path) -> tuple[bool, int]:
     payload = _read_json(source_path, "evaluator JSON")
     metadata = _mapping(payload.get("metadata"), f"{source_path}.metadata")
     evaluation_config = _mapping(
@@ -147,12 +149,17 @@ def _source_torch_deterministic(source_path: Path) -> bool:
         evaluation_config.get("training"),
         f"{source_path}.metadata.evaluation_config.training",
     )
-    value = training.get("torch_deterministic")
-    if not isinstance(value, bool):
+    torch_deterministic = training.get("torch_deterministic")
+    if not isinstance(torch_deterministic, bool):
         raise TerrainReportError(
             f"{source_path}.metadata.evaluation_config.training.torch_deterministic must be boolean"
         )
-    return value
+    num_envs = _integer(
+        training.get("num_envs"),
+        f"{source_path}.metadata.evaluation_config.training.num_envs",
+        minimum=1,
+    )
+    return torch_deterministic, num_envs
 
 
 def _load_entry(
@@ -249,10 +256,14 @@ def _load_entry(
         generator_path = str(resolved_generator)
         generator_sha = generator_sha_value
 
-    torch_deterministic = _source_torch_deterministic(source_path)
+    torch_deterministic, num_envs = _source_training_settings(source_path)
     if _sha256(source_path) != expected_source_sha:
         raise TerrainReportError(f"{context} evaluator JSON changed while it was being validated")
-    protocol = {**loaded.protocol, "torch_deterministic": torch_deterministic}
+    protocol = {
+        **loaded.protocol,
+        "torch_deterministic": torch_deterministic,
+        "num_envs": num_envs,
+    }
     return _ManifestEntry(
         policy_id=policy_id,
         training_seed=training_seed,
@@ -269,6 +280,7 @@ def _load_entry(
         generator_checkpoint_path=generator_path,
         generator_checkpoint_sha256=generator_sha,
         torch_deterministic=torch_deterministic,
+        num_envs=num_envs,
         protocol=protocol,
         quota=loaded.quota,
         overall_metrics=loaded.overall_metrics,
@@ -422,6 +434,7 @@ def _entry_provenance(item: _ManifestEntry) -> dict[str, Any]:
         "checkpoint_capture_kind": item.checkpoint_capture_kind,
         "update_budget": item.update_budget,
         "torch_deterministic": item.torch_deterministic,
+        "num_envs": item.num_envs,
         "protocol": item.protocol,
         "quota": item.quota,
     }
@@ -714,6 +727,7 @@ def build_training_seed_report(manifest_path: str | Path) -> dict[str, Any]:
             "common_protocol_sha256": common_protocol_sha,
             "evaluation_seeds": sorted({item.evaluation_seed for item in entries}),
             "torch_deterministic": common_protocol["torch_deterministic"],
+            "num_envs": common_protocol["num_envs"],
         },
         "sources": [_entry_provenance(item) for item in entries],
         "policy_training_seed_results": training_results,
@@ -751,6 +765,7 @@ def _markdown(report: Mapping[str, Any]) -> str:
         f"- Common protocol SHA-256: `{protocol['common_protocol_sha256']}`",
         f"- Evaluation seeds: `{protocol['evaluation_seeds']}`",
         f"- `torch_deterministic`: `{str(protocol['torch_deterministic']).lower()}`",
+        f"- Effective evaluation `num_envs`: `{protocol['num_envs']}`",
         "",
         "## Policy raw-pooled results",
         "",
@@ -899,6 +914,7 @@ def _metric_rows(report: Mapping[str, Any]):
         "manifest_sha256": manifest["sha256"],
         "common_protocol_sha256": protocol["common_protocol_sha256"],
         "torch_deterministic": protocol["torch_deterministic"],
+        "num_envs": protocol["num_envs"],
     }
     for level, key in (
         ("policy_training_seed", "policy_training_seed_results"),
@@ -956,6 +972,7 @@ def _contrast_rows(report: Mapping[str, Any]):
         "manifest_sha256": report["manifest_provenance"]["sha256"],
         "common_protocol_sha256": report["protocol_provenance"]["common_protocol_sha256"],
         "torch_deterministic": report["protocol_provenance"]["torch_deterministic"],
+        "num_envs": report["protocol_provenance"]["num_envs"],
     }
     for contrast in report["contrasts"]:
         for item in contrast["training_seed_deltas"]:
@@ -1000,6 +1017,7 @@ def _provenance_rows(report: Mapping[str, Any]):
         "manifest_sha256": manifest["sha256"],
         "common_protocol_sha256": protocol["common_protocol_sha256"],
         "torch_deterministic": protocol["torch_deterministic"],
+        "num_envs": protocol["num_envs"],
     }
     yield {
         **common,
@@ -1051,6 +1069,7 @@ def write_training_seed_report(report: Mapping[str, Any], output_prefix: str | P
         "manifest_sha256",
         "common_protocol_sha256",
         "torch_deterministic",
+        "num_envs",
         "policy_id",
         "training_seed",
         "evaluation_seed",
