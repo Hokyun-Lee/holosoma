@@ -295,6 +295,21 @@ def test_progress_buffers_are_isolated_and_reset_only_for_selected_envs():
     torch.testing.assert_close(term.episode_start_root_xy[1], torch.tensor([10.0, 10.0]))
 
 
+def test_root_state_tensor_proxy_is_supported() -> None:
+    class _Proxy:
+        def __init__(self, tensor: torch.Tensor):
+            self.tensor = tensor
+
+        def __getitem__(self, index):
+            return self.tensor[index]
+
+    env = _FakeEnv()
+    env.simulator.robot_root_states = _Proxy(torch.zeros(env.num_envs, 13))
+    term = _make_term(env, crossing_distance_m=1.5)
+
+    assert term.episode_start_root_xy.shape == (env.num_envs, 2)
+
+
 def test_state_roundtrip_is_strict_and_reapplies_restored_origins():
     env = _FakeEnv()
     term = _make_term(env)

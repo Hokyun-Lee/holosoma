@@ -55,15 +55,21 @@ class TerrainCurriculum(CurriculumTermBase):
         """Return measured root XY; crossing is radial for concentric terrain."""
         simulator = getattr(self.env, "simulator", None)
         root_states = getattr(simulator, "robot_root_states", None)
-        expected_shape = (self.env.num_envs,)
-        if not torch.is_tensor(root_states) or root_states.ndim != 2 or root_states.shape[0] != expected_shape[0]:
+        try:
+            root_xy = root_states[:, :2]
+        except (AttributeError, IndexError, TypeError) as exc:
+            raise RuntimeError(
+                "TerrainCurriculum crossing metrics require indexable "
+                "simulator.robot_root_states"
+            ) from exc
+        if not torch.is_tensor(root_xy) or root_xy.shape != (self.env.num_envs, 2):
             raise RuntimeError(
                 "TerrainCurriculum crossing metrics require simulator.robot_root_states "
-                f"with first dimension {self.env.num_envs}"
+                f"yielding shape ({self.env.num_envs}, 2) for [:, :2]"
             )
-        if root_states.shape[1] < 2 or not root_states.is_floating_point():
-            raise RuntimeError("simulator.robot_root_states must be floating point with at least two columns")
-        return root_states[:, :2]
+        if not root_xy.is_floating_point():
+            raise RuntimeError("simulator.robot_root_states must be floating point")
+        return root_xy
 
     @staticmethod
     def _bool_param(params: Mapping[str, Any], name: str, default: bool) -> bool:
