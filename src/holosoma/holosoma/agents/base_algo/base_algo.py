@@ -28,6 +28,10 @@ class BaseAlgo:
         self.is_main_process = self.gpu_global_rank == 0
         self._experiment_config: ExperimentConfig | None = None
         self._wandb_run_path: str | None = None
+        # Training resumes restore stateful curricula by default. Evaluation
+        # may explicitly disable this because per-environment curriculum state
+        # is intentionally strict and cannot be mapped to a different num_envs.
+        self._restore_checkpoint_env_state = True
 
     def setup(self):
         return NotImplementedError
@@ -59,6 +63,16 @@ class BaseAlgo:
 
         self._experiment_config = experiment_config
         self._wandb_run_path = wandb_run_path
+
+    def set_checkpoint_env_state_restore(self, enabled: bool) -> None:
+        """Control whether a subsequent checkpoint load restores environment state.
+
+        Policy, optimizer, and observation-normalizer state are unaffected.  The
+        default remains enabled so training resume semantics do not change.
+        """
+        if not isinstance(enabled, bool):
+            raise TypeError(f"enabled must be a bool, got {type(enabled).__name__}")
+        self._restore_checkpoint_env_state = enabled
 
     def _checkpoint_metadata(self, iteration: int | None = None) -> dict[str, Any]:
         if self._experiment_config is None:
@@ -149,7 +163,7 @@ class BaseAlgo:
 
     def _restore_env_state(self, env_state: dict[str, torch.Tensor | float] | None) -> None:
         """Restore environment state from checkpoint via the environment interface."""
-        if not env_state:
+        if not self._restore_checkpoint_env_state or not env_state:
             return
         env = self._unwrap_env()
         env.load_checkpoint_state(env_state)

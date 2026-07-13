@@ -25,6 +25,15 @@ _terrain_reward = replace(g1_29dof_wbt_gen.reward, terms=_terrain_reward_terms)
 
 g1_29dof_wbt_gen_terrain = replace(
     g1_29dof_wbt_gen,
+    # Evaluation implementation choice: four environments are the minimum
+    # needed for the fixed round-robin flat/box/stair/hurdle assignment. Keep
+    # the training episode duration so each reset samples a new random heading
+    # and closed-loop motion instead of extending one episode to 100000 s.
+    eval_overrides=replace(
+        g1_29dof_wbt_gen.eval_overrides,
+        num_envs=4,
+        max_episode_length_s=10.0,
+    ),
     training=replace(
         g1_29dof_wbt_gen.training,
         name="g1_29dof_wbt_gen_terrain_manager",

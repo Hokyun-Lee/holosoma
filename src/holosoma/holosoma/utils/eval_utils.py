@@ -62,6 +62,14 @@ class CheckpointConfig:
     checkpoint: str | None = None
     """Path to a local checkpoint file, or W&B URI in the format `wandb://<entity>/<project>/<run_id>[/<checkpoint_name>]`."""
 
+    restore_env_state: bool = False
+    """Restore stateful curriculum buffers during evaluation.
+
+    Keep this disabled when evaluation ``num_envs`` differs from training.
+    Enabling it retains the strict training-resume checks and therefore requires
+    an environment layout compatible with the checkpoint.
+    """
+
 
 def load_saved_experiment_config(checkpoint_cfg: CheckpointConfig) -> tuple[ExperimentConfig, str | None]:
     """Load checkpoint configuration from either W&B run or local checkpoint.

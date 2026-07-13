@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import tyro
 from loguru import logger
@@ -60,13 +61,18 @@ def run_eval_with_tyro(
     )
     algo.setup()
     algo.attach_checkpoint_metadata(saved_config, saved_wandb_path)
+    algo.set_checkpoint_env_state_restore(checkpoint_cfg.restore_env_state)
+    if not checkpoint_cfg.restore_env_state:
+        logger.info(
+            "Skipping checkpoint environment state for evaluation; policy and observation normalizers are still loaded."
+        )
     algo.load(checkpoint_path)
 
     checkpoint_dir = os.path.dirname(checkpoint_path)
 
     exported_policy_dir_path = os.path.join(checkpoint_dir, "exported")
     os.makedirs(exported_policy_dir_path, exist_ok=True)
-    exported_policy_name = checkpoint_path.split("/")[-1]  # example: model_5000.pt
+    exported_policy_name = Path(checkpoint_path).name  # example: model_5000.pt
     exported_onnx_name = exported_policy_name.replace(".pt", ".onnx")  # example: model_5000.onnx
 
     if tyro_config.training.export_onnx:
