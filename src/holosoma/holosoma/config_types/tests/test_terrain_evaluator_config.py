@@ -75,7 +75,7 @@ def test_prepare_config_freezes_level_and_generator_sampling() -> None:
     assert terrain_params["skip_first_episode"] is False
     assert prepared.training.seed == 17
     assert prepared.training.export_onnx is False
-    assert prepared.training.max_eval_steps == 8 * 500
+    assert prepared.training.max_eval_steps == 8 * 501
 
 
 @pytest.mark.parametrize("serialized", [False, True], ids=["dataclass", "checkpoint-dict"])
@@ -199,7 +199,9 @@ def test_effective_sim_rate_drives_forced_phase_horizon() -> None:
     motion_config = prepared.command.setup_terms["motion_command"].params["motion_config"]
 
     assert motion_config.phase_horizon_steps == 300
-    assert prepared.training.max_eval_steps == 8 * 300
+    # HoloSoma's timeout predicate is ``episode_length_buf > max_length``, so
+    # the evaluator must allow one additional step to capture each timeout.
+    assert prepared.training.max_eval_steps == 8 * 301
 
 
 def test_metrics_callback_collection_is_opt_in_and_carries_runtime_controls() -> None:

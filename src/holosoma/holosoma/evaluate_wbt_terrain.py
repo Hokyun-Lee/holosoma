@@ -236,9 +236,11 @@ def prepare_terrain_evaluation_config(
     steps_per_episode = _evaluation_horizon_steps(config)
     max_eval_steps = config.training.max_eval_steps
     if max_eval_steps is None:
-        # A one-env upper bound. Vectorized evaluation generally stops much
-        # earlier through the callback's exact episode-count stop signal.
-        max_eval_steps = args.episode_count * max(1, steps_per_episode)
+        # ``timeout_exceeded`` uses ``episode_length_buf > max_episode_length``.
+        # One extra policy step is therefore required to observe and record a
+        # timeout.  This is a one-env upper bound; vectorized evaluation stops
+        # much earlier through the callback's exact episode-count signal.
+        max_eval_steps = args.episode_count * max(1, steps_per_episode + 1)
     training = dataclasses.replace(
         config.training,
         seed=args.seed,
