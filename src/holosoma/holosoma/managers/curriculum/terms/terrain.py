@@ -19,7 +19,7 @@ class TerrainCurriculum(CurriculumTermBase):
     the terrain term to apply the corresponding origins before command reset.
     """
 
-    _STATE_VERSION = 1
+    _STATE_VERSION = 2
 
     def __init__(self, cfg: Any, env: Any):
         super().__init__(cfg, env)
@@ -34,18 +34,15 @@ class TerrainCurriculum(CurriculumTermBase):
         self.initial_level = self._int_param(params, "initial_level", 0, minimum=0)
         self.min_level = self._int_param(params, "min_level", 0, minimum=0)
         self._configured_max_level = self._optional_int_param(params, "max_level", minimum=0)
-        self.promote_success_streak = self._int_param(
-            params, "promote_success_streak", 5, minimum=1
-        )
-        self.demote_failure_streak = self._int_param(
-            params, "demote_failure_streak", 2, minimum=1
-        )
+        self.promote_success_streak = self._int_param(params, "promote_success_streak", 5, minimum=1)
+        self.demote_failure_streak = self._int_param(params, "demote_failure_streak", 2, minimum=1)
 
-        self.success_min_episode_fraction = self._float_param(
-            params, "success_min_episode_fraction", 0.9
-        )
+        self.success_min_episode_fraction = self._float_param(params, "success_min_episode_fraction", 0.9)
         if not 0.0 < self.success_min_episode_fraction <= 1.0:
             raise ValueError("success_min_episode_fraction must be in (0, 1]")
+        self.crossing_distance_m = self._float_param(params, "crossing_distance_m", 0.0)
+        if self.crossing_distance_m < 0.0:
+            raise ValueError("crossing_distance_m must be >= 0")
 
         self._terrain_state: Any | None = None
         self._terrain_type_names: tuple[str, ...] = ()
@@ -53,6 +50,20 @@ class TerrainCurriculum(CurriculumTermBase):
         self.max_level = -1
         self._success_min_steps = 0
         self._is_setup = False
+
+    def _robot_root_xy(self) -> Any:
+        """Return measured root XY; crossing is radial for concentric terrain."""
+        simulator = getattr(self.env, "simulator", None)
+        root_states = getattr(simulator, "robot_root_states", None)
+        expected_shape = (self.env.num_envs,)
+        if not torch.is_tensor(root_states) or root_states.ndim != 2 or root_states.shape[0] != expected_shape[0]:
+            raise RuntimeError(
+                "TerrainCurriculum crossing metrics require simulator.robot_root_states "
+                f"with first dimension {self.env.num_envs}"
+            )
+        if root_states.shape[1] < 2 or not root_states.is_floating_point():
+            raise RuntimeError("simulator.robot_root_states must be floating point with at least two columns")
+        return root_states[:, :2]
 
     @staticmethod
     def _bool_param(params: Mapping[str, Any], name: str, default: bool) -> bool:
@@ -71,9 +82,7 @@ class TerrainCurriculum(CurriculumTermBase):
         return value
 
     @classmethod
-    def _optional_int_param(
-        cls, params: Mapping[str, Any], name: str, *, minimum: int
-    ) -> int | None:
+    def _optional_int_param(cls, params: Mapping[str, Any], name: str, *, minimum: int) -> int | None:
         value = params.get(name)
         if value is None:
             return None
@@ -125,9 +134,7 @@ class TerrainCurriculum(CurriculumTermBase):
 
         state_num_levels = getattr(terrain_state, "num_curriculum_levels", None)
         if state_num_levels is None:
-            raise RuntimeError(
-                "Terrain state must expose num_curriculum_levels so curriculum levels can be clamped"
-            )
+            raise RuntimeError("Terrain state must expose num_curriculum_levels so curriculum levels can be clamped")
         if isinstance(state_num_levels, bool) or not isinstance(state_num_levels, int):
             raise TypeError("terrain_state.num_curriculum_levels must be an int")
         if state_num_levels < 1:
@@ -136,26 +143,17 @@ class TerrainCurriculum(CurriculumTermBase):
 
         state_max_level = state_num_levels - 1
         self.max_level = (
-            state_max_level
-            if self._configured_max_level is None
-            else min(self._configured_max_level, state_max_level)
+            state_max_level if self._configured_max_level is None else min(self._configured_max_level, state_max_level)
         )
         if self.min_level > self.max_level:
-            raise ValueError(
-                f"min_level ({self.min_level}) exceeds available max_level ({self.max_level})"
-            )
+            raise ValueError(f"min_level ({self.min_level}) exceeds available max_level ({self.max_level})")
         if not self.min_level <= self.initial_level <= self.max_level:
-            raise ValueError(
-                f"initial_level must be in [{self.min_level}, {self.max_level}], "
-                f"got {self.initial_level}"
-            )
+            raise ValueError(f"initial_level must be in [{self.min_level}, {self.max_level}], got {self.initial_level}")
 
         max_episode_length = int(self.env.max_episode_length)
         if max_episode_length < 1:
             raise ValueError("env.max_episode_length must be >= 1")
-        self._success_min_steps = max(
-            1, math.ceil(self.success_min_episode_fraction * max_episode_length)
-        )
+        self._success_min_steps = max(1, math.ceil(self.success_min_episode_fraction * max_episode_length))
 
         device = self.env.device
         num_envs = self.env.num_envs
@@ -173,6 +171,18 @@ class TerrainCurriculum(CurriculumTermBase):
         self._skip_next_step_increment = torch.zeros_like(self.success_eligible)
         self.type_success_counts = torch.zeros(num_types, dtype=torch.long, device=device)
         self.type_episode_counts = torch.zeros_like(self.type_success_counts)
+        self.type_survival_counts = torch.zeros_like(self.type_success_counts)
+        self.type_crossing_counts = torch.zeros_like(self.type_success_counts)
+        self.type_failure_counts = torch.zeros_like(self.type_success_counts)
+        type_level_shape = (num_types, self._num_curriculum_levels)
+        self.type_level_episode_counts = torch.zeros(type_level_shape, dtype=torch.long, device=device)
+        self.type_level_success_counts = torch.zeros_like(self.type_level_episode_counts)
+        self.type_level_survival_counts = torch.zeros_like(self.type_level_episode_counts)
+        self.type_level_crossing_counts = torch.zeros_like(self.type_level_episode_counts)
+        self.type_level_failure_counts = torch.zeros_like(self.type_level_episode_counts)
+        root_xy = self._robot_root_xy()
+        self.episode_start_root_xy = root_xy.detach().clone()
+        self.max_episode_progress_m = torch.zeros(num_envs, dtype=root_xy.dtype, device=device)
 
         self._terrain_state = terrain_state
         self._is_setup = True
@@ -201,21 +211,35 @@ class TerrainCurriculum(CurriculumTermBase):
         can_evaluate_outcome = self.outcome_eligible.index_select(0, ids)
 
         effective_steps = self.actual_episode_steps.index_select(0, ids).clone()
-        updates_before_termination = bool(
-            getattr(self.env, "_update_tasks_before_termination", False)
-        )
+        updates_before_termination = bool(getattr(self.env, "_update_tasks_before_termination", False))
         if not updates_before_termination:
             # On Isaac Sim the curriculum step hook runs after reset, so the
             # terminal physics step has not yet reached this counter.
             effective_steps[raw_outcomes] += 1
 
-        eligible = self.success_eligible.index_select(0, ids) | (
-            effective_steps >= self._success_min_steps
-        )
+        eligible = self.success_eligible.index_select(0, ids) | (effective_steps >= self._success_min_steps)
         evaluated_failures = failures & can_evaluate_outcome
-        successes = (~failures) & time_outs & eligible & can_evaluate_outcome
+        survival_successes = (~failures) & time_outs & eligible & can_evaluate_outcome
+        if self.crossing_distance_m > 0.0:
+            crossing_achieved = self.max_episode_progress_m.index_select(0, ids) >= self.crossing_distance_m
+            successes = survival_successes & crossing_achieved
+        else:
+            crossing_achieved = torch.zeros_like(survival_successes)
+            successes = survival_successes
+        # Timeouts that fail the configured progress gate remain evaluated
+        # failures for curriculum streaks and denominators. This prevents a
+        # stationary policy from being promoted merely for surviving.
+        progress_failures = survival_successes & (~successes)
+        evaluated_failures |= progress_failures
         evaluated = evaluated_failures | successes
-        self._accumulate_type_outcomes(ids, evaluated, successes)
+        self._accumulate_type_outcomes(
+            ids,
+            evaluated,
+            successes,
+            survival_successes,
+            crossing_achieved & evaluated,
+            evaluated_failures,
+        )
 
         # The first reset after rollout initialization may only be the tail of
         # an episode because PPO randomizes episode_length_buf.  It is never a
@@ -236,9 +260,7 @@ class TerrainCurriculum(CurriculumTermBase):
         changed_ids: list[Any] = []
         changed_levels: list[Any] = []
 
-        promote_ids = success_ids[
-            self.success_streaks.index_select(0, success_ids) >= self.promote_success_streak
-        ]
+        promote_ids = success_ids[self.success_streaks.index_select(0, success_ids) >= self.promote_success_streak]
         if promote_ids.numel() > 0:
             promoted = torch.clamp(
                 current_levels.index_select(0, promote_ids) + 1,
@@ -249,9 +271,7 @@ class TerrainCurriculum(CurriculumTermBase):
             changed_ids.append(promote_ids)
             changed_levels.append(promoted)
 
-        demote_ids = failure_ids[
-            self.failure_streaks.index_select(0, failure_ids) >= self.demote_failure_streak
-        ]
+        demote_ids = failure_ids[self.failure_streaks.index_select(0, failure_ids) >= self.demote_failure_streak]
         if demote_ids.numel() > 0:
             demoted = torch.clamp(
                 current_levels.index_select(0, demote_ids) - 1,
@@ -271,16 +291,27 @@ class TerrainCurriculum(CurriculumTermBase):
             # The post-reset step hook corresponds to the terminal physics
             # step, not to a step in the newly reset episode.
             self._skip_next_step_increment[ids[raw_outcomes]] = True
+        self._write_metrics()
 
     def reset(self, env_ids) -> None:
-        """Keep the legacy reset lifecycle position as a no-op."""
-        del env_ids
+        """Capture the new measured episode origin after command reset."""
+        if not self.enabled:
+            return
+        self._require_setup()
+        ids = self._as_env_ids(env_ids)
+        if ids.numel() == 0:
+            return
+        self.episode_start_root_xy[ids] = self._robot_root_xy().index_select(0, ids)
+        self.max_episode_progress_m[ids] = 0.0
 
     def step(self) -> None:
         """Advance actual-step guards and publish cumulative metrics."""
         if not self.enabled:
             return
         self._require_setup()
+        root_xy = self._robot_root_xy()
+        radial_progress = torch.linalg.vector_norm(root_xy - self.episode_start_root_xy, dim=-1)
+        self.max_episode_progress_m = torch.maximum(self.max_episode_progress_m, radial_progress)
         increment = ~self._skip_next_step_increment
         self.actual_episode_steps[increment] += 1
         self._skip_next_step_increment.zero_()
@@ -304,6 +335,16 @@ class TerrainCurriculum(CurriculumTermBase):
             "skip_next_step_increment": self._skip_next_step_increment.detach().cpu().clone(),
             "type_success_counts": self.type_success_counts.detach().cpu().clone(),
             "type_episode_counts": self.type_episode_counts.detach().cpu().clone(),
+            "type_survival_counts": self.type_survival_counts.detach().cpu().clone(),
+            "type_crossing_counts": self.type_crossing_counts.detach().cpu().clone(),
+            "type_failure_counts": self.type_failure_counts.detach().cpu().clone(),
+            "type_level_episode_counts": self.type_level_episode_counts.detach().cpu().clone(),
+            "type_level_success_counts": self.type_level_success_counts.detach().cpu().clone(),
+            "type_level_survival_counts": self.type_level_survival_counts.detach().cpu().clone(),
+            "type_level_crossing_counts": self.type_level_crossing_counts.detach().cpu().clone(),
+            "type_level_failure_counts": self.type_level_failure_counts.detach().cpu().clone(),
+            "episode_start_root_xy": self.episode_start_root_xy.detach().cpu().clone(),
+            "max_episode_progress_m": self.max_episode_progress_m.detach().cpu().clone(),
         }
 
     def load_state_dict(self, state: Mapping[str, Any]) -> None:
@@ -311,44 +352,82 @@ class TerrainCurriculum(CurriculumTermBase):
         self._require_setup()
         if not isinstance(state, Mapping):
             raise TypeError("Terrain curriculum state must be a mapping")
-        if state.get("version") != self._STATE_VERSION:
+        version = state.get("version")
+        if version not in (1, self._STATE_VERSION):
             raise ValueError(
-                f"Unsupported terrain curriculum state version {state.get('version')!r}; "
-                f"expected {self._STATE_VERSION}"
+                f"Unsupported terrain curriculum state version {version!r}; expected 1 or {self._STATE_VERSION}"
             )
         if state.get("num_envs") != self.env.num_envs:
-            raise ValueError(
-                f"Terrain curriculum num_envs mismatch: {state.get('num_envs')!r} "
-                f"!= {self.env.num_envs}"
-            )
+            raise ValueError(f"Terrain curriculum num_envs mismatch: {state.get('num_envs')!r} != {self.env.num_envs}")
         if tuple(state.get("terrain_type_names", ())) != self._terrain_type_names:
             raise ValueError("Terrain curriculum terrain_type_names mismatch")
 
         num_envs_shape = (self.env.num_envs,)
         num_types_shape = (len(self._terrain_type_names),)
+        type_level_shape = (len(self._terrain_type_names), self._num_curriculum_levels)
         type_ids = self._state_tensor(state, "terrain_type_ids", torch.long, num_envs_shape)
         levels = self._state_tensor(state, "terrain_levels", torch.long, num_envs_shape)
         success_streaks = self._state_tensor(state, "success_streaks", torch.long, num_envs_shape)
         failure_streaks = self._state_tensor(state, "failure_streaks", torch.long, num_envs_shape)
         actual_steps = self._state_tensor(state, "actual_episode_steps", torch.long, num_envs_shape)
         eligible = self._state_tensor(state, "success_eligible", torch.bool, num_envs_shape)
-        outcome_eligible = self._state_tensor(
-            state, "outcome_eligible", torch.bool, num_envs_shape
-        )
-        skip_increment = self._state_tensor(
-            state, "skip_next_step_increment", torch.bool, num_envs_shape
-        )
-        success_counts = self._state_tensor(
-            state, "type_success_counts", torch.long, num_types_shape
-        )
-        episode_counts = self._state_tensor(
-            state, "type_episode_counts", torch.long, num_types_shape
-        )
+        outcome_eligible = self._state_tensor(state, "outcome_eligible", torch.bool, num_envs_shape)
+        skip_increment = self._state_tensor(state, "skip_next_step_increment", torch.bool, num_envs_shape)
+        success_counts = self._state_tensor(state, "type_success_counts", torch.long, num_types_shape)
+        episode_counts = self._state_tensor(state, "type_episode_counts", torch.long, num_types_shape)
+        if version == 1:
+            # Stage-7 success meant a full timeout without a progress gate.
+            # Preserve those aggregate statistics while starting the new
+            # crossing/type-level channels from zero because they cannot be
+            # reconstructed from the legacy checkpoint.
+            survival_counts = success_counts.clone()
+            crossing_counts = torch.zeros_like(success_counts)
+            failure_counts = episode_counts - success_counts
+            type_level_episode_counts = torch.zeros(type_level_shape, dtype=torch.long, device=self.env.device)
+            type_level_success_counts = torch.zeros_like(type_level_episode_counts)
+            type_level_survival_counts = torch.zeros_like(type_level_episode_counts)
+            type_level_crossing_counts = torch.zeros_like(type_level_episode_counts)
+            type_level_failure_counts = torch.zeros_like(type_level_episode_counts)
+            episode_start_root_xy = self._robot_root_xy().detach().clone()
+            max_episode_progress_m = torch.zeros(
+                self.env.num_envs,
+                dtype=episode_start_root_xy.dtype,
+                device=self.env.device,
+            )
+        else:
+            survival_counts = self._state_tensor(state, "type_survival_counts", torch.long, num_types_shape)
+            crossing_counts = self._state_tensor(state, "type_crossing_counts", torch.long, num_types_shape)
+            failure_counts = self._state_tensor(state, "type_failure_counts", torch.long, num_types_shape)
+            type_level_episode_counts = self._state_tensor(
+                state, "type_level_episode_counts", torch.long, type_level_shape
+            )
+            type_level_success_counts = self._state_tensor(
+                state, "type_level_success_counts", torch.long, type_level_shape
+            )
+            type_level_survival_counts = self._state_tensor(
+                state, "type_level_survival_counts", torch.long, type_level_shape
+            )
+            type_level_crossing_counts = self._state_tensor(
+                state, "type_level_crossing_counts", torch.long, type_level_shape
+            )
+            type_level_failure_counts = self._state_tensor(
+                state, "type_level_failure_counts", torch.long, type_level_shape
+            )
+            episode_start_root_xy = self._state_tensor(
+                state,
+                "episode_start_root_xy",
+                self.episode_start_root_xy.dtype,
+                (self.env.num_envs, 2),
+            )
+            max_episode_progress_m = self._state_tensor(
+                state,
+                "max_episode_progress_m",
+                self.max_episode_progress_m.dtype,
+                num_envs_shape,
+            )
 
         if torch.any(levels < self.min_level) or torch.any(levels > self.max_level):
-            raise ValueError(
-                f"terrain_levels must be in [{self.min_level}, {self.max_level}]"
-            )
+            raise ValueError(f"terrain_levels must be in [{self.min_level}, {self.max_level}]")
         if not torch.equal(type_ids, self._terrain_state.terrain_type_ids):
             raise ValueError("Terrain curriculum per-environment terrain_type_ids mismatch")
         nonnegative = {
@@ -357,12 +436,39 @@ class TerrainCurriculum(CurriculumTermBase):
             "actual_episode_steps": actual_steps,
             "type_success_counts": success_counts,
             "type_episode_counts": episode_counts,
+            "type_survival_counts": survival_counts,
+            "type_crossing_counts": crossing_counts,
+            "type_failure_counts": failure_counts,
+            "type_level_episode_counts": type_level_episode_counts,
+            "type_level_success_counts": type_level_success_counts,
+            "type_level_survival_counts": type_level_survival_counts,
+            "type_level_crossing_counts": type_level_crossing_counts,
+            "type_level_failure_counts": type_level_failure_counts,
         }
         for name, tensor in nonnegative.items():
             if torch.any(tensor < 0):
                 raise ValueError(f"{name} must be non-negative")
         if torch.any(success_counts > episode_counts):
             raise ValueError("type_success_counts cannot exceed type_episode_counts")
+        for name, counts in (
+            ("type_survival_counts", survival_counts),
+            ("type_crossing_counts", crossing_counts),
+            ("type_failure_counts", failure_counts),
+        ):
+            if torch.any(counts > episode_counts):
+                raise ValueError(f"{name} cannot exceed type_episode_counts")
+        for name, counts in (
+            ("type_level_success_counts", type_level_success_counts),
+            ("type_level_survival_counts", type_level_survival_counts),
+            ("type_level_crossing_counts", type_level_crossing_counts),
+            ("type_level_failure_counts", type_level_failure_counts),
+        ):
+            if torch.any(counts > type_level_episode_counts):
+                raise ValueError(f"{name} cannot exceed type_level_episode_counts")
+        if not torch.isfinite(episode_start_root_xy).all():
+            raise ValueError("episode_start_root_xy must be finite")
+        if not torch.isfinite(max_episode_progress_m).all() or torch.any(max_episode_progress_m < 0):
+            raise ValueError("max_episode_progress_m must be finite and non-negative")
         if torch.any(eligible & (actual_steps < self._success_min_steps)):
             raise ValueError("success_eligible is inconsistent with actual_episode_steps")
 
@@ -376,24 +482,59 @@ class TerrainCurriculum(CurriculumTermBase):
         self._skip_next_step_increment.copy_(skip_increment)
         self.type_success_counts.copy_(success_counts)
         self.type_episode_counts.copy_(episode_counts)
+        self.type_survival_counts.copy_(survival_counts)
+        self.type_crossing_counts.copy_(crossing_counts)
+        self.type_failure_counts.copy_(failure_counts)
+        self.type_level_episode_counts.copy_(type_level_episode_counts)
+        self.type_level_success_counts.copy_(type_level_success_counts)
+        self.type_level_survival_counts.copy_(type_level_survival_counts)
+        self.type_level_crossing_counts.copy_(type_level_crossing_counts)
+        self.type_level_failure_counts.copy_(type_level_failure_counts)
+        self.episode_start_root_xy.copy_(episode_start_root_xy)
+        self.max_episode_progress_m.copy_(max_episode_progress_m)
         all_ids = torch.arange(self.env.num_envs, dtype=torch.long, device=self.env.device)
         self._set_origins(all_ids, levels)
         self._write_metrics()
 
     def _accumulate_type_outcomes(
-        self, env_ids: Any, evaluated: Any, successes: Any
+        self,
+        env_ids: Any,
+        evaluated: Any,
+        successes: Any,
+        survivals: Any,
+        crossings: Any,
+        failures: Any,
     ) -> None:
         if not torch.any(evaluated):
             return
         type_ids = self._terrain_state.terrain_type_ids.index_select(0, env_ids)
+        levels = self._terrain_state.terrain_levels.index_select(0, env_ids)
         num_types = len(self._terrain_type_names)
-        self.type_episode_counts += torch.bincount(
-            type_ids[evaluated], minlength=num_types
+        self.type_episode_counts += torch.bincount(type_ids[evaluated], minlength=num_types)
+        channels = (
+            (self.type_success_counts, successes),
+            (self.type_survival_counts, survivals),
+            (self.type_crossing_counts, crossings),
+            (self.type_failure_counts, failures),
         )
-        if torch.any(successes):
-            self.type_success_counts += torch.bincount(
-                type_ids[successes], minlength=num_types
-            )
+        for counts, mask in channels:
+            if torch.any(mask):
+                counts.add_(torch.bincount(type_ids[mask], minlength=num_types))
+
+        flat_bins = type_ids * self._num_curriculum_levels + levels
+        total_bins = num_types * self._num_curriculum_levels
+        self.type_level_episode_counts += torch.bincount(flat_bins[evaluated], minlength=total_bins).view_as(
+            self.type_level_episode_counts
+        )
+        level_channels = (
+            (self.type_level_success_counts, successes),
+            (self.type_level_survival_counts, survivals),
+            (self.type_level_crossing_counts, crossings),
+            (self.type_level_failure_counts, failures),
+        )
+        for counts, mask in level_channels:
+            if torch.any(mask):
+                counts.add_(torch.bincount(flat_bins[mask], minlength=total_bins).view_as(counts))
 
     def _write_metrics(self) -> None:
         if not hasattr(self.env, "log_dict"):
@@ -403,36 +544,68 @@ class TerrainCurriculum(CurriculumTermBase):
         device = levels.device
         float_dtype = torch.float32
         self.env.log_dict["terrain_curriculum/mean_level"] = levels.to(float_dtype).mean()
+        self.env.log_dict["terrain_curriculum/crossing_distance_m"] = torch.tensor(
+            self.crossing_distance_m,
+            dtype=float_dtype,
+            device=device,
+        )
+        self.env.log_dict["terrain_curriculum/current_mean_max_progress_m"] = self.max_episode_progress_m.mean()
 
         for level in range(self._num_curriculum_levels):
             self.env.log_dict[f"terrain_curriculum/level/{level}/env_fraction"] = (
-                levels == level
-            ).to(float_dtype).mean()
+                (levels == level).to(float_dtype).mean()
+            )
 
-        type_fractions = torch.bincount(
-            type_ids, minlength=len(self._terrain_type_names)
-        ).to(float_dtype) / float(self.env.num_envs)
+        type_fractions = torch.bincount(type_ids, minlength=len(self._terrain_type_names)).to(float_dtype) / float(
+            self.env.num_envs
+        )
         self.env.log_dict["terrain_curriculum/type_env_fraction_min"] = type_fractions.min()
         self.env.log_dict["terrain_curriculum/type_env_fraction_max"] = type_fractions.max()
-        self.env.log_dict["terrain_curriculum/type_env_fraction_range"] = (
-            type_fractions.max() - type_fractions.min()
-        )
+        self.env.log_dict["terrain_curriculum/type_env_fraction_range"] = type_fractions.max() - type_fractions.min()
 
         for type_id, type_name in enumerate(self._terrain_type_names):
             key = f"{type_id}_{self._metric_name(type_name)}"
             episodes = self.type_episode_counts[type_id]
             successes = self.type_success_counts[type_id]
+            survivals = self.type_survival_counts[type_id]
+            crossings = self.type_crossing_counts[type_id]
+            failures = self.type_failure_counts[type_id]
             zero = torch.zeros((), dtype=float_dtype, device=device)
-            rate = torch.where(
-                episodes > 0,
-                successes.to(float_dtype) / episodes.to(float_dtype),
-                zero,
-            )
             prefix = f"terrain_curriculum/type/{key}"
-            self.env.log_dict[f"{prefix}/success_count"] = successes.to(float_dtype)
             self.env.log_dict[f"{prefix}/episode_count"] = episodes.to(float_dtype)
-            self.env.log_dict[f"{prefix}/success_rate"] = rate
             self.env.log_dict[f"{prefix}/env_fraction"] = type_fractions[type_id]
+            for channel, count in (
+                ("success", successes),
+                ("survival", survivals),
+                ("crossing", crossings),
+                ("failure", failures),
+            ):
+                rate = torch.where(
+                    episodes > 0,
+                    count.to(float_dtype) / episodes.to(float_dtype),
+                    zero,
+                )
+                self.env.log_dict[f"{prefix}/{channel}_count"] = count.to(float_dtype)
+                self.env.log_dict[f"{prefix}/{channel}_rate"] = rate
+
+            for level in range(self._num_curriculum_levels):
+                level_prefix = f"{prefix}/level/{level}"
+                level_episodes = self.type_level_episode_counts[type_id, level]
+                self.env.log_dict[f"{level_prefix}/episode_count"] = level_episodes.to(float_dtype)
+                for channel, matrix in (
+                    ("success", self.type_level_success_counts),
+                    ("survival", self.type_level_survival_counts),
+                    ("crossing", self.type_level_crossing_counts),
+                    ("failure", self.type_level_failure_counts),
+                ):
+                    count = matrix[type_id, level]
+                    rate = torch.where(
+                        level_episodes > 0,
+                        count.to(float_dtype) / level_episodes.to(float_dtype),
+                        zero,
+                    )
+                    self.env.log_dict[f"{level_prefix}/{channel}_count"] = count.to(float_dtype)
+                    self.env.log_dict[f"{level_prefix}/{channel}_rate"] = rate
 
     @staticmethod
     def _metric_name(name: str) -> str:
@@ -456,9 +629,7 @@ class TerrainCurriculum(CurriculumTermBase):
             raise ValueError("env_ids must not contain duplicates")
         return ids
 
-    def _validate_runtime_tensor(
-        self, name: str, value: Any, shape: tuple[int, ...], dtype: Any
-    ) -> None:
+    def _validate_runtime_tensor(self, name: str, value: Any, shape: tuple[int, ...], dtype: Any) -> None:
         if not torch.is_tensor(value):
             raise TypeError(f"{name} must be a torch.Tensor")
         if tuple(value.shape) != shape:
@@ -472,23 +643,16 @@ class TerrainCurriculum(CurriculumTermBase):
         if wrong_device:
             raise ValueError(f"{name} must be on {self.env.device}, got {value.device}")
 
-    def _state_tensor(
-        self, state: Mapping[str, Any], name: str, dtype: Any, shape: tuple[int, ...]
-    ) -> Any:
+    def _state_tensor(self, state: Mapping[str, Any], name: str, dtype: Any, shape: tuple[int, ...]) -> Any:
         if name not in state:
             raise KeyError(f"Terrain curriculum state is missing {name!r}")
         value = state[name]
         if not torch.is_tensor(value):
             raise TypeError(f"Terrain curriculum state {name!r} must be a tensor")
         if value.dtype != dtype:
-            raise TypeError(
-                f"Terrain curriculum state {name!r} must have dtype {dtype}, got {value.dtype}"
-            )
+            raise TypeError(f"Terrain curriculum state {name!r} must have dtype {dtype}, got {value.dtype}")
         if tuple(value.shape) != shape:
-            raise ValueError(
-                f"Terrain curriculum state {name!r} must have shape {shape}, "
-                f"got {tuple(value.shape)}"
-            )
+            raise ValueError(f"Terrain curriculum state {name!r} must have shape {shape}, got {tuple(value.shape)}")
         return value.to(device=self.env.device).clone()
 
     def _require_setup(self) -> None:

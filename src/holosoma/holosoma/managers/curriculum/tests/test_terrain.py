@@ -17,13 +17,9 @@ class _FakeTerrainState:
         levels: torch.Tensor | None = None,
         type_ids: torch.Tensor | None = None,
     ):
-        self.terrain_levels = (
-            levels.clone() if levels is not None else torch.tensor([1, 1, 1, 1], dtype=torch.long)
-        )
+        self.terrain_levels = levels.clone() if levels is not None else torch.tensor([1, 1, 1, 1], dtype=torch.long)
         self.terrain_type_ids = (
-            type_ids.clone()
-            if type_ids is not None
-            else torch.tensor([0, 1, 2, 3], dtype=torch.long)
+            type_ids.clone() if type_ids is not None else torch.tensor([0, 1, 2, 3], dtype=torch.long)
         )
         self.terrain_type_names = ("flat", "box", "stair", "hurdle")
         self.num_curriculum_levels = 4
@@ -47,6 +43,7 @@ class _FakeEnv:
             terminated=torch.zeros(self.num_envs, dtype=torch.bool),
             time_outs=torch.zeros(self.num_envs, dtype=torch.bool),
         )
+        self.simulator = SimpleNamespace(robot_root_states=torch.zeros(self.num_envs, 13, dtype=torch.float32))
 
 
 def _make_term(env: _FakeEnv, **params) -> TerrainCurriculum:
@@ -82,9 +79,7 @@ def test_base_task_before_reset_order_precedes_command_and_regular_curriculum_re
     env._pending_episode_lengths = torch.zeros(1, dtype=torch.long)
     env._pending_episode_update_mask = torch.zeros(1, dtype=torch.bool)
     env.episode_length_buf = torch.ones(1, dtype=torch.long)
-    env._reset_envs_idx_impl = MethodType(
-        lambda _self, _ids, _states, _buf: events.append("reset_impl"), env
-    )
+    env._reset_envs_idx_impl = MethodType(lambda _self, _ids, _states, _buf: events.append("reset_impl"), env)
     env.randomization_manager = SimpleNamespace(reset=lambda _: events.append("randomization"))
     env.action_manager = SimpleNamespace(reset=lambda _: events.append("action"))
     env.command_manager = SimpleNamespace(reset=lambda _: events.append("command"))
@@ -105,9 +100,7 @@ def test_base_task_before_reset_order_precedes_command_and_regular_curriculum_re
 def test_curriculum_manager_dispatches_before_reset_to_stateful_terms():
     calls: list[torch.Tensor] = []
     manager = CurriculumManager.__new__(CurriculumManager)
-    manager._class_instances = [
-        SimpleNamespace(before_reset=lambda ids: calls.append(ids.clone()))
-    ]
+    manager._class_instances = [SimpleNamespace(before_reset=lambda ids: calls.append(ids.clone()))]
     ids = torch.tensor([1, 3])
 
     manager.before_reset(ids)
@@ -234,11 +227,72 @@ def test_type_rates_level_and_sampling_balance_metrics_are_scalar_tensors():
     assert env.log_dict["terrain_curriculum/type_env_fraction_min"].item() == 0.0
     assert env.log_dict["terrain_curriculum/type_env_fraction_max"].item() == 0.5
 
-    level_fraction_keys = [
-        f"terrain_curriculum/level/{level}/env_fraction" for level in range(4)
-    ]
+    level_fraction_keys = [f"terrain_curriculum/level/{level}/env_fraction" for level in range(4)]
     assert sum(env.log_dict[key].item() for key in level_fraction_keys) == pytest.approx(1.0)
     assert all(torch.is_tensor(value) and value.ndim == 0 for value in env.log_dict.values())
+
+
+def test_progress_gated_success_requires_crossing_and_logs_type_level_rates():
+    env = _FakeEnv()
+    term = _make_term(
+        env,
+        crossing_distance_m=1.5,
+        promote_success_streak=1,
+        demote_failure_streak=2,
+    )
+    term.reset(torch.arange(env.num_envs))
+
+    # A full timeout after only one metre is survival, but not a crossing
+    # success and therefore must not promote the terrain level.
+    env.simulator.robot_root_states[0, :2] = torch.tensor([1.0, 0.0])
+    term.step()
+    term.actual_episode_steps[0] = term._success_min_steps
+    term.success_eligible[0] = True
+    _set_outcome(env, 0, failure=False, timeout=True)
+    term.before_reset(torch.tensor([0]))
+    assert env.terrain_state.terrain_levels[0].item() == 1
+    assert term.type_episode_counts[0].item() == 1
+    assert term.type_survival_counts[0].item() == 1
+    assert term.type_crossing_counts[0].item() == 0
+    assert term.type_success_counts[0].item() == 0
+    assert term.type_failure_counts[0].item() == 1
+
+    # Simulate command reset at a new pose, then travel farther than 1.5 m.
+    env.simulator.robot_root_states[0, :2] = torch.tensor([4.0, -2.0])
+    term.reset(torch.tensor([0]))
+    env.simulator.robot_root_states[0, :2] = torch.tensor([4.0, -3.6])
+    term.step()
+    term.actual_episode_steps[0] = term._success_min_steps
+    term.success_eligible[0] = True
+    _set_outcome(env, 0, failure=False, timeout=True)
+    term.before_reset(torch.tensor([0]))
+
+    assert env.terrain_state.terrain_levels[0].item() == 2
+    assert term.type_episode_counts[0].item() == 2
+    assert term.type_survival_counts[0].item() == 2
+    assert term.type_crossing_counts[0].item() == 1
+    assert term.type_success_counts[0].item() == 1
+    assert term.type_failure_counts[0].item() == 1
+    assert term.type_level_episode_counts[0, 1].item() == 2
+    assert term.type_level_success_counts[0, 1].item() == 1
+    assert env.log_dict["terrain_curriculum/type/0_flat/success_rate"].item() == 0.5
+    assert env.log_dict["terrain_curriculum/type/0_flat/survival_rate"].item() == 1.0
+    assert env.log_dict["terrain_curriculum/type/0_flat/crossing_rate"].item() == 0.5
+    assert env.log_dict["terrain_curriculum/type/0_flat/failure_rate"].item() == 0.5
+
+
+def test_progress_buffers_are_isolated_and_reset_only_for_selected_envs():
+    env = _FakeEnv()
+    term = _make_term(env, crossing_distance_m=1.5)
+    term.reset(torch.arange(env.num_envs))
+    env.simulator.robot_root_states[:, :2] = torch.tensor([[1.0, 0.0], [0.0, 2.0], [-3.0, 0.0], [0.0, -4.0]])
+    term.step()
+    torch.testing.assert_close(term.max_episode_progress_m, torch.tensor([1.0, 2.0, 3.0, 4.0]))
+
+    env.simulator.robot_root_states[1, :2] = torch.tensor([10.0, 10.0])
+    term.reset(torch.tensor([1]))
+    torch.testing.assert_close(term.max_episode_progress_m, torch.tensor([1.0, 0.0, 3.0, 4.0]))
+    torch.testing.assert_close(term.episode_start_root_xy[1], torch.tensor([10.0, 10.0]))
 
 
 def test_state_roundtrip_is_strict_and_reapplies_restored_origins():
@@ -253,6 +307,16 @@ def test_state_roundtrip_is_strict_and_reapplies_restored_origins():
     term._skip_next_step_increment.copy_(torch.tensor([False, True, False, False]))
     term.type_success_counts.copy_(torch.tensor([2, 1, 0, 0]))
     term.type_episode_counts.copy_(torch.tensor([3, 4, 0, 1]))
+    term.type_survival_counts.copy_(torch.tensor([2, 3, 0, 1]))
+    term.type_crossing_counts.copy_(torch.tensor([1, 2, 0, 0]))
+    term.type_failure_counts.copy_(torch.tensor([1, 1, 0, 0]))
+    term.type_level_episode_counts[0, 0] = 3
+    term.type_level_success_counts[0, 0] = 2
+    term.type_level_survival_counts[0, 0] = 2
+    term.type_level_crossing_counts[0, 0] = 1
+    term.type_level_failure_counts[0, 0] = 1
+    term.episode_start_root_xy.copy_(torch.arange(8, dtype=torch.float32).view(4, 2))
+    term.max_episode_progress_m.copy_(torch.tensor([1.0, 2.0, 3.0, 4.0]))
     saved = term.state_dict()
 
     restored_env = _FakeEnv()
@@ -270,6 +334,16 @@ def test_state_roundtrip_is_strict_and_reapplies_restored_origins():
         "_skip_next_step_increment",
         "type_success_counts",
         "type_episode_counts",
+        "type_survival_counts",
+        "type_crossing_counts",
+        "type_failure_counts",
+        "type_level_episode_counts",
+        "type_level_success_counts",
+        "type_level_survival_counts",
+        "type_level_crossing_counts",
+        "type_level_failure_counts",
+        "episode_start_root_xy",
+        "max_episode_progress_m",
     ):
         torch.testing.assert_close(getattr(restored, name), getattr(term, name))
 
@@ -285,6 +359,35 @@ def test_state_roundtrip_is_strict_and_reapplies_restored_origins():
     torch.testing.assert_close(restored.state_dict()["terrain_levels"], before["terrain_levels"])
 
 
+def test_version_one_state_migrates_without_inventing_crossing_history():
+    env = _FakeEnv()
+    term = _make_term(env)
+    term.type_success_counts.copy_(torch.tensor([2, 1, 0, 0]))
+    term.type_episode_counts.copy_(torch.tensor([3, 4, 0, 1]))
+    legacy = term.state_dict()
+    legacy["version"] = 1
+    for key in tuple(legacy):
+        if key.startswith("type_level_") or key in {
+            "type_survival_counts",
+            "type_crossing_counts",
+            "type_failure_counts",
+            "episode_start_root_xy",
+            "max_episode_progress_m",
+        }:
+            legacy.pop(key)
+
+    restored = _make_term(_FakeEnv())
+    restored.load_state_dict(legacy)
+
+    torch.testing.assert_close(restored.type_survival_counts, term.type_success_counts)
+    torch.testing.assert_close(
+        restored.type_failure_counts,
+        term.type_episode_counts - term.type_success_counts,
+    )
+    assert restored.type_crossing_counts.sum().item() == 0
+    assert restored.type_level_episode_counts.sum().item() == 0
+
+
 @pytest.mark.parametrize(
     ("params", "error"),
     [
@@ -292,6 +395,7 @@ def test_state_roundtrip_is_strict_and_reapplies_restored_origins():
         ({"promote_success_streak": 0}, ValueError),
         ({"enabled": 1}, TypeError),
         ({"initial_level": 4}, ValueError),
+        ({"crossing_distance_m": -0.1}, ValueError),
     ],
 )
 def test_config_validation(params: dict[str, object], error: type[Exception]):
