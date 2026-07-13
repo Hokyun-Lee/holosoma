@@ -163,7 +163,10 @@ class Terrain(TerrainInterface):
                 f"Curriculum layout needs at least one column per terrain type: "
                 f"num_cols={self._num_cols}, types={len(type_names)}."
             )
-        supported = {"flat", "box", "stair", "hurdle"}
+        # ``rough`` is intentionally opt-in: it is used only by the Stage-10
+        # unseen-terrain evaluation and does not change the default balanced
+        # flat/box/stair/hurdle training layout.
+        supported = {"flat", "box", "stair", "hurdle", "rough"}
         unsupported = set(type_names).difference(supported)
         if unsupported:
             raise ValueError(f"Unsupported curriculum terrain types: {sorted(unsupported)}")

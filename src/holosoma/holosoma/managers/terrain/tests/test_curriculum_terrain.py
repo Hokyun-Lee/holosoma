@@ -61,6 +61,27 @@ def test_curriculum_columns_are_balanced_and_rows_are_linear_monotone() -> None:
     assert terrain.origin_grid.shape == (3, 8, 3)
 
 
+def test_rough_is_opt_in_unseen_curriculum_terrain() -> None:
+    base = _small_curriculum_cfg(num_rows=2, num_cols=2)
+    cfg = replace(
+        base,
+        curriculum_layout=replace(base.curriculum_layout, terrain_types=["rough"]),
+    )
+
+    terrain = Terrain(cfg, num_robots=2)
+
+    assert terrain.terrain_type_names == ("rough",)
+    assert terrain.terrain_types_by_column == ("rough", "rough")
+    assert np.ptp(terrain.make_terrain("rough", difficulty=1.0).height_field_raw) > 0
+    # The production preset remains the original four-way balanced layout.
+    assert terrain_locomotion_curriculum.terrain_term.curriculum_layout.terrain_types == [
+        "flat",
+        "box",
+        "stair",
+        "hurdle",
+    ]
+
+
 @pytest.mark.parametrize("terrain_type", ["box", "stair", "hurdle"])
 def test_curriculum_primitives_are_positive_clear_and_height_sensitive(terrain_type: str) -> None:
     terrain = Terrain(_small_curriculum_cfg(num_rows=2, num_cols=4), num_robots=1)
