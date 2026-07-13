@@ -89,6 +89,8 @@ def test_checkpoint_reload_matches(trained, smoke_cfg):
 def test_generator_inference_and_determinism(trained):
     ckpt_path = str(trained.out_dir / "checkpoints" / "final.pt")
     gen = MotionGenerator.from_checkpoint(ckpt_path, device="cpu")
+    assert not gen.model.training
+    assert not any(p.requires_grad for p in gen.model.parameters())
     layout = gen.layout
     past = trained.val_dataset[0]["past"].unsqueeze(0)
 

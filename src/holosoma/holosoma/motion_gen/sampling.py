@@ -68,7 +68,10 @@ class MotionGenerator:
         device: torch.device,
         checkpoint_step: int = -1,
     ):
-        self.model = model.eval().to(device)
+        # Inference wrappers are also used inside PPO.  ``torch.no_grad`` on
+        # generate() avoids graph construction, while requires_grad_(False)
+        # makes the frozen-generator contract explicit and auditable.
+        self.model = model.eval().to(device).requires_grad_(False)
         self.diffusion = diffusion
         self.normalizer = normalizer
         self.layout = layout

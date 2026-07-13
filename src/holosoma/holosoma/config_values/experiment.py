@@ -11,6 +11,7 @@ from holosoma.config_values.wbt.g1.experiment import (
     g1_29dof_wbt_w_object,
 )
 from holosoma.config_values.wbt.g1.experiment_gen import g1_29dof_wbt_gen
+from holosoma.config_values.wbt.g1.experiment_gen_terrain import g1_29dof_wbt_gen_terrain
 
 DEFAULTS = {
     "g1_29dof": g1_29dof,
@@ -22,6 +23,7 @@ DEFAULTS = {
     "g1_29dof_wbt_fast_sac": g1_29dof_wbt_fast_sac,
     "g1_29dof_wbt_fast_sac_w_object": g1_29dof_wbt_fast_sac_w_object,
     "g1_29dof_wbt_gen": g1_29dof_wbt_gen,
+    "g1_29dof_wbt_gen_terrain": g1_29dof_wbt_gen_terrain,
 }
 
 AnnotatedExperimentConfig = Annotated[

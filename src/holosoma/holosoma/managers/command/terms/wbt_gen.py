@@ -80,6 +80,14 @@ class GeneratedMotionCommand(MotionCommand):
         self.generator = MotionGenerator.from_checkpoint(
             self.gen_cfg.generator_checkpoint, device=str(self.device), use_ema=self.gen_cfg.use_ema
         )
+        trainable_generator_params = sum(
+            p.numel() for p in self.generator.model.parameters() if p.requires_grad
+        )
+        if trainable_generator_params != 0:
+            raise RuntimeError(
+                "GeneratedMotionCommand requires a frozen generator, but "
+                f"{trainable_generator_params} parameters still require gradients."
+            )
         gen_data_cfg = self.generator.cfg.data
         self.layout = self.generator.layout
         self._past = gen_data_cfg.past_frames
@@ -148,7 +156,8 @@ class GeneratedMotionCommand(MotionCommand):
         logger.info(
             f"[GeneratedMotionCommand] frozen generator @ {self.gen_cfg.generator_checkpoint} "
             f"(step {self.generator.checkpoint_step}), replan every {self._replan_steps} steps, "
-            f"{self.gen_cfg.denoise_steps}-step denoising, heading={self.gen_cfg.heading_mode}"
+            f"{self.gen_cfg.denoise_steps}-step denoising, heading={self.gen_cfg.heading_mode}, "
+            "trainable generator params=0"
         )
 
     # ------------------------------------------------------------ state -> features

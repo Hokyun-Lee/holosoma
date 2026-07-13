@@ -667,6 +667,26 @@ class IsaacSim(BaseSimulator):
         self.env_origins = env_origins
         self.base_init_state = base_init_state
 
+        # InteractiveScene creates a regular clone grid before BaseTask asks
+        # the terrain manager for spawn origins.  A global trimesh/load-obj
+        # terrain instead needs resets and command references to use the tile
+        # origins sampled by TerrainLocomotion.  Keep the established plane
+        # behavior unchanged.
+        terrain_state = self.terrain_manager.get_state("locomotion_terrain")
+        if terrain_state.mesh_type in {"trimesh", "load_obj"}:
+            if tuple(self.scene.env_origins.shape) != tuple(env_origins.shape):
+                raise ValueError(
+                    "Terrain origins shape does not match IsaacLab scene origins: "
+                    f"{tuple(env_origins.shape)} vs {tuple(self.scene.env_origins.shape)}"
+                )
+            self.scene.env_origins.copy_(
+                env_origins.to(device=self.scene.env_origins.device, dtype=self.scene.env_origins.dtype)
+            )
+            logger.info(
+                "Synchronized IsaacLab scene origins with terrain tile origins "
+                f"for mesh_type={terrain_state.mesh_type}"
+            )
+
         return self.scene, self._robot
 
     def get_dof_limits_properties(self):

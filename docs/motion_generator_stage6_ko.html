@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Motion Generator 6차: Simulator Terrain 연결</title>
+<style>
+:root { --bg:#fbfbfd; --card:#fff; --text:#1d1d1f; --muted:#6e6e73; --accent:#0071e3; --soft:#eaf3fe; --border:#e5e5ea; --code:#f5f5f7; --ok:#e9f7ef; --warn:#fff8e6; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:16px/1.7 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR",sans-serif; }
+.container { max-width:860px; margin:auto; padding:0 24px 100px; }
+header { padding:80px 0 42px; text-align:center; }
+h1 { margin:0; font-size:40px; line-height:1.2; }
+header p { color:var(--muted); font-size:19px; }
+section { margin:0 0 58px; }
+h2 { margin:0 0 12px; padding-top:18px; font-size:28px; }
+h3 { margin:28px 0 10px; }
+p, ul { margin:10px 0; }
+code { background:var(--code); border-radius:6px; padding:2px 6px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.88em; }
+pre { overflow-x:auto; padding:18px 20px; border-radius:14px; background:#1d1d1f; color:#f5f5f7; font-size:13px; line-height:1.6; }
+pre code { padding:0; background:none; }
+.card,.callout { padding:18px 22px; border:1px solid var(--border); border-radius:14px; background:var(--card); }
+.ok { background:var(--ok); }
+.warn { background:var(--warn); }
+table { width:100%; border-collapse:collapse; background:var(--card); font-size:14px; }
+th,td { padding:10px 12px; border-bottom:1px solid var(--border); text-align:left; vertical-align:top; }
+th { background:var(--code); }
+.table { overflow-x:auto; border:1px solid var(--border); border-radius:14px; }
+footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted); text-align:center; font-size:13px; }
+</style>
+</head>
+<body>
+<header class="container">
+  <h1>6차: Simulator Terrain 연결</h1>
+  <p>Stage-5 flat 폐루프를 보존하면서 Isaac Sim terrain, 실제 local height scan,<br>generator·tracker terrain condition을 순차 연결하는 구현 기록</p>
+</header>
+<main class="container">
+<section>
+  <h2>진행 체크리스트</h2>
+  <div class="card">
+    <h3>Task 6.1 — Terrain experiment 생성</h3>
+    <ul>
+      <li>☑ 기존 flat experiment 정상 실행</li>
+      <li>☑ terrain experiment 별도 실행</li>
+      <li>☑ 기존 generator/tracker checkpoint 로드</li>
+      <li>☑ generator frozen 상태 확인</li>
+    </ul>
+    <h3>Task 6.2 — Local terrain height scan</h3>
+    <ul>
+      <li>☐ flat scan ≈ 0</li><li>☐ box/stair/hurdle 위치 검증</li>
+      <li>☐ yaw 일관성 검증</li><li>☐ visualization/debug 저장</li>
+    </ul>
+    <h3>Task 6.3 — Generator/tracker 연결</h3>
+    <ul>
+      <li>☐ generator dummy terrain 제거</li><li>☐ tracker terrain observation 추가</li>
+      <li>☐ shape/device/normalization 검증</li><li>☐ terrain sensitivity 검증</li>
+      <li>☐ PPO 시작 검증</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <h2>Task 6.1 결과 <small>(2026-07-13)</small></h2>
+  <p><code>exp:g1-29dof-wbt-gen-terrain</code>을 별도 등록했다. 기존 <code>exp:g1-29dof-wbt-gen</code>은 plane 설정을 그대로 유지하고, terrain preset만 현재 HoloSoma의 procedural <code>terrain_locomotion_mix</code>를 사용한다.</p>
+  <div class="table"><table>
+    <tr><th>파일</th><th>변경</th></tr>
+    <tr><td><code>config_values/wbt/g1/experiment_gen_terrain.py</code></td><td>flat preset을 <code>replace</code>해 별도 training name과 trimesh terrain을 설정</td></tr>
+    <tr><td><code>config_values/experiment.py</code></td><td><code>exp:g1-29dof-wbt-gen-terrain</code> 등록</td></tr>
+    <tr><td><code>motion_gen/sampling.py</code>, <code>wbt_gen.py</code></td><td>inference model에 <code>requires_grad_(False)</code> 적용, trainable parameter 0을 runtime 검사·로그</td></tr>
+    <tr><td><code>simulator/isaacsim/isaacsim.py</code></td><td>trimesh/load-obj에서 IsaacLab clone-grid origin 대신 terrain tile origin을 scene reset/reference에 동기화</td></tr>
+    <tr><td><code>config_types/tests/test_tyro_cli.py</code>, <code>motion_gen/tests/test_train_smoke.py</code></td><td>preset 분리와 generator freeze 회귀 테스트</td></tr>
+  </table></div>
+
+  <h3>실행 명령</h3>
+<pre><code>PY=~/.holosoma_deps/miniconda3/envs/hssim/bin/python
+GEN=logs/motion_gen/terrain_4090/checkpoints/final.pt
+SEED=data/motion_gen/processed_paperscale/lafan1_walk4_subject1.npz
+TRACKER=logs/WholeBodyTracking/20260711_122501-g1_29dof_wbt_gen_manager-locomotion/model_12000.pt
+
+# 기존 flat regression (64 env × 2 iter)
+$PY src/holosoma/holosoma/train_agent.py exp:g1-29dof-wbt-gen logger:disabled \
+  --training.num-envs 64 --algo.config.num-learning-iterations 2 \
+  --algo.config.save-interval 999999 \
+  --command.setup-terms.motion-command.params.motion-config.generator-checkpoint=$GEN \
+  --command.setup-terms.motion-command.params.motion-config.motion-file=$SEED
+
+# 별도 terrain + 기존 tracker resume (64 env × 추가 2 iter)
+$PY src/holosoma/holosoma/train_agent.py exp:g1-29dof-wbt-gen-terrain logger:disabled \
+  --training.num-envs 64 --training.checkpoint=$TRACKER \
+  --algo.config.num-learning-iterations 2 --algo.config.save-interval 999999 \
+  --command.setup-terms.motion-command.params.motion-config.generator-checkpoint=$GEN \
+  --command.setup-terms.motion-command.params.motion-config.motion-file=$SEED</code></pre>
+
+  <div class="callout ok"><b>실측 통과</b>: flat run <code>20260713_072831-g1_29dof_wbt_gen_manager-locomotion</code>과 terrain run <code>20260713_072855-g1_29dof_wbt_gen_terrain_manager-locomotion</code>이 각각 2 iteration을 오류 없이 완료했다. Terrain run에서 custom mesh 생성, terrain origin 동기화, generator checkpoint step 200,000, trainable generator parameter 0, tracker <code>model_12000.pt</code> 및 optimizer 복원, 최종 <code>model_12001.pt</code> 저장을 로그로 확인했다.</div>
+
+  <h3>좌표와 현재 한계</h3>
+  <ul>
+    <li>Procedural terrain은 하나의 world-frame global mesh다. 각 env의 reset root와 generator seed body 위치는 같은 terrain tile world origin을 사용하도록 동기화했다.</li>
+    <li><code>terrain_locomotion_mix</code> 선택은 Task 6.1의 실행 분리용 구현 선택이다. 현재 구성(flat/rough/low-obstacles)은 최종 box/stair/hurdle curriculum이 아니며 Task 7.3에서 교체한다.</li>
+    <li>Task 6.1에서는 observation shape(Actor 154, Critic 286)을 유지해 Stage-5 tracker를 strict-load했다. Generator 입력은 아직 zero scan이며 Task 6.2–6.3에서 실제 scan으로 교체한다.</li>
+  </ul>
+</section>
+
+<footer>HoloSoma motion_gen · Stage 6 진행 문서 · 이전: <a href="motion_generator_closedloop_ko.html">Stage 5 폐루프</a></footer>
+</main>
+</body>
+</html>
