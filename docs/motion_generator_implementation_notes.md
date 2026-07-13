@@ -843,7 +843,7 @@ D-final L1 / 30 cm L0 / 60 cm L0 are: flat
 
 Thus the overall 30/60 cm success comes from flat/box/stair and is not evidence
 of a clean hurdle crossing. Fixed 0.30/0.60 m geometry, L0/L9, 100 episodes,
-four envs, and 1.5 m threshold are preregistered implementation/evaluation
+64 envs, and 1.5 m threshold are preregistered implementation/evaluation
 choices, not paper values.
 
 The RTX 4090 module-only result is
