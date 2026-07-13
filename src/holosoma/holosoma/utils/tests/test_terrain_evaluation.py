@@ -55,6 +55,51 @@ def test_accumulator_signed_progress_outcomes_and_raw_denominators() -> None:
     assert np.isclose(heading["numerator"], 1.3)
 
 
+def test_contact_episode_or_and_duration_normalized_step_metrics_are_distinct() -> None:
+    accumulator = TerrainEvaluationAccumulator(
+        num_envs=1,
+        target_episodes=1,
+        success_distance_m=1.0,
+        expected_terrain_types=("flat",),
+    )
+    accumulator.start_episodes(
+        [0],
+        target_headings=np.array([[1.0, 0.0]]),
+        terrain_types=["flat"],
+        terrain_levels=[0],
+    )
+    for step_any, body_count, timeout in ((0.0, 0.0, False), (1.0, 2.0, False), (0.0, 0.0, True)):
+        accumulator.observe(
+            forward_progress_m=np.array([0.0]),
+            falls=np.array([False]),
+            terminated=np.array([False]),
+            timeouts=np.array([timeout]),
+            metrics={
+                "terrain/undesired_contact_any": np.array([step_any]),
+                "terrain/undesired_contact_body_count": np.array([body_count]),
+            },
+        )
+
+    overall = accumulator.summary()["overall"]
+    assert overall["rates"]["episode/undesired_contact_rate"] == {
+        "numerator": 1,
+        "denominator": 1,
+        "value": 1.0,
+    }
+    assert overall["step_metrics"]["terrain/undesired_contact_any"] == {
+        "numerator": 1.0,
+        "denominator": 3,
+        "value": 1.0 / 3.0,
+        "max": 1.0,
+    }
+    assert overall["step_metrics"]["terrain/undesired_contact_body_count"] == {
+        "numerator": 2.0,
+        "denominator": 3,
+        "value": 2.0 / 3.0,
+        "max": 2.0,
+    }
+
+
 def test_lateral_and_backward_progress_never_cross() -> None:
     accumulator = TerrainEvaluationAccumulator(num_envs=2, target_episodes=2, success_distance_m=1.5)
     _start_two(accumulator)
@@ -169,6 +214,12 @@ def test_outputs_include_raw_json_and_csv(tmp_path: Path) -> None:
     )
     payload = json.loads(paths["json"].read_text())
     assert "not collision-shape" in payload["metric_definition"]["body_origin_penetration_proxy"]
+    assert "episode OR" in payload["metric_definition"]["undesired_contact_episode_any"]
+    assert "incidence rather than contact duration" in payload["metric_definition"]["undesired_contact_episode_any"]
+    assert "duration-normalized fraction" in payload["metric_definition"]["undesired_contact_step_any"]
+    assert "> 1 N" in payload["metric_definition"]["undesired_contact_step_any"]
+    assert "duration-normalized mean number" in payload["metric_definition"]["undesired_contact_body_count"]
+    assert "> 1 N" in payload["metric_definition"]["undesired_contact_body_count"]
     assert payload["summary"]["overall"]["rates"]["episode/success_rate"]["numerator"] == 1
     with paths["summary_csv"].open(newline="") as csv_file:
         rows = list(csv.DictReader(csv_file))

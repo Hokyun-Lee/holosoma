@@ -77,6 +77,26 @@ _OPTIONAL_STEP_METRICS = (
     "terrain/tracker_body_origin_correction_case",
 )
 _ALL_SELECTED_METRICS = (*_RATE_METRICS, *_STEP_METRICS, *_OPTIONAL_STEP_METRICS)
+_CONTACT_SUMMARY_COLUMNS = (
+    (
+        "episode_any_contact",
+        "Episode any-contact",
+        "episode/undesired_contact_rate",
+        "percentage",
+    ),
+    (
+        "contact_step_fraction",
+        "Contact-step fraction",
+        "terrain/undesired_contact_any",
+        "percentage",
+    ),
+    (
+        "undesired_contact_bodies_per_step",
+        "Undesired-contact bodies/step",
+        "terrain/undesired_contact_body_count",
+        "mean",
+    ),
+)
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _BOUNDED_RATE_METRICS = _RATE_METRICS[:4]
 _TERRAIN_GEOMETRY_KEYS = (
@@ -677,6 +697,23 @@ def _protocol_for_group(
     return protocol
 
 
+def _contact_summary(metrics: Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    summary: dict[str, dict[str, Any]] = {}
+    for key, label, metric_name, display_format in _CONTACT_SUMMARY_COLUMNS:
+        metric = metrics[metric_name]
+        item = {
+            "label": label,
+            "metric": metric_name,
+            "format": display_format,
+            **metric,
+        }
+        if display_format == "percentage":
+            value = metric["value"]
+            item["percent"] = None if value is None else 100.0 * float(value)
+        summary[key] = item
+    return summary
+
+
 def _evaluation_json(item: _LoadedEvaluation) -> dict[str, Any]:
     return {
         "variant": item.variant,
@@ -695,6 +732,7 @@ def _evaluation_json(item: _LoadedEvaluation) -> dict[str, Any]:
         "generator_sampling_seed": item.generator_sampling_seed,
         "protocol": item.protocol,
         "quota": item.quota,
+        "contact_summary": _contact_summary(item.overall_metrics),
         "overall_metrics": item.overall_metrics,
         "by_terrain_type": item.by_terrain_type,
     }
@@ -756,11 +794,45 @@ def build_ablation_report(
             "required_rate_metrics": list(_RATE_METRICS),
             "required_step_metrics": list(_STEP_METRICS),
             "optional_step_metrics": list(_OPTIONAL_STEP_METRICS),
+            "contact_summary_columns": [
+                {
+                    "key": key,
+                    "label": label,
+                    "metric": metric_name,
+                    "format": display_format,
+                }
+                for key, label, metric_name, display_format in _CONTACT_SUMMARY_COLUMNS
+            ],
+            "undesired_contact_semantics": (
+                "Episode any-contact is an episode OR, while contact-step fraction and undesired-contact "
+                "bodies/step are duration-normalized reward-aligned selected-link contact metrics."
+            ),
             "body_origin_proxy_limitation": (
                 "Terrain height minus rigid-body origin Z; not collision-shape or mesh penetration."
             ),
         },
         "groups": groups,
+    }
+
+
+def _contact_csv_fields(metrics: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    episode_any = metrics["episode/undesired_contact_rate"]
+    step_any = metrics["terrain/undesired_contact_any"]
+    body_count = metrics["terrain/undesired_contact_body_count"]
+    episode_value = episode_any["value"]
+    step_value = step_any["value"]
+    return {
+        "episode_any_contact_numerator": episode_any["numerator"],
+        "episode_any_contact_denominator": episode_any["denominator"],
+        "episode_any_contact_fraction": episode_value,
+        "episode_any_contact_percent": None if episode_value is None else 100.0 * float(episode_value),
+        "contact_step_any_numerator": step_any["numerator"],
+        "contact_step_any_denominator": step_any["denominator"],
+        "contact_step_fraction": step_value,
+        "contact_step_percent": None if step_value is None else 100.0 * float(step_value),
+        "undesired_contact_body_count_numerator": body_count["numerator"],
+        "undesired_contact_body_count_denominator": body_count["denominator"],
+        "undesired_contact_bodies_per_step": body_count["value"],
     }
 
 
@@ -803,16 +875,24 @@ def _iter_report_rows(report: Mapping[str, Any]):
                 "terrain_types_json": _canonical(result["protocol"]["terrain_types"]),
                 "requested_per_terrain_type_json": _canonical(result["quota"]["requested_per_terrain_type"]),
             }
+            overall_common = {**common, **_contact_csv_fields(result["overall_metrics"])}
             for metric_name in _ALL_SELECTED_METRICS:
                 metric = result["overall_metrics"].get(metric_name)
                 if metric is not None:
-                    yield {**common, "scope": "overall", "terrain_type": "all", "metric": metric_name, **metric}
+                    yield {
+                        **overall_common,
+                        "scope": "overall",
+                        "terrain_type": "all",
+                        "metric": metric_name,
+                        **metric,
+                    }
             for terrain_type, metrics in result["by_terrain_type"].items():
+                terrain_common = {**common, **_contact_csv_fields(metrics)}
                 for metric_name in _ALL_SELECTED_METRICS:
                     metric = metrics.get(metric_name)
                     if metric is not None:
                         yield {
-                            **common,
+                            **terrain_common,
                             "scope": "terrain_type",
                             "terrain_type": terrain_type,
                             "metric": metric_name,
@@ -836,7 +916,11 @@ def _markdown(report: Mapping[str, Any]) -> str:
     lines = [
         "# Terrain ablation report",
         "",
-        "Rates show raw numerator/denominator. Body-origin penetration is a height proxy, not mesh collision.",
+        (
+            "Rates show raw numerator/denominator. Episode any-contact is an episode OR; contact-step fraction "
+            "and undesired-contact bodies/step are duration-normalized. Body-origin penetration is a height "
+            "proxy, not mesh collision."
+        ),
         "",
     ]
     for group in report["groups"]:
@@ -844,9 +928,10 @@ def _markdown(report: Mapping[str, Any]) -> str:
             (
                 f"## {group['name']}",
                 "",
-                "| Variant | Episodes | Success | Fall | Survival | Contact | Heading rad | "
-                "Body pos err | Robot origin proxy | Length | Progress m | Tracker SHA |",
-                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+                "| Variant | Episodes | Success | Fall | Survival | Episode any-contact | "
+                "Contact-step fraction | Undesired-contact bodies/step | Heading rad | Body pos err | "
+                "Robot origin proxy | Length | Progress m | Tracker SHA |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
             )
         )
         for result in group["results"]:
@@ -859,6 +944,8 @@ def _markdown(report: Mapping[str, Any]) -> str:
                 _format_rate(metrics["episode/fall_rate"]),
                 _format_rate(metrics["episode/survival_rate"]),
                 _format_rate(metrics["episode/undesired_contact_rate"]),
+                _format_rate(metrics["terrain/undesired_contact_any"]),
+                _format_mean(metrics["terrain/undesired_contact_body_count"]),
                 _format_mean(metrics["motion/heading_error_rad"]),
                 _format_mean(metrics["motion/error_body_pos"]),
                 _format_mean(metrics["terrain/robot_body_origin_penetration_mean_m"], digits=4),
@@ -914,6 +1001,17 @@ def write_ablation_report(report: Mapping[str, Any], output_prefix: str | Path) 
         "completed_episode_count",
         "terrain_types_json",
         "requested_per_terrain_type_json",
+        "episode_any_contact_numerator",
+        "episode_any_contact_denominator",
+        "episode_any_contact_fraction",
+        "episode_any_contact_percent",
+        "contact_step_any_numerator",
+        "contact_step_any_denominator",
+        "contact_step_fraction",
+        "contact_step_percent",
+        "undesired_contact_body_count_numerator",
+        "undesired_contact_body_count_denominator",
+        "undesired_contact_bodies_per_step",
         "scope",
         "terrain_type",
         "metric",

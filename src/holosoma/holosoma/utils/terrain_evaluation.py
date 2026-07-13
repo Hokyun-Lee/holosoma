@@ -371,6 +371,19 @@ def write_terrain_evaluation_outputs(
                 "first thresholded reduction in the body-origin penetration proxy; "
                 "not proof of collision resolution or intentional policy correction"
             ),
+            "undesired_contact_episode_any": (
+                "episode OR of terrain/undesired_contact_any: one qualifying sampled policy step marks the "
+                "episode, so this is incidence rather than contact duration"
+            ),
+            "undesired_contact_step_any": (
+                "duration-normalized fraction of sampled policy steps with at least one reward-selected link "
+                "whose maximum 3-D net-contact-force norm over the configured history exceeds the active "
+                "reward threshold (> 1 N in the G1 Stage-10 preset)"
+            ),
+            "undesired_contact_body_count": (
+                "duration-normalized mean number of reward-selected links per sampled policy step satisfying "
+                "the same reward-aligned force test (> 1 N in the G1 Stage-10 preset)"
+            ),
         },
         "summary": summary,
         "episodes": [_record_to_json(record) for record in accumulator.records],

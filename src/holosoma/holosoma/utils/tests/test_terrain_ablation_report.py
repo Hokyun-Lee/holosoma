@@ -63,13 +63,24 @@ def _summary_group(episode_count: int, *, success_count: int) -> dict[str, Any]:
         "motion/mean_max_episode_forward_progress_m": 1.75 * episode_count,
     }
     step_count = 10 * episode_count
+    step_metrics = {
+        name: _ratio(0.1 * (index + 1) * step_count, step_count, maximum=float(index + 1))
+        for index, name in enumerate(STEP_METRICS)
+    }
+    step_metrics["terrain/undesired_contact_any"] = _ratio(
+        2 * episode_count,
+        step_count,
+        maximum=1.0,
+    )
+    step_metrics["terrain/undesired_contact_body_count"] = _ratio(
+        3 * episode_count,
+        step_count,
+        maximum=2.0,
+    )
     return {
         "episode_count": episode_count,
         "rates": {name: _ratio(rate_numerators[name], episode_count) for name in RATE_METRICS},
-        "step_metrics": {
-            name: _ratio(0.1 * (index + 1) * step_count, step_count, maximum=float(index + 1))
-            for index, name in enumerate(STEP_METRICS)
-        },
+        "step_metrics": step_metrics,
     }
 
 
@@ -211,10 +222,34 @@ def test_a_to_f_report_preserves_raw_pairs_hashes_and_writes_all_formats(tmp_pat
         "value": 0.75,
     }
     assert first["by_terrain_type"]["box"]["motion/heading_error_rad"]["denominator"] == 20
+    contact_summary = first["contact_summary"]
+    assert contact_summary["episode_any_contact"] == {
+        "label": "Episode any-contact",
+        "metric": "episode/undesired_contact_rate",
+        "format": "percentage",
+        "numerator": 1,
+        "denominator": 4,
+        "value": 0.25,
+        "percent": 25.0,
+    }
+    assert contact_summary["contact_step_fraction"]["numerator"] == 8
+    assert contact_summary["contact_step_fraction"]["denominator"] == 40
+    assert contact_summary["contact_step_fraction"]["value"] == 0.2
+    assert contact_summary["contact_step_fraction"]["percent"] == 20.0
+    assert contact_summary["undesired_contact_bodies_per_step"]["numerator"] == 12
+    assert contact_summary["undesired_contact_bodies_per_step"]["denominator"] == 40
+    assert contact_summary["undesired_contact_bodies_per_step"]["value"] == 0.3
+    assert [column["label"] for column in report["metric_contract"]["contact_summary_columns"]] == [
+        "Episode any-contact",
+        "Contact-step fraction",
+        "Undesired-contact bodies/step",
+    ]
 
     outputs = write_ablation_report(report, tmp_path / "report")
     saved = json.loads(outputs["json"].read_text())
     assert saved["groups"][0]["results"][0]["overall_metrics"]["episode/success_rate"]["numerator"] == 3
+    saved_contact = saved["groups"][0]["results"][0]["contact_summary"]
+    assert saved_contact["contact_step_fraction"]["percent"] == 20.0
     with outputs["csv"].open(newline="") as csv_file:
         rows = list(csv.DictReader(csv_file))
     success = next(
@@ -225,9 +260,66 @@ def test_a_to_f_report_preserves_raw_pairs_hashes_and_writes_all_formats(tmp_pat
     assert success["numerator"] == "3"
     assert success["denominator"] == "4"
     assert success["checkpoint_sha256"] == "a" * 64
+    assert success["episode_any_contact_numerator"] == "1"
+    assert success["episode_any_contact_denominator"] == "4"
+    assert success["episode_any_contact_fraction"] == "0.25"
+    assert success["episode_any_contact_percent"] == "25.0"
+    assert success["contact_step_any_numerator"] == "8"
+    assert success["contact_step_any_denominator"] == "40"
+    assert success["contact_step_fraction"] == "0.2"
+    assert success["contact_step_percent"] == "20.0"
+    assert success["undesired_contact_body_count_numerator"] == "12"
+    assert success["undesired_contact_body_count_denominator"] == "40"
+    assert success["undesired_contact_bodies_per_step"] == "0.3"
     markdown = outputs["markdown"].read_text()
     assert "75.0% (3/4)" in markdown
     assert "Robot origin proxy" in markdown
+    assert "| Episode any-contact | Contact-step fraction | Undesired-contact bodies/step |" in markdown
+    assert "25.0% (1/4) | 20.0% (8/40) | 0.300" in markdown
+    assert "| Contact |" not in markdown
+
+
+def test_contact_summary_zero_step_denominator_is_explicit_and_safe(tmp_path: Path) -> None:
+    payload = _payload("D")
+    groups = [payload["summary"]["overall"], *payload["summary"]["by_terrain_type"].values()]
+    for group in groups:
+        group["step_metrics"]["terrain/undesired_contact_any"] = _ratio(0, 0)
+        group["step_metrics"]["terrain/undesired_contact_body_count"] = _ratio(0, 0)
+    path = tmp_path / "zero_contact_steps.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = build_ablation_report({"zero": [path]})
+    summary = report["groups"][0]["results"][0]["contact_summary"]
+    assert summary["episode_any_contact"]["value"] == 0.25
+    assert summary["contact_step_fraction"]["value"] is None
+    assert summary["contact_step_fraction"]["percent"] is None
+    assert summary["undesired_contact_bodies_per_step"]["value"] is None
+
+    outputs = write_ablation_report(report, tmp_path / "zero_report")
+    markdown = outputs["markdown"].read_text()
+    assert "25.0% (1/4) | n/a | n/a" in markdown
+    with outputs["csv"].open(newline="") as csv_file:
+        rows = list(csv.DictReader(csv_file))
+    overall = next(row for row in rows if row["scope"] == "overall")
+    assert overall["contact_step_any_numerator"] == "0"
+    assert overall["contact_step_any_denominator"] == "0"
+    assert overall["contact_step_fraction"] == ""
+    assert overall["contact_step_percent"] == ""
+    assert overall["undesired_contact_body_count_numerator"] == "0"
+    assert overall["undesired_contact_body_count_denominator"] == "0"
+    assert overall["undesired_contact_bodies_per_step"] == ""
+
+
+def test_pre_clarification_evaluator_json_without_metric_definition_remains_supported(tmp_path: Path) -> None:
+    payload = _payload("legacy")
+    assert "metric_definition" not in payload
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = build_ablation_report({"legacy": [path]})
+    result = report["groups"][0]["results"][0]
+    assert result["overall_metrics"]["episode/undesired_contact_rate"]["numerator"] == 1
+    assert result["contact_summary"]["contact_step_fraction"]["value"] == 0.2
 
 
 @pytest.mark.parametrize(
