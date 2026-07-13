@@ -187,11 +187,18 @@ $PY src/holosoma/holosoma/train_agent.py exp:g1-29dof-wbt-gen logger:disabled \
   <div class="callout warn"><b>구현 선택</b>: 논문은 terrain geometry, level 수, 승급/강등 기준을 공개하지 않는다. 위 치수와 10단계, 성공 기준 0.9 episode, 5연속 성공 승급, 2연속 실패 강등은 모두 config/CLI로 노출한 구현 선택이다. Stair와 hurdle을 heading에 종속시키지 않기 위해 Chebyshev-distance square ring으로 만들었다.</div>
 
   <h3>Episode 판정과 lifecycle</h3>
-  <p>Curriculum의 학습용 성공 proxy는 fall termination 없이 episode 최대 길이의 90% 이상을 실제 진행한 timeout으로 정의한다. PPO 시작 시 <code>episode_length_buf</code>가 무작위화되어 첫 reset은 잘린 fragment일 수 있으므로 각 env의 첫 outcome을 제외한다. 이후 성공 5회가 연속되면 level을 +1, 실패 2회가 연속되면 −1하고 [0, 9]로 clamp한다. Terrain origin은 command reset보다 먼저 바꿔 새 generator history/scan이 새 tile 좌표를 사용하게 했으며, scan cache도 즉시 무효화한다.</p>
+  <p><b>Stage 7 당시 구현</b>에서 curriculum의 학습용 성공 proxy는 fall termination 없이 episode 최대 길이의 90% 이상을 실제 진행한 timeout으로 정의했다. PPO 시작 시 <code>episode_length_buf</code>가 무작위화되어 첫 reset은 잘린 fragment일 수 있으므로 각 env의 첫 outcome을 제외했다. 이후 성공 5회가 연속되면 level을 +1, 실패 2회가 연속되면 −1하고 [0, 9]로 clamp했다. Terrain origin은 command reset보다 먼저 바꿔 새 generator history/scan이 새 tile 좌표를 사용하게 했으며, scan cache도 즉시 무효화했다.</p>
 
-  <div class="callout warn"><b>성공률의 의미</b>: 현재 <code>success_rate</code>는 terrain type별 <em>생존 timeout 비율</em>이다. 진행 거리나 obstacle 반대편 도달을 판정하지 않으므로 “장애물 통과 성공률”이 아니다. 실제 obstacle success는 Stage 9/10에서 진행 방향별 crossing/goal 조건으로 별도 측정한다. 또한 flat도 같은 level index를 가지므로 전체 mean level은 sampling 상태이지 물리적 평균 장애물 높이가 아니다.</div>
+  <div class="callout warn"><b>Stage 7 당시 성공률의 의미</b>: 아래 <code>20260713_0845*</code> 진단의 <code>success_rate</code>와 누적 count는 terrain type별 <em>생존 timeout proxy</em>였다. 당시에는 진행 거리나 obstacle 반대편 도달 조건이 없었으므로 이 수치를 장애물 통과 성공률로 재해석하면 안 된다. 또한 flat도 같은 level index를 가지므로 전체 mean level은 sampling 상태이지 물리적 평균 장애물 높이가 아니다.</div>
 
-  <p>Checkpoint에는 terrain level, fixed type ID, 두 streak, 실제 episode step, 첫-fragment guard, type별 누적 성공/episode count를 state version 1로 저장한다. Tensor schema의 shape/type/type-name을 엄격히 검사한 뒤 모든 env origin을 복구한다. PPO resume가 <code>reset_all()</code>로 새 물리 episode를 시작하므로 level/streak/누적 count는 이어지지만 진행 중이던 episode의 step/eligibility는 첫 reset에서 의도적으로 새 fragment 상태가 된다. 예전 checkpoint에 curriculum state가 없으면 level 0의 새 state로 시작하므로 Stage-5 warm-start와 호환된다. Geometry fingerprint는 아직 checkpoint에 없으므로 같은 type 이름 아래 geometry config를 바꾼 checkpoint resume는 금지한다.</p>
+  <p>Stage 7 checkpoint는 terrain level, fixed type ID, 두 streak, 실제 episode step, 첫-fragment guard, type별 누적 성공/episode count를 state version 1로 저장했다. Tensor schema의 shape/type/type-name을 엄격히 검사한 뒤 모든 env origin을 복구했다. PPO resume가 <code>reset_all()</code>로 새 물리 episode를 시작하므로 level/streak/누적 count는 이어지지만 진행 중이던 episode의 step/eligibility는 첫 reset에서 의도적으로 새 fragment 상태가 됐다. 예전 checkpoint에 curriculum state가 없으면 level 0의 새 state로 시작하므로 Stage-5 warm-start와 호환된다. Geometry fingerprint는 아직 checkpoint에 없으므로 같은 type 이름 아래 geometry config를 바꾼 checkpoint resume는 금지한다.</p>
+
+  <h3>후속 crossing semantic 정정 <small>(commit <code>321afb7</code>)</small></h3>
+  <p>Stage 9/10 평가 준비 과정에서 survival-only 판정을 교체했다. Command reset 뒤 새 episode가 시작될 때 측정 root XY <code>p₀</code>와 정규화된 <code>motion_command.target_heading_w</code>의 episode-start 방향 <code>d₀</code>를 고정 저장한다. 매 step의 signed forward progress는 <code>dot(pₜ − p₀, d₀)</code>이며, episode 동안의 양의 최댓값 <code>max(0, maxₜ progressₜ)</code>만 crossing gate에 사용한다. 따라서 옆이나 뒤로 이동한 거리는 1.5 m 조건을 만족시키지 않는다. <code>crossing_distance_m=1.5</code>는 논문 비공개 값에 대한 config/CLI 구현 선택이다.</p>
+
+  <p>현재 curriculum <code>success</code>는 첫 randomized fragment가 아닌 비교 가능한 episode에 대해 (1) fall/비-timeout termination이 없고, (2) 최대 길이의 90% 이상 actual step을 채운 timeout이며, (3) 위 signed forward progress가 1.5 m 이상일 때만 성립한다. Termination은 failure이고, timeout까지 생존했지만 1.5 m에 못 미친 episode도 progression failure로 처리한다. <code>survival</code>, <code>crossing</code>, <code>success</code>, <code>failure</code> channel은 terrain type과 type×level별로 분리 기록되므로 생존과 통과를 같은 수치로 보지 않는다. 이 정의는 판정 semantics를 바로잡은 것이며 obstacle 성공률 향상이나 PPO 수렴을 입증한 결과가 아니다.</p>
+
+  <p>Checkpoint schema는 state version 3이며 <code>progress_semantics=target_heading_signed_v1</code>, <code>episode_target_heading_w</code>, <code>max_episode_forward_progress_m</code>를 저장하고 unit heading 및 tensor schema를 검증한다. Radial-distance progress를 쓰던 version 2 state는 signed progress로 변환할 수 없으므로 durable level/streak/다른 outcome state는 유지하되 crossing count와 진행 중인 forward-progress gate를 0으로 reset하고 현재 command heading에서 다시 시작한다.</p>
 
   <h3>Logging과 균형 검증</h3>
   <p><code>terrain_curriculum/mean_level</code>, level별 env fraction, type별 <code>success_count</code>/<code>episode_count</code>/<code>success_rate</code>/<code>env_fraction</code>, type fraction min/max/range를 별도 기록한다. 64 env 실행에서 flat/box/stair/hurdle env fraction이 각각 0.25이고 range가 정확히 0이었다.</p>
@@ -218,14 +225,14 @@ $PY -m pytest src/holosoma/holosoma/motion_gen/tests \
     <li><code>model_12003.pt</code> resume run <code>20260713_084603-*</code>은 iteration 하나를 더 완료했다. Level은 [2, 62], 누적 success count [145, 149, 149, 151], episode count [181, 183, 181, 185]로 이어져 state와 origin이 reset되지 않음을 확인했다.</li>
     <li>표준 10초 설정 run <code>20260713_084654-*</code>은 2 PPO iterations를 완료해 25 policy step마다 수행되는 0.5초/2 Hz generator replan 경계를 통과했다. Frozen generator, actual state/history/terrain scan, actor 702 / critic 834가 모두 유지됐다. 이 짧은 run에서 level이 아직 0인 것은 기본 5연속 성공 조건상 정상이다.</li>
     <li>Curriculum lifecycle 변경 뒤 flat 회귀 <code>20260713_084859-g1_29dof_wbt_gen_manager-locomotion</code>도 strict 154/286 checkpoint와 optimizer를 로드해 iteration 12,000을 완료했다. Generator는 frozen이고 terrain은 기존 <code>stage5_flat_zeros</code>였다.</li>
-    <li>Unit tests는 geometry/central clearance/type balance, 승급·강등·clamp, subset/env 격리, 첫 fragment와 짧은 timeout guard, per-type survival proxy, state schema round-trip 및 reset ordering을 검사했다. Ruff와 <code>git diff --check</code>도 통과했다.</li>
+    <li>Stage 7 당시 unit tests는 geometry/central clearance/type balance, 승급·강등·clamp, subset/env 격리, 첫 fragment와 짧은 timeout guard, per-type survival proxy, state version 1 round-trip 및 reset ordering을 검사했다. 후속 <code>321afb7</code> 테스트는 signed target-heading progress, lateral/backward rejection, v3 round-trip과 v2 radial-state migration reset을 별도로 검사한다.</li>
   </ul>
-  <div class="callout ok"><b>Task 7.3 완료</b>: terrain 난이도, 자동 level 전이, terrain별 성공률, 균형 고정 sampling, checkpoint resume를 실제 Isaac Sim PPO와 단위 테스트로 확인했다. 짧은 0.2초 run은 전이 검증용이지 obstacle 성능 결과가 아니다.</div>
+  <div class="callout ok"><b>Task 7.3 완료</b>: terrain 난이도, 자동 level 전이, 당시 terrain별 survival-proxy logging, 균형 고정 sampling, checkpoint resume를 실제 Isaac Sim PPO와 단위 테스트로 확인했다. 짧은 0.2초 run은 전이 검증용이지 obstacle 성능 결과가 아니며, 후속 v3 crossing semantic의 성능 검증도 아니다.</div>
 </section>
 
 <section>
   <h2>다음 작업</h2>
-  <p>Stage 7의 구현 체크리스트는 모두 완료됐다. 다음은 Stage 8 condition noise, differentiable FK consistency loss, terrain sensitivity 평가다. 아직 curriculum policy를 수렴시킨 것이 아니므로 obstacle 성공률 향상은 Stage 9 장기 PPO와 Stage 10 공통 평가에서 별도로 판단한다. 그 평가에는 terrain×level rolling metric과 명시적 crossing/goal 판정을 추가해야 한다. ONNX tracker runtime에는 동일한 history state machine이 필요하다.</p>
+  <p>Stage 7의 구현 체크리스트는 모두 완료됐다. 이후 Stage 8 condition noise, differentiable FK consistency loss, terrain sensitivity 평가와 signed target-heading crossing 판정까지 추가됐다. 아직 curriculum policy를 수렴시킨 것이 아니므로 obstacle 성공률 향상은 Stage 9 장기 PPO와 Stage 10 공통 평가에서 별도로 판단해야 한다. 현재 type×level survival/crossing/success/failure channel은 그 평가의 판정 기반일 뿐 성능 결과가 아니다. ONNX tracker runtime에는 동일한 history state machine이 필요하다.</p>
 </section>
 
 <footer>HoloSoma motion_gen · Stage 7 진행 문서 · 이전: <a href="motion_generator_stage6_ko.html">Stage 6 terrain 연결</a></footer>

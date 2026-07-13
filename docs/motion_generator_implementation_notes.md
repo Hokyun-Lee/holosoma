@@ -387,28 +387,54 @@ stair maximum elevation and hurdle height span 0.05-0.35 m. Their dimensions,
 choices exposed in config because the paper does not publish them. The old
 random-mix and Stage-5 flat terrain paths remain unchanged.
 
-Per-environment progression evaluates only comparable completed episodes: a
-timeout after at least 90% of the configured episode length is a curriculum
-success proxy, a fall termination is a failure, and the first randomized
-rollout fragment is ignored. This metric is a per-terrain survival-timeout
-rate, **not obstacle-crossing success**: it has no progress or goal predicate.
-Five consecutive proxy successes promote one row and two consecutive failures
-demote one row, clamped to levels 0-9. These thresholds are implementation
-choices/config values. A new pre-reset curriculum lifecycle applies the
-terrain origin and invalidates its scan before the command resets, so generator
-history and terrain scan agree with the new tile.
+In the original Stage-7 implementation, per-environment progression evaluated
+only comparable completed episodes: a timeout after at least 90% of the
+configured episode length was a curriculum success proxy, a fall termination
+was a failure, and the first randomized rollout fragment was ignored. The
+Stage-7 diagnostic counts below are therefore per-terrain survival-timeout
+proxies, **not obstacle-crossing results**, and must remain interpreted with
+that historical meaning. Five consecutive proxy successes promoted one row
+and two consecutive failures demoted one row, clamped to levels 0-9. These
+thresholds are implementation choices/config values. A new pre-reset
+curriculum lifecycle applied the terrain origin and invalidated its scan before
+the command reset, so generator history and terrain scan agreed with the new
+tile.
 
-Logs include mean level, every level fraction, per-type cumulative success and
-episode counts/rates/fractions, and type-fraction min/max/range. Curriculum
-checkpoint state version 1 contains levels, fixed type IDs, streaks, actual
-step guards, initial-fragment eligibility and per-type counts; tensor schema
-validation precedes mutation and restore reapplies every terrain origin. PPO
-resume starts a fresh physical episode via `reset_all()`, so durable levels,
-streaks and cumulative counts continue while the in-progress episode guard is
-reset on the first reset. Legacy tracker checkpoints have no such state and
-correctly initialize at level 0. The state does not yet contain a terrain
-geometry fingerprint; resuming after changing geometry under the same type
-names is unsupported.
+The Stage-7 logs included mean level, every level fraction, per-type cumulative
+success and episode counts/rates/fractions, and type-fraction min/max/range.
+Its checkpoint state version 1 contained levels, fixed type IDs, streaks,
+actual-step guards, initial-fragment eligibility and per-type counts; tensor
+schema validation preceded mutation and restore reapplied every terrain
+origin. PPO resume started a fresh physical episode via `reset_all()`, so
+durable levels, streaks and cumulative counts continued while the in-progress
+episode guard reset on the first reset. Legacy tracker checkpoints had no such
+state and correctly initialized at level 0. The state still does not contain a
+terrain geometry fingerprint; resuming after changing geometry under the same
+type names is unsupported.
+
+Follow-up crossing semantic correction (`321afb7`, after the Stage-7
+diagnostics): after command reset, each episode captures measured root XY
+`p_0` and the normalized episode-start `motion_command.target_heading_w`
+direction `d_0`. At every step, progress is the signed projection
+`dot(p_t - p_0, d_0)`; the gate retains `max(0, max_t progress_t)`, so lateral
+or backward displacement cannot satisfy it. The configured threshold is
+`crossing_distance_m=1.5`, an unpublished implementation choice. A curriculum
+success now requires a comparable non-initial fragment, no fall/non-timeout
+termination, a timeout after at least 90% of the episode, and signed forward
+progress of at least 1.5 m. A termination is a failure; a surviving timeout
+below 1.5 m is also a progression failure. Survival, crossing, success, and
+failure counts/rates are logged independently per terrain type and per
+type×level. This defines the metric; it does not demonstrate convergence or an
+improvement in obstacle success.
+
+The current checkpoint schema is version 3 with
+`progress_semantics=target_heading_signed_v1`,
+`episode_target_heading_w`, and `max_episode_forward_progress_m`. Restore
+validates unit headings and tensor schemas. Version-2 state used radial
+distance, which cannot be converted to signed forward progress: migration
+preserves durable levels, streaks, and other outcome state, but resets crossing
+counts and the in-progress forward gate to zero and starts from the current
+command heading.
 
 The complete 200-tile mesh generated successfully (3,821,135 vertices,
 7,672,002 faces), with column modulo four assigning type, difficulty spanning
@@ -423,11 +449,12 @@ state, five-frame proprioception and simulator scan paths stayed active. A
 post-lifecycle Stage-5 flat regression again strict-loaded 154/286 inputs and
 completed one PPO iteration with `stage5_flat_zeros` (`20260713_084859-*`).
 CPU regression: 80 passed; Ruff and diff checks clean. The shortened curriculum
-run validates progression mechanics, not obstacle performance or convergence.
-Flat environments also carry a row index although their geometry is unchanged,
-so global mean level is a sampling-state diagnostic rather than average
-physical obstacle difficulty. Terrain-by-level rolling success and explicit
-crossing/goal metrics remain Stage 9/10 evaluation work.
+run validated the historical Stage-7 progression mechanics, not obstacle
+performance or convergence. Flat environments also carry a row index although
+their geometry is unchanged, so global mean level is a sampling-state
+diagnostic rather than average physical obstacle difficulty. The later signed
+crossing/type×level channels provide Stage 9/10 evaluation semantics, but no
+converged comparison or success improvement is claimed here.
 
 ## Stage 8: generator robustness (2026-07-13, docs/motion_generator_stage8_ko.html)
 
