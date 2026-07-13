@@ -9,6 +9,13 @@ from holosoma.config_values.wbt.g1.command_gen import (
 
 terrain_gen_motion_config = replace(
     gen_motion_config,
+    # Terrain tiles are centered on each env origin.  Keep the sampled motion
+    # pose/velocity, but remove the source clip's accumulated world XY so a
+    # random phase cannot spawn in an adjacent tile.  The 500-step horizon is
+    # an implementation choice for the default 10 s, 50 Hz evaluation; the
+    # Stage-10 evaluator derives and overwrites it from the effective sim config.
+    reanchor_motion_xy_on_reset=True,
+    phase_horizon_steps=500,
     use_sim_terrain_scan=True,
     require_fully_measured_history=True,
     # Stage-8 structured condition noise is applied while training the

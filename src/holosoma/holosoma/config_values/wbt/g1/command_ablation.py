@@ -21,6 +21,11 @@ fixed_reference_heading_motion_config = replace(
         "logs/motion_gen/terrain_4090/samples/manual/"
         "lafan1_walk4_subject1_s500_rollout83x12_gen_mj.npz"
     ),
+    # Terrain evaluation/training must preserve the sampled kinematic phase
+    # without inheriting the source clip's accumulated world translation.
+    # The evaluator recomputes the 500-step value from its effective sim rate.
+    reanchor_motion_xy_on_reset=True,
+    phase_horizon_steps=500,
     use_adaptive_timesteps_sampler=False,
     reference_heading_source="velocity_then_lookahead",
     reference_heading_lookahead_s=0.5,

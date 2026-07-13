@@ -637,6 +637,12 @@ class MotionCommand(CommandTermBase):
                 "evaluation_phase_mode must be 'zero' or 'uniform', got "
                 f"{self.motion_cfg.evaluation_phase_mode!r}"
             )
+        if (
+            isinstance(self.motion_cfg.phase_horizon_steps, bool)
+            or not isinstance(self.motion_cfg.phase_horizon_steps, int)
+            or self.motion_cfg.phase_horizon_steps < 0
+        ):
+            raise ValueError("phase_horizon_steps must be a non-negative integer")
         if not math.isfinite(self.motion_cfg.heading_reward_epsilon) or self.motion_cfg.heading_reward_epsilon <= 0.0:
             raise ValueError("heading_reward_epsilon must be positive")
         finite_nonnegative = {
@@ -723,6 +729,12 @@ class MotionCommand(CommandTermBase):
         self.metrics: dict[str, torch.Tensor] = {}
 
         self.init_buffers()
+        logger.info(
+            "[MotionCommand] phase_mode={}, reanchor_xy={}, phase_horizon_steps={}",
+            self.motion_cfg.evaluation_phase_mode,
+            self.motion_cfg.reanchor_motion_xy_on_reset,
+            self.motion_cfg.phase_horizon_steps,
+        )
 
         # 6. visualization markers for isaacsim
         if self._env.viewer and self._env.simulator.get_simulator_type() == SimulatorType.ISAACSIM:
@@ -736,6 +748,20 @@ class MotionCommand(CommandTermBase):
 
         n = env_ids.numel()
         num_motions = self.motion.num_motions
+
+        phase_horizon = self.motion_cfg.phase_horizon_steps
+        if phase_horizon > 0:
+            motion_lengths = self.motion.motion_end_idx - self.motion.motion_start_idx
+            too_short = torch.where(motion_lengths <= phase_horizon)[0]
+            if too_short.numel() > 0:
+                details = ", ".join(
+                    f"motion {int(index)}: {int(motion_lengths[index])} frames"
+                    for index in too_short.detach().cpu().tolist()
+                )
+                raise ValueError(
+                    "phase_horizon_steps requires every motion clip to contain "
+                    f"more than {phase_horizon} frames ({details})"
+                )
 
         # 0. Sample the time steps (and, for the adaptive sampler, the motion id).
         adaptive_global_idx = None
@@ -779,7 +805,13 @@ class MotionCommand(CommandTermBase):
             start_idx = self.motion.motion_start_idx[self.motion_ids[env_ids]]
             end_idx = self.motion.motion_end_idx[self.motion_ids[env_ids]]
             motion_len = end_idx - start_idx
-            self.time_steps[env_ids] = start_idx + (phase * (motion_len - 1).float()).long()
+            # Even the legacy path leaves one future frame because command.step
+            # advances immediately after the first policy step.  Stage-10 uses
+            # a larger episode horizon so that fixed references never hit the
+            # clip-end reset/teleport before timeout.
+            future_steps = max(1, phase_horizon)
+            sample_count = motion_len - future_steps
+            self.time_steps[env_ids] = start_idx + (phase * sample_count.float()).long()
 
         # Handle start_at_timestep_zero_prob (reset to start of assigned motion)
         prob = self.motion_cfg.start_at_timestep_zero_prob
@@ -795,6 +827,15 @@ class MotionCommand(CommandTermBase):
         # Otherwise, update_tasks_callback will advance the timestep to the next timestep -> out of bounds error.
         already_last_timestep_mask = self.time_steps[env_ids] >= end_idx - 1
         self.time_steps[env_ids] = torch.where(already_last_timestep_mask, end_idx - 2, self.time_steps[env_ids])
+
+        # Motion files carry world-space trajectories.  Terrain tasks need the
+        # selected phase's root to begin at the assigned terrain origin, while
+        # retaining all subsequent relative motion.  Store one constant XY
+        # translation per reset and apply it to every reference position.
+        self._motion_reanchor_xy[env_ids] = 0.0
+        if self.motion_cfg.reanchor_motion_xy_on_reset:
+            selected_root_xy = self.motion.body_pos_w[self.time_steps[env_ids], 0, :2]
+            self._motion_reanchor_xy[env_ids] = -selected_root_xy
 
         # 1. Get the root/body poses from the motion data
         root_pos = self.root_pos_w[env_ids].clone()
@@ -990,6 +1031,24 @@ class MotionCommand(CommandTermBase):
     #########################################################################################
     ## Robot from motion data
     #########################################################################################
+    def _translate_motion_positions_w(
+        self,
+        positions: torch.Tensor,
+        env_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Apply env origin and the reset-time motion XY re-anchoring offset."""
+        env_ids = self._ensure_index_tensor(env_ids)
+        if positions.shape[0] != env_ids.numel() or positions.shape[-1] != 3:
+            raise ValueError(
+                "motion positions must have shape (len(env_ids), ..., 3), got "
+                f"{tuple(positions.shape)} for {env_ids.numel()} envs"
+            )
+        translation = self._env.simulator.scene.env_origins[env_ids].clone()
+        if self.motion_cfg.reanchor_motion_xy_on_reset:
+            translation[:, :2] += self._motion_reanchor_xy[env_ids]
+        view_shape = (env_ids.numel(),) + (1,) * (positions.ndim - 2) + (3,)
+        return positions + translation.view(view_shape)
+
     @property
     def joint_pos(self) -> torch.Tensor:
         return self.motion.joint_pos[self.time_steps]
@@ -1000,9 +1059,8 @@ class MotionCommand(CommandTermBase):
 
     @property
     def body_pos_w(self) -> torch.Tensor:
-        return (
+        return self._translate_motion_positions_w(
             self.motion.body_pos_w[self.time_steps][:, self.tracked_body_indexes]
-            + self._env.simulator.scene.env_origins[:, None, :]
         )
 
     @property
@@ -1019,7 +1077,9 @@ class MotionCommand(CommandTermBase):
 
     @property
     def ref_pos_w(self) -> torch.Tensor:
-        return self.motion.body_pos_w[self.time_steps, self.ref_body_index] + self._env.simulator.scene.env_origins
+        return self._translate_motion_positions_w(
+            self.motion.body_pos_w[self.time_steps, self.ref_body_index]
+        )
 
     @property
     def ref_quat_w(self) -> torch.Tensor:
@@ -1035,7 +1095,7 @@ class MotionCommand(CommandTermBase):
 
     @property
     def root_pos_w(self) -> torch.Tensor:
-        return self.motion.body_pos_w[self.time_steps, 0] + self._env.simulator.scene.env_origins
+        return self._translate_motion_positions_w(self.motion.body_pos_w[self.time_steps, 0])
 
     @property
     def root_quat_w(self) -> torch.Tensor:
@@ -1139,8 +1199,7 @@ class MotionCommand(CommandTermBase):
     #########################################################################################
     @property
     def object_pos_w(self) -> torch.Tensor:
-        # Applies env origins, but ideally we should rely on the simulator
-        return self.motion.object_pos_w[self.time_steps] + self._env.simulator.scene.env_origins
+        return self._translate_motion_positions_w(self.motion.object_pos_w[self.time_steps])
 
     @property
     def object_quat_w(self) -> torch.Tensor:
@@ -1172,6 +1231,7 @@ class MotionCommand(CommandTermBase):
     def init_buffers(self):
         self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.motion_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._motion_reanchor_xy = torch.zeros(self.num_envs, 2, device=self.device)
         self.body_pos_relative_w = torch.zeros(
             self.num_envs, len(self.motion_cfg.body_names_to_track), 3, device=self.device
         )  # type: ignore[arg-type]

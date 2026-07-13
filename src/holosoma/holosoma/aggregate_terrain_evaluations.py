@@ -27,6 +27,8 @@ PROTOCOL_FIELDS = (
     "episode_quotas",
     "terrain_types",
     "evaluation_phase_mode",
+    "reanchor_motion_xy_on_reset",
+    "phase_horizon_steps",
     "deterministic_generator",
     "deterministic_per_env_sampling",
     "generator_sampling_seed",
@@ -119,6 +121,8 @@ class _LoadedEvaluation:
     generator_checkpoint_path: str | None
     generator_checkpoint_sha256: str | None
     evaluation_phase_mode: str
+    reanchor_motion_xy_on_reset: bool
+    phase_horizon_steps: int
     deterministic_generator: bool | None
     deterministic_per_env_sampling: bool
     generator_sampling_seed: int | None
@@ -336,6 +340,16 @@ def _metadata_protocol(metadata: Mapping[str, Any], summary: Mapping[str, Any], 
         raise TerrainReportError(
             f"{context}.metadata.evaluation_phase_mode must be 'zero' or 'uniform'"
         )
+    reanchor_motion_xy_on_reset = metadata.get("reanchor_motion_xy_on_reset")
+    if not isinstance(reanchor_motion_xy_on_reset, bool):
+        raise TerrainReportError(
+            f"{context}.metadata.reanchor_motion_xy_on_reset must be boolean"
+        )
+    phase_horizon_steps = _integer(
+        metadata.get("phase_horizon_steps"),
+        f"{context}.metadata.phase_horizon_steps",
+        minimum=0,
+    )
     deterministic_generator = metadata.get("deterministic_generator")
     if not isinstance(deterministic_generator, bool):
         raise TerrainReportError(f"{context}.metadata.deterministic_generator must be boolean")
@@ -397,6 +411,8 @@ def _metadata_protocol(metadata: Mapping[str, Any], summary: Mapping[str, Any], 
         ("episode_count", requested_total),
         ("success_distance_m", success_distance),
         ("evaluation_phase_mode", evaluation_phase_mode),
+        ("reanchor_motion_xy_on_reset", reanchor_motion_xy_on_reset),
+        ("phase_horizon_steps", phase_horizon_steps),
         ("deterministic_generator", deterministic_generator),
         ("deterministic_per_env_sampling", deterministic_per_env_sampling),
         ("generator_sampling_seed", generator_sampling_seed),
@@ -419,6 +435,8 @@ def _metadata_protocol(metadata: Mapping[str, Any], summary: Mapping[str, Any], 
         },
         "terrain_types": list(requested_by_type),
         "evaluation_phase_mode": evaluation_phase_mode,
+        "reanchor_motion_xy_on_reset": reanchor_motion_xy_on_reset,
+        "phase_horizon_steps": phase_horizon_steps,
         "deterministic_generator": deterministic_generator,
         "deterministic_per_env_sampling": deterministic_per_env_sampling,
         "generator_sampling_seed": generator_sampling_seed,
@@ -581,6 +599,16 @@ def load_terrain_evaluation(path: str | Path) -> _LoadedEvaluation:
         raise TerrainReportError(
             f"{context}.metadata.evaluation_phase_mode must be 'zero' or 'uniform'"
         )
+    reanchor_motion_xy_on_reset = metadata.get("reanchor_motion_xy_on_reset")
+    if not isinstance(reanchor_motion_xy_on_reset, bool):
+        raise TerrainReportError(
+            f"{context}.metadata.reanchor_motion_xy_on_reset must be boolean"
+        )
+    phase_horizon_steps = _integer(
+        metadata.get("phase_horizon_steps"),
+        f"{context}.metadata.phase_horizon_steps",
+        minimum=0,
+    )
     deterministic_per_env_sampling = metadata.get("deterministic_per_env_sampling")
     if not isinstance(deterministic_per_env_sampling, bool):
         raise TerrainReportError(
@@ -600,6 +628,8 @@ def load_terrain_evaluation(path: str | Path) -> _LoadedEvaluation:
         generator_checkpoint_path=metadata.get("generator_checkpoint_path"),
         generator_checkpoint_sha256=generator_sha,
         evaluation_phase_mode=evaluation_phase_mode,
+        reanchor_motion_xy_on_reset=reanchor_motion_xy_on_reset,
+        phase_horizon_steps=phase_horizon_steps,
         deterministic_generator=deterministic,
         deterministic_per_env_sampling=deterministic_per_env_sampling,
         generator_sampling_seed=sampling_seed,
@@ -658,6 +688,8 @@ def _evaluation_json(item: _LoadedEvaluation) -> dict[str, Any]:
         "generator_checkpoint_path": item.generator_checkpoint_path,
         "generator_checkpoint_sha256": item.generator_checkpoint_sha256,
         "evaluation_phase_mode": item.evaluation_phase_mode,
+        "reanchor_motion_xy_on_reset": item.reanchor_motion_xy_on_reset,
+        "phase_horizon_steps": item.phase_horizon_steps,
         "deterministic_generator": item.deterministic_generator,
         "deterministic_per_env_sampling": item.deterministic_per_env_sampling,
         "generator_sampling_seed": item.generator_sampling_seed,
@@ -747,6 +779,10 @@ def _iter_report_rows(report: Mapping[str, Any]):
                 "fixed_terrain_level": result["protocol"]["fixed_terrain_level"],
                 "success_distance_m": result["protocol"]["success_distance_m"],
                 "evaluation_phase_mode": result["protocol"]["evaluation_phase_mode"],
+                "reanchor_motion_xy_on_reset": result["protocol"][
+                    "reanchor_motion_xy_on_reset"
+                ],
+                "phase_horizon_steps": result["protocol"]["phase_horizon_steps"],
                 "deterministic_generator": result["protocol"]["deterministic_generator"],
                 "deterministic_per_env_sampling": result["protocol"][
                     "deterministic_per_env_sampling"
@@ -861,6 +897,8 @@ def write_ablation_report(report: Mapping[str, Any], output_prefix: str | Path) 
         "fixed_terrain_level",
         "success_distance_m",
         "evaluation_phase_mode",
+        "reanchor_motion_xy_on_reset",
+        "phase_horizon_steps",
         "deterministic_generator",
         "deterministic_per_env_sampling",
         "generator_sampling_seed",

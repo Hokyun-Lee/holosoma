@@ -16,7 +16,7 @@ from pathlib import Path
 import tyro
 from pydantic.dataclasses import dataclass
 
-from holosoma.config_types.command import GeneratedMotionConfig
+from holosoma.config_types.command import GeneratedMotionConfig, MotionConfig
 from holosoma.config_types.eval_callback import (
     EvalCallbacksConfig,
     TerrainMetricsCallbackConfig,
@@ -110,6 +110,15 @@ def _saved_generator_checkpoint(motion_config: object | None) -> str:
     return value
 
 
+def _evaluation_horizon_steps(config: ExperimentConfig) -> int:
+    """Return policy steps before timeout for the effective simulator config."""
+    sim = config.simulator.config.sim
+    horizon = math.ceil(sim.max_episode_length_s * sim.fps / sim.control_decimation)
+    if horizon < 1:
+        raise ValueError("Effective simulator config must provide at least one evaluation step")
+    return horizon
+
+
 def _replace_motion_config(
     config: ExperimentConfig,
     *,
@@ -127,7 +136,11 @@ def _replace_motion_config(
 
     saved_term = saved_config.command.setup_terms.get("motion_command")
     saved_motion_config = None if saved_term is None else saved_term.params.get("motion_config")
-    updates: dict[str, object] = {"evaluation_phase_mode": args.evaluation_phase_mode}
+    updates: dict[str, object] = {
+        "evaluation_phase_mode": args.evaluation_phase_mode,
+        "reanchor_motion_xy_on_reset": True,
+        "phase_horizon_steps": _evaluation_horizon_steps(config),
+    }
     if args.motion_file is not None:
         updates["motion_file"] = args.motion_file
     if isinstance(motion_config, GeneratedMotionConfig):
@@ -220,11 +233,7 @@ def prepare_terrain_evaluation_config(
     config = _replace_motion_config(config, saved_config=saved_config, args=args)
     config = _freeze_terrain_curriculum(config, args.fixed_terrain_level)
 
-    steps_per_episode = math.ceil(
-        config.simulator.config.sim.max_episode_length_s
-        * config.simulator.config.sim.fps
-        / config.simulator.config.sim.control_decimation
-    )
+    steps_per_episode = _evaluation_horizon_steps(config)
     max_eval_steps = config.training.max_eval_steps
     if max_eval_steps is None:
         # A one-env upper bound. Vectorized evaluation generally stops much
@@ -244,7 +253,12 @@ def build_metrics_callbacks(
     args: TerrainEvaluationRunConfig,
     *,
     variant: str,
+    effective_config: ExperimentConfig,
 ) -> EvalCallbacksConfig:
+    motion_term = effective_config.command.setup_terms.get("motion_command")
+    motion_config = None if motion_term is None else motion_term.params.get("motion_config")
+    if not isinstance(motion_config, MotionConfig):
+        raise TypeError("Effective terrain evaluation config must contain a typed MotionConfig")
     metrics = TerrainMetricsConfig(
         enabled=True,
         output_prefix=args.output_prefix,
@@ -260,6 +274,8 @@ def build_metrics_callbacks(
         evaluation_seed=args.seed,
         fixed_terrain_level=args.fixed_terrain_level,
         evaluation_phase_mode=args.evaluation_phase_mode,
+        reanchor_motion_xy_on_reset=motion_config.reanchor_motion_xy_on_reset,
+        phase_horizon_steps=motion_config.phase_horizon_steps,
         deterministic_generator=args.deterministic_generator,
         deterministic_per_env_sampling=args.deterministic_per_env_sampling,
         generator_sampling_seed=args.generator_sampling_seed,
@@ -299,7 +315,7 @@ def main() -> None:
     variant = args.variant
     if variant == "unspecified":
         variant = selected_preset or Path(args.checkpoint).stem
-    callbacks = build_metrics_callbacks(args, variant=variant)
+    callbacks = build_metrics_callbacks(args, variant=variant, effective_config=effective_config)
     run_eval_with_tyro(
         effective_config,
         checkpoint_cfg,

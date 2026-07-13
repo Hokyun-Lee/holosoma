@@ -119,6 +119,8 @@ class TerrainMetricsConfig:
     evaluation_seed: int = 42
     fixed_terrain_level: int = 0
     evaluation_phase_mode: str = "uniform"
+    reanchor_motion_xy_on_reset: bool = True
+    phase_horizon_steps: int = 500
     deterministic_generator: bool = True
     deterministic_per_env_sampling: bool = True
     generator_sampling_seed: int = 0

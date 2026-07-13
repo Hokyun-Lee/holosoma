@@ -84,6 +84,8 @@ def _payload(
     success_count: int = 3,
     scenario_label: str = "",
     evaluation_phase_mode: str = "uniform",
+    reanchor_motion_xy_on_reset: bool = True,
+    phase_horizon_steps: int = 500,
     deterministic_per_env_sampling: bool = True,
 ) -> dict[str, Any]:
     requested_by_type = dict.fromkeys(terrain_types, per_type_quota)
@@ -107,6 +109,8 @@ def _payload(
             "evaluation_seed": evaluation_seed,
             "fixed_terrain_level": fixed_level,
             "evaluation_phase_mode": evaluation_phase_mode,
+            "reanchor_motion_xy_on_reset": reanchor_motion_xy_on_reset,
+            "phase_horizon_steps": phase_horizon_steps,
             "deterministic_generator": True,
             "deterministic_per_env_sampling": deterministic_per_env_sampling,
             "generator_sampling_seed": 7,
@@ -116,6 +120,8 @@ def _payload(
                 "evaluation_seed": evaluation_seed,
                 "fixed_terrain_level": fixed_level,
                 "evaluation_phase_mode": evaluation_phase_mode,
+                "reanchor_motion_xy_on_reset": reanchor_motion_xy_on_reset,
+                "phase_horizon_steps": phase_horizon_steps,
                 "episode_count": total,
                 "success_distance_m": success_distance_m,
                 "deterministic_generator": True,
@@ -254,6 +260,20 @@ def test_protocol_mismatch_fails_with_field_name(
                 (("metadata", "metrics_config", "evaluation_phase_mode"), "zero"),
             ],
             "evaluation_phase_mode",
+        ),
+        (
+            [
+                (("metadata", "reanchor_motion_xy_on_reset"), False),
+                (("metadata", "metrics_config", "reanchor_motion_xy_on_reset"), False),
+            ],
+            "reanchor_motion_xy_on_reset",
+        ),
+        (
+            [
+                (("metadata", "phase_horizon_steps"), 400),
+                (("metadata", "metrics_config", "phase_horizon_steps"), 400),
+            ],
+            "phase_horizon_steps",
         ),
         (
             [

@@ -107,6 +107,21 @@ class MotionConfig:
     fresh phase within each selected motion at every episode reset.
     """
 
+    reanchor_motion_xy_on_reset: bool = False
+    """Translate the selected motion phase so its root XY starts at the env origin.
+
+    This is an opt-in coordinate correction for terrain tasks.  The legacy
+    flat/offline presets preserve the motion file's world-space translation.
+    """
+
+    phase_horizon_steps: int = 0
+    """Future command steps that must remain in the selected clip after reset.
+
+    A positive value constrains uniformly sampled phases so the clip cannot
+    wrap and reset the robot before this horizon.  Terrain PPO and evaluation
+    use the full 10-second episode horizon; legacy presets leave it disabled.
+    """
+
     use_adaptive_timesteps_sampler: bool = False
     """During training, whether to prioritize training on motion segments where the robot fails often."""
 

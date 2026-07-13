@@ -341,11 +341,14 @@ class GeneratedMotionCommand(MotionCommand):
 
     def _seed_features(self, env_ids: torch.Tensor, time_steps: torch.Tensor) -> torch.Tensor:
         """Seed-motion frames as generator features (for history right after reset)."""
-        origins = self._env.simulator.scene.env_origins[env_ids]
-        root_pos = self.motion.body_pos_w[time_steps, 0] + origins
+        root_pos = self._translate_motion_positions_w(
+            self.motion.body_pos_w[time_steps, 0], env_ids
+        )
         root_quat = self.motion.body_quat_w[time_steps, 0]  # xyzw
         joint_pos = self.motion.joint_pos[time_steps]  # sim dof order
-        body_pos = self.motion.body_pos_w[time_steps][:, self.tracked_body_indexes] + origins[:, None, :]
+        body_pos = self._translate_motion_positions_w(
+            self.motion.body_pos_w[time_steps][:, self.tracked_body_indexes], env_ids
+        )
         return self._pack(root_pos, root_quat, joint_pos, body_pos)
 
     # ------------------------------------------------------------------ replan

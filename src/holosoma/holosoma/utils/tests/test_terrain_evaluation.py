@@ -331,6 +331,8 @@ def test_fake_env_callback_forces_runtime_controls_and_captures_terminal_pose(tm
     assert command.gen_cfg.deterministic_sampling and command.gen_cfg.sampling_seed == 7
     assert command.gen_cfg.deterministic_per_env_sampling
     assert command.gen_cfg.evaluation_phase_mode == "uniform"
+    assert command.gen_cfg.reanchor_motion_xy_on_reset
+    assert command.gen_cfg.phase_horizon_steps == 500
     assert command.sampling_counter_reset_count == 1
 
     actor_state = callback.on_pre_eval_env_step(
@@ -351,6 +353,8 @@ def test_fake_env_callback_forces_runtime_controls_and_captures_terminal_pose(tm
     assert payload["metadata"]["deterministic_generator"] is True
     assert payload["metadata"]["deterministic_per_env_sampling"] is True
     assert payload["metadata"]["evaluation_phase_mode"] == "uniform"
+    assert payload["metadata"]["reanchor_motion_xy_on_reset"] is True
+    assert payload["metadata"]["phase_horizon_steps"] == 500
     assert payload["metadata"]["first_correction_exemplar"]["found"] is False
     assert payload["metadata"]["first_correction_exemplar"]["path"] is None
     assert not (tmp_path / "callback_first_correction_exemplar.npz").exists()
@@ -358,6 +362,8 @@ def test_fake_env_callback_forces_runtime_controls_and_captures_terminal_pose(tm
     assert command.gen_cfg.sampling_seed == 99
     assert not command.gen_cfg.deterministic_per_env_sampling
     assert command.gen_cfg.evaluation_phase_mode == "zero"
+    assert not command.gen_cfg.reanchor_motion_xy_on_reset
+    assert command.gen_cfg.phase_horizon_steps == 0
     assert terrain_state.terrain_levels.tolist() == [2]
     assert not curriculum.enabled
 

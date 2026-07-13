@@ -310,6 +310,41 @@ def test_deterministic_sampling_counter_reset_is_per_environment() -> None:
     assert cmd._replan_ordinal.tolist() == [7, 0, 9]
 
 
+def test_generated_seed_history_uses_same_reanchored_frame_as_sim_reset() -> None:
+    cmd = GeneratedMotionCommand.__new__(GeneratedMotionCommand)
+    cmd.num_envs = 1
+    cmd.device = torch.device("cpu")
+    cmd.motion_cfg = SimpleNamespace(reanchor_motion_xy_on_reset=True)
+    cmd.layout = FeatureLayout(joint_names=("joint",), body_names=("root",))
+    cmd._lay_j_from_sim = torch.tensor([0])
+    cmd._lay_b_from_tracked = torch.tensor([0])
+    cmd.tracked_body_indexes = torch.tensor([0])
+    cmd._motion_reanchor_xy = torch.tensor([[-3.0, -4.0]])
+    body_pos = torch.tensor(
+        [
+            [[3.0, 4.0, 0.8]],
+            [[3.5, 3.75, 0.9]],
+        ]
+    )
+    body_quat = torch.tensor([[[0.0, 0.0, 0.0, 1.0]]] * 2)
+    cmd.motion = SimpleNamespace(
+        body_pos_w=body_pos,
+        body_quat_w=body_quat,
+        joint_pos=torch.tensor([[0.1], [0.2]]),
+    )
+    cmd._env = SimpleNamespace(
+        simulator=SimpleNamespace(scene=SimpleNamespace(env_origins=torch.tensor([[10.0, -2.0, 0.0]])))
+    )
+
+    features = cmd._seed_features(torch.tensor([0]), torch.tensor([1]))
+    expected_position = torch.tensor([[10.5, -2.25, 0.9]])
+    torch.testing.assert_close(features[:, cmd.layout.root_pos_slice], expected_position)
+    torch.testing.assert_close(
+        features[:, cmd.layout.body_pos_slice].view(1, 1, 3)[:, 0],
+        expected_position,
+    )
+
+
 def test_double_reset_rewind_starts_evaluated_episode_at_zero() -> None:
     cmd = GeneratedMotionCommand.__new__(GeneratedMotionCommand)
     cmd.num_envs = 2

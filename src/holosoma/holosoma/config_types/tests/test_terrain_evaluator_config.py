@@ -61,6 +61,8 @@ def test_prepare_config_freezes_level_and_generator_sampling() -> None:
     )
     motion_config = prepared.command.setup_terms["motion_command"].params["motion_config"]
     assert motion_config.evaluation_phase_mode == "uniform"
+    assert motion_config.reanchor_motion_xy_on_reset
+    assert motion_config.phase_horizon_steps == 500
     assert motion_config.deterministic_sampling
     assert motion_config.deterministic_per_env_sampling
     assert motion_config.sampling_seed == 23
@@ -134,6 +136,8 @@ def test_fixed_reference_uses_uniform_evaluation_phase() -> None:
     )
     motion_config = prepared.command.setup_terms["motion_command"].params["motion_config"]
     assert motion_config.evaluation_phase_mode == "uniform"
+    assert motion_config.reanchor_motion_xy_on_reset
+    assert motion_config.phase_horizon_steps == 500
 
 
 def test_invalid_evaluation_phase_mode_is_rejected() -> None:
@@ -154,20 +158,65 @@ def test_non_stage10_defaults_preserve_legacy_sampling() -> None:
         "motion_command"
     ].params["motion_config"]
     assert motion_config.evaluation_phase_mode == "zero"
+    assert not motion_config.reanchor_motion_xy_on_reset
+    assert motion_config.phase_horizon_steps == 0
     assert not motion_config.deterministic_per_env_sampling
 
 
-def test_metrics_callback_collection_is_opt_in_and_carries_runtime_controls() -> None:
-    callbacks = build_metrics_callbacks(
-        TerrainEvaluationRunConfig(
-            checkpoint="model.pt",
-            episode_count=12,
-            fixed_terrain_level=4,
-            deterministic_generator=True,
-            generator_sampling_seed=9,
-            body_origin_correction_min_improvement_m=0.015,
+def test_terrain_presets_enable_centered_full_episode_phase_sampling() -> None:
+    fixed_config = g1_29dof_wbt_ablation_a_fixed_reference.command.setup_terms[
+        "motion_command"
+    ].params["motion_config"]
+    generated_config = g1_29dof_wbt_ablation_c_full_no_finetune.command.setup_terms[
+        "motion_command"
+    ].params["motion_config"]
+
+    assert fixed_config.reanchor_motion_xy_on_reset
+    assert fixed_config.phase_horizon_steps == 500
+    assert generated_config.reanchor_motion_xy_on_reset
+    assert generated_config.phase_horizon_steps == 500
+
+
+def test_effective_sim_rate_drives_forced_phase_horizon() -> None:
+    base = g1_29dof_wbt_ablation_a_fixed_reference.get_eval_config()
+    sim = dataclasses.replace(base.simulator.config.sim, max_episode_length_s=6.0)
+    base = dataclasses.replace(
+        base,
+        simulator=dataclasses.replace(
+            base.simulator,
+            config=dataclasses.replace(base.simulator.config, sim=sim),
         ),
+    )
+    prepared = prepare_terrain_evaluation_config(
+        base,
+        saved_config=g1_29dof_wbt_ablation_a_fixed_reference,
+        args=TerrainEvaluationRunConfig(checkpoint="model.pt", episode_count=8),
+    )
+    motion_config = prepared.command.setup_terms["motion_command"].params["motion_config"]
+
+    assert motion_config.phase_horizon_steps == 300
+    assert prepared.training.max_eval_steps == 8 * 300
+
+
+def test_metrics_callback_collection_is_opt_in_and_carries_runtime_controls() -> None:
+    args = TerrainEvaluationRunConfig(
+        checkpoint="model.pt",
+        episode_count=12,
+        fixed_terrain_level=4,
+        deterministic_generator=True,
+        generator_sampling_seed=9,
+        generator_checkpoint="generator.pt",
+        body_origin_correction_min_improvement_m=0.015,
+    )
+    effective_config = prepare_terrain_evaluation_config(
+        g1_29dof_wbt_ablation_c_full_no_finetune.get_eval_config(),
+        saved_config=g1_29dof_wbt_ablation_b_generator_blind,
+        args=args,
+    )
+    callbacks = build_metrics_callbacks(
+        args,
         variant="D",
+        effective_config=effective_config,
     )
     active = callbacks.collect_active_callbacks()
     assert list(active) == ["terrain_metrics"]
@@ -176,6 +225,8 @@ def test_metrics_callback_collection_is_opt_in_and_carries_runtime_controls() ->
     assert config.episode_count == 12
     assert config.fixed_terrain_level == 4
     assert config.evaluation_phase_mode == "uniform"
+    assert config.reanchor_motion_xy_on_reset
+    assert config.phase_horizon_steps == 500
     assert config.deterministic_generator
     assert config.deterministic_per_env_sampling
     assert config.generator_sampling_seed == 9

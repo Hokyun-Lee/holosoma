@@ -89,6 +89,12 @@ class TerrainMetricsCallback(RLEvalCallback):
             raise ValueError("fixed_terrain_level must be non-negative")
         if self.config.evaluation_phase_mode not in {"zero", "uniform"}:
             raise ValueError("evaluation_phase_mode must be 'zero' or 'uniform'")
+        if (
+            isinstance(self.config.phase_horizon_steps, bool)
+            or not isinstance(self.config.phase_horizon_steps, int)
+            or self.config.phase_horizon_steps < 0
+        ):
+            raise ValueError("phase_horizon_steps must be a non-negative integer")
         if self.config.deterministic_per_env_sampling and not self.config.deterministic_generator:
             raise ValueError(
                 "deterministic_per_env_sampling requires deterministic_generator=True"
@@ -207,6 +213,8 @@ class TerrainMetricsCallback(RLEvalCallback):
             motion_config = dataclasses.replace(
                 motion_config,
                 evaluation_phase_mode=self.config.evaluation_phase_mode,
+                reanchor_motion_xy_on_reset=self.config.reanchor_motion_xy_on_reset,
+                phase_horizon_steps=self.config.phase_horizon_steps,
             )
             self._motion_command.motion_cfg = motion_config
         if isinstance(motion_config, GeneratedMotionConfig):
@@ -652,6 +660,8 @@ class TerrainMetricsCallback(RLEvalCallback):
             "evaluation_seed": self.config.evaluation_seed,
             "fixed_terrain_level": self.config.fixed_terrain_level,
             "evaluation_phase_mode": self.config.evaluation_phase_mode,
+            "reanchor_motion_xy_on_reset": self.config.reanchor_motion_xy_on_reset,
+            "phase_horizon_steps": self.config.phase_horizon_steps,
             "deterministic_generator": self.config.deterministic_generator,
             "deterministic_per_env_sampling": self.config.deterministic_per_env_sampling,
             "generator_sampling_seed": self.config.generator_sampling_seed,
