@@ -69,4 +69,5 @@ def test_evaluation_uniform_phase_is_seeded_and_not_forced_to_frame_zero() -> No
     second.reset(None)
     assert first.time_steps.tolist() == second.time_steps.tolist()
     assert any(time_step > 0 for time_step in first.time_steps.tolist())
+    assert len(set(first.time_steps.tolist())) > 1
     assert all(0 <= time_step < 99 for time_step in first.time_steps.tolist())

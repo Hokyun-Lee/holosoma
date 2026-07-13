@@ -310,6 +310,28 @@ def test_deterministic_sampling_counter_reset_is_per_environment() -> None:
     assert cmd._replan_ordinal.tolist() == [7, 0, 9]
 
 
+def test_double_reset_rewind_starts_evaluated_episode_at_zero() -> None:
+    cmd = GeneratedMotionCommand.__new__(GeneratedMotionCommand)
+    cmd.num_envs = 2
+    cmd.device = torch.device("cpu")
+    cmd._episode_index = torch.full((2,), -1, dtype=torch.long)
+    cmd._replan_ordinal = torch.zeros(2, dtype=torch.long)
+    env_ids = torch.arange(2)
+
+    # PPO's setup-only reset consumes episode zero and one bootstrap replan.
+    cmd._start_sampling_episode(env_ids)
+    cmd._replan_ordinal += 1
+    assert cmd._episode_index.tolist() == [0, 0]
+    assert cmd._replan_ordinal.tolist() == [1, 1]
+
+    # The metrics callback rewinds, then PPO's final reset starts the actual
+    # evaluated episode with the same identities in every variant.
+    cmd.reset_deterministic_sampling_counters()
+    cmd._start_sampling_episode(env_ids)
+    assert cmd._episode_index.tolist() == [0, 0]
+    assert cmd._replan_ordinal.tolist() == [0, 0]
+
+
 def test_body_origin_penetration_proxy_uses_scan_anchor_yaw_and_validity() -> None:
     grid = ScanGrid(x_min=-0.1, x_max=0.1, y_min=-0.1, y_max=0.1, spacing=0.1)
     scan = torch.full((1, grid.dim), 0.3)

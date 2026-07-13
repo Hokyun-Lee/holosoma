@@ -552,8 +552,7 @@ class GeneratedMotionCommand(MotionCommand):
         finally:
             self._seed_mode = False
 
-        self._episode_index[env_ids] += 1
-        self._replan_ordinal[env_ids] = 0
+        self._start_sampling_episode(env_ids)
 
         # Conditioning history from the seed frames (t-past+1 .. t).
         t = self.time_steps[env_ids]
@@ -584,6 +583,11 @@ class GeneratedMotionCommand(MotionCommand):
         if env_ids.numel() == 0:
             return
         self._episode_index[env_ids] = -1
+        self._replan_ordinal[env_ids] = 0
+
+    def _start_sampling_episode(self, env_ids: torch.Tensor) -> None:
+        """Advance reset identity before generating the bootstrap window."""
+        self._episode_index[env_ids] += 1
         self._replan_ordinal[env_ids] = 0
 
     def step(self) -> None:
