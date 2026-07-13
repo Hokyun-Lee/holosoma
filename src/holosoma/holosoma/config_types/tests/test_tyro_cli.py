@@ -26,6 +26,10 @@ def test_generated_motion_terrain_experiment_is_separate_from_flat():
     ]
     assert not flat_motion_cfg.use_sim_terrain_scan
     assert terrain_motion_cfg.use_sim_terrain_scan
+    assert flat_motion_cfg.past_noise_std == 0.01
+    assert terrain_motion_cfg.past_noise_std == 0.0
+    assert flat_motion_cfg.denoise_steps == 2
+    assert terrain_motion_cfg.denoise_steps == 2
     assert g1_29dof_wbt_gen.algo.config.checkpoint_load_mode == "strict"
     assert g1_29dof_wbt_gen_terrain.algo.config.checkpoint_load_mode == "expand_input"
     assert "motion_heading_alignment" not in g1_29dof_wbt_gen.reward.terms

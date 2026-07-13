@@ -166,6 +166,16 @@ class GeneratedMotionCommand(MotionCommand):
         self._win_ref_quat = torch.zeros(N, H, 4, device=dev)
         self.window_idx = torch.zeros(N, dtype=torch.long, device=dev)
         self._history = torch.zeros(N, self._past, self._feat_dim, device=dev)
+        # A reset initially seeds ``_history`` from a motion clip so the
+        # generator can provide a reference immediately.  Track measured
+        # simulator frames separately: the first non-bootstrap replan must
+        # wait until every history slot contains a distinct policy-step
+        # measurement, and subsequent replans are scheduled from that point.
+        self._measured_history_valid_count = torch.zeros(N, dtype=torch.long, device=dev)
+        self._has_closed_loop_replan = torch.zeros(N, dtype=torch.bool, device=dev)
+        self._bootstrap_replan_count = torch.zeros(N, dtype=torch.long, device=dev)
+        self._closed_loop_replan_count = torch.zeros(N, dtype=torch.long, device=dev)
+        self._last_replan_interval_steps = torch.zeros(N, dtype=torch.long, device=dev)
         self._headings = torch.zeros(N, 2, device=dev)
         self._arange = torch.arange(N, device=dev)
         if not self._use_sim_terrain_scan:
@@ -223,7 +233,8 @@ class GeneratedMotionCommand(MotionCommand):
         return self._terrain_state.update_local_height_scan(root_xy, root_yaw, env_ids)
 
     @torch.no_grad()
-    def _replan(self, env_ids: torch.Tensor) -> None:
+    def _generate_window(self, env_ids: torch.Tensor) -> None:
+        """Generate a reference window from the currently stored history."""
         past = self._history[env_ids].clone()
         if self.gen_cfg.past_noise_std > 0:
             # Paper: conditions are perturbed during training for robustness.
@@ -293,6 +304,57 @@ class GeneratedMotionCommand(MotionCommand):
         )
         self._win_ref_quat[env_ids] = _xyzw(quat_normalize(torso_wxyz))
 
+    @torch.no_grad()
+    def _replan(self, env_ids: torch.Tensor, *, bootstrap: bool) -> None:
+        """Generate a window and update per-environment replan instrumentation.
+
+        Bootstrap calls are allowed to consume the reset seed frames.  Every
+        other call is guarded so a generated window can never silently mix a
+        seed frame with a measured simulator frame.
+        """
+        if not bootstrap:
+            valid = self._measured_history_valid_count[env_ids] >= self._past
+            torch._assert_async(
+                valid.all(),
+                "Closed-loop replanning requires a fully measured history",
+            )
+
+        observed_interval = self.window_idx[env_ids].clone()
+        self._generate_window(env_ids)
+
+        if bootstrap:
+            self._bootstrap_replan_count[env_ids] += 1
+        else:
+            self._closed_loop_replan_count[env_ids] += 1
+            self._has_closed_loop_replan[env_ids] = True
+        self._last_replan_interval_steps[env_ids] = observed_interval
+        self.window_idx[env_ids] = 0
+
+    def _reset_closed_loop_tracking(self, env_ids: torch.Tensor) -> None:
+        """Reset measured-history scheduling state for only ``env_ids``."""
+        self._measured_history_valid_count[env_ids] = 0
+        self._has_closed_loop_replan[env_ids] = False
+        self._bootstrap_replan_count[env_ids] = 0
+        self._closed_loop_replan_count[env_ids] = 0
+        self._last_replan_interval_steps[env_ids] = 0
+        self.window_idx[env_ids] = 0
+
+    def _advance_measured_history_and_replan(self) -> None:
+        """Insert one measured frame and run due closed-loop replans."""
+        measured = self._sim_features()
+        self._history[:, :-1] = self._history[:, 1:].clone()
+        self._history[:, -1] = measured
+        self._measured_history_valid_count.add_(1).clamp_(max=self._past)
+
+        self.window_idx += 1
+        first_closed_loop_due = (~self._has_closed_loop_replan) & (
+            self._measured_history_valid_count >= self._past
+        )
+        periodic_due = self._has_closed_loop_replan & (self.window_idx >= self._replan_steps)
+        due = torch.where(first_closed_loop_due | periodic_due)[0]
+        if due.numel() > 0:
+            self._replan(due, bootstrap=False)
+
     # ------------------------------------------------------------------ reset / step
 
     def reset(self, env_ids: torch.Tensor | None) -> None:
@@ -312,6 +374,8 @@ class GeneratedMotionCommand(MotionCommand):
             tk = torch.clamp(t - (self._past - 1 - k), min=start)
             self._history[env_ids, k] = self._seed_features(env_ids, tk)
 
+        self._reset_closed_loop_tracking(env_ids)
+
         if self._use_sim_terrain_scan:
             self._terrain_state.invalidate_local_height_scan(env_ids)
 
@@ -324,19 +388,11 @@ class GeneratedMotionCommand(MotionCommand):
             yaw = torch.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
             self._headings[env_ids] = torch.stack([torch.cos(yaw), torch.sin(yaw)], dim=-1)
 
-        self._replan(env_ids)
-        self.window_idx[env_ids] = 0
+        self._replan(env_ids, bootstrap=True)
 
     def step(self) -> None:
         # Measured-state history advances every policy step (50 Hz).
-        self._history[:, :-1] = self._history[:, 1:].clone()
-        self._history[:, -1] = self._sim_features()
-
-        self.window_idx += 1
-        due = torch.where(self.window_idx >= self._replan_steps)[0]
-        if due.numel() > 0:
-            self._replan(due)
-            self.window_idx[due] = 0
+        self._advance_measured_history_and_replan()
 
         # Relative body poses (same computation as MotionCommand.step, without
         # clip bookkeeping): "if the reference were re-anchored to where the
@@ -364,6 +420,18 @@ class GeneratedMotionCommand(MotionCommand):
 
     def update_metrics(self) -> None:
         super().update_metrics()
+        self.metrics["generator/bootstrap_replan_count"] = self._bootstrap_replan_count.float()
+        self.metrics["generator/closed_loop_replan_count"] = self._closed_loop_replan_count.float()
+        self.metrics["generator/measured_history_valid_count"] = (
+            self._measured_history_valid_count.float()
+        )
+        self.metrics["generator/window_index"] = self.window_idx.float()
+        self.metrics["generator/observed_replan_interval_steps"] = (
+            self._last_replan_interval_steps.float()
+        )
+        self.metrics["generator/denoise_steps"] = torch.full_like(
+            self.window_idx, self.gen_cfg.denoise_steps, dtype=torch.float32
+        )
         velocity_xy = self.robot_root_lin_vel_w[:, :2]
         self.metrics["motion/heading_error_rad"] = velocity_heading_error_rad(
             velocity_xy,
