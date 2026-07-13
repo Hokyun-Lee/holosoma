@@ -7,9 +7,11 @@ from typing import TYPE_CHECKING, List
 
 import torch
 
+from holosoma.config_types.command import GeneratedMotionConfig
 from holosoma.config_types.reward import RewardTermCfg
 from holosoma.managers.command.terms.wbt import MotionCommand
 from holosoma.managers.reward.base import RewardTermBase
+from holosoma.managers.reward.terms.heading import velocity_heading_reward
 from holosoma.utils.rotations import quat_error_magnitude
 
 if TYPE_CHECKING:
@@ -106,6 +108,20 @@ def motion_global_body_ang_vel(env: WholeBodyTrackingManager, sigma: float) -> t
     motion_command = _get_motion_command_and_assert_type(env)
     error = torch.sum(torch.square(motion_command.body_ang_vel_w - motion_command.robot_body_ang_vel_w), dim=-1)
     return torch.exp(-error.mean(-1) / sigma**2)
+
+
+def motion_heading_alignment(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Reward measured world-frame root velocity along the generated heading."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    if not hasattr(motion_command, "target_heading_w"):
+        raise TypeError("motion_heading_alignment requires a generated-motion heading command")
+    if not isinstance(motion_command.motion_cfg, GeneratedMotionConfig):
+        raise TypeError("motion_heading_alignment requires GeneratedMotionConfig")
+    return velocity_heading_reward(
+        motion_command.robot_root_lin_vel_w[:, :2],
+        motion_command.target_heading_w,
+        epsilon=motion_command.motion_cfg.heading_reward_epsilon,
+    )
 
 
 # ================================================================================================

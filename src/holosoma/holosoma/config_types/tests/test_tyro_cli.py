@@ -28,8 +28,22 @@ def test_generated_motion_terrain_experiment_is_separate_from_flat():
     assert terrain_motion_cfg.use_sim_terrain_scan
     assert g1_29dof_wbt_gen.algo.config.checkpoint_load_mode == "strict"
     assert g1_29dof_wbt_gen_terrain.algo.config.checkpoint_load_mode == "expand_input"
+    assert "motion_heading_alignment" not in g1_29dof_wbt_gen.reward.terms
+    assert parsed.reward.terms["motion_heading_alignment"].weight == 1.0
 
     for group_name in ("actor_obs", "critic_obs"):
         flat_terms = sorted(g1_29dof_wbt_gen.observation.groups[group_name].terms)
         terrain_terms = sorted(g1_29dof_wbt_gen_terrain.observation.groups[group_name].terms)
         assert terrain_terms == flat_terms + ["terrain_height_scan"]
+
+
+def test_generated_motion_heading_reward_cli_off_switch():
+    parsed = tyro.cli(
+        AnnotatedExperimentConfig,
+        args=(
+            "exp:g1-29dof-wbt-gen-terrain",
+            "--reward.terms.motion-heading-alignment.weight=0.0",
+        ),
+        config=TYRO_CONIFG,
+    )
+    assert parsed.reward.terms["motion_heading_alignment"].weight == 0.0

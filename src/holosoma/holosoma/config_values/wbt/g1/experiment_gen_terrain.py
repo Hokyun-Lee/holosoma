@@ -8,10 +8,19 @@ the following tasks.
 
 from dataclasses import replace
 
+from holosoma.config_types.reward import RewardTermCfg
 from holosoma.config_values import terrain
 from holosoma.config_values.wbt.g1.command_gen_terrain import g1_29dof_wbt_gen_terrain_command
 from holosoma.config_values.wbt.g1.experiment_gen import g1_29dof_wbt_gen
 from holosoma.config_values.wbt.g1.observation_gen_terrain import g1_29dof_wbt_gen_terrain_observation
+
+_terrain_reward_terms = dict(g1_29dof_wbt_gen.reward.terms)
+_terrain_reward_terms["motion_heading_alignment"] = RewardTermCfg(
+    func="holosoma.managers.reward.terms.wbt:motion_heading_alignment",
+    weight=1.0,
+    tags=["tracking", "heading"],
+)
+_terrain_reward = replace(g1_29dof_wbt_gen.reward, terms=_terrain_reward_terms)
 
 g1_29dof_wbt_gen_terrain = replace(
     g1_29dof_wbt_gen,
@@ -22,6 +31,7 @@ g1_29dof_wbt_gen_terrain = replace(
     terrain=terrain.terrain_locomotion_mix,
     command=g1_29dof_wbt_gen_terrain_command,
     observation=g1_29dof_wbt_gen_terrain_observation,
+    reward=_terrain_reward,
     algo=replace(
         g1_29dof_wbt_gen.algo,
         config=replace(g1_29dof_wbt_gen.algo.config, checkpoint_load_mode="expand_input"),

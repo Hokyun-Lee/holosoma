@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Motion Generator 7차: Tracker 개선</title>
+<style>
+:root { --bg:#fbfbfd; --card:#fff; --text:#1d1d1f; --muted:#6e6e73; --accent:#0071e3; --border:#e5e5ea; --code:#f5f5f7; --ok:#e9f7ef; --warn:#fff8e6; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:16px/1.7 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR",sans-serif; }
+.container { max-width:860px; margin:auto; padding:0 24px 100px; }
+header { padding:80px 0 42px; text-align:center; }
+h1 { margin:0; font-size:40px; line-height:1.2; }
+header p { color:var(--muted); font-size:19px; }
+section { margin:0 0 58px; }
+h2 { margin:0 0 12px; padding-top:18px; font-size:28px; }
+h3 { margin:28px 0 10px; }
+p, ul { margin:10px 0; }
+code { background:var(--code); border-radius:6px; padding:2px 6px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.88em; }
+pre { overflow-x:auto; padding:18px 20px; border-radius:14px; background:#1d1d1f; color:#f5f5f7; font-size:13px; line-height:1.6; }
+pre code { padding:0; background:none; }
+.card,.callout { padding:18px 22px; border:1px solid var(--border); border-radius:14px; background:var(--card); }
+.ok { background:var(--ok); }
+.warn { background:var(--warn); }
+table { width:100%; border-collapse:collapse; background:var(--card); font-size:14px; }
+th,td { padding:10px 12px; border-bottom:1px solid var(--border); text-align:left; vertical-align:top; }
+th { background:var(--code); }
+.table { overflow-x:auto; border:1px solid var(--border); border-radius:14px; }
+footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted); text-align:center; font-size:13px; }
+</style>
+</head>
+<body>
+<header class="container">
+  <h1>7차: Tracker 개선</h1>
+  <p>Heading objective, 5-frame proprioception, terrain curriculum을<br>기존 Stage-5/6 baseline과 분리해 추가하는 진행 기록</p>
+</header>
+<main class="container">
+<section>
+  <h2>진행 체크리스트</h2>
+  <div class="card">
+    <h3>Task 7.2 — Heading reward <small>(우선 구현)</small></h3>
+    <ul>
+      <li>☑ heading reward 구현</li><li>☑ reward on/off config 제공</li>
+      <li>☑ heading error와 reward logging</li><li>☑ reference tracking reward와 별도 확인</li>
+    </ul>
+    <h3>Task 7.1 — 5-frame proprioceptive history</h3>
+    <ul>
+      <li>☐ history buffer 구현</li><li>☐ reset 시 buffer 초기화</li>
+      <li>☐ env 간 history 혼합 없음</li><li>☐ observation shape test</li>
+    </ul>
+    <h3>Task 7.3 — Terrain curriculum</h3>
+    <ul>
+      <li>☐ terrain별 difficulty level</li><li>☐ curriculum level 자동 증가</li>
+      <li>☐ terrain별 success rate logging</li><li>☐ 편향 없는 terrain sampling</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <h2>Task 7.2 결과 <small>(2026-07-13)</small></h2>
+  <p>Generator가 episode reset 때 뽑은 unit world-heading <code>d_xy</code>와 simulator의 실측 world-frame root velocity <code>v_xy</code>를 사용해 다음 식을 그대로 구현했다.</p>
+<pre><code>r_heading = dot(v_xy, d_xy) / (norm(v_xy) + epsilon)</code></pre>
+  <p>Body-frame observation velocity를 재사용하지 않고 <code>robot_root_states[:, 7:9]</code>를 직접 사용하므로 target과 velocity 좌표계가 모두 world frame이다. 정지 시 reward는 0이며 aligned/opposite 방향은 각각 거의 +1/-1이다.</p>
+
+  <div class="table"><table>
+    <tr><th>파일</th><th>변경</th></tr>
+    <tr><td><code>managers/reward/terms/heading.py</code></td><td>batch heading 식과 방향 오차의 공용 tensor 구현; shape·epsilon 검사</td></tr>
+    <tr><td><code>managers/reward/terms/wbt.py</code></td><td><code>motion_heading_alignment</code> reward term, generated command type/config 검사</td></tr>
+    <tr><td><code>managers/command/terms/wbt_gen.py</code></td><td>read-only <code>target_heading_w</code>와 instantaneous error/reward/speed metrics</td></tr>
+    <tr><td><code>config_types/command.py</code></td><td><code>heading_reward_epsilon</code>, <code>heading_error_speed_threshold</code> CLI config</td></tr>
+    <tr><td><code>experiment_gen_terrain.py</code></td><td>terrain preset에만 weight 1.0 term 추가; Stage-5 flat preset에는 term 없음</td></tr>
+    <tr><td><code>test_heading.py</code>, <code>test_tyro_cli.py</code></td><td>정렬/반대/직교/정지/shape와 CLI off switch 회귀 테스트</td></tr>
+  </table></div>
+
+  <div class="callout warn"><b>구현 선택</b>: 논문은 reward weight, denominator epsilon, 정지 상태의 error convention을 공개하지 않는다. 현재 기본값은 terrain preset weight <code>1.0</code>, epsilon <code>1e-6</code>다. 방향이 정의되지 않는 속도 <code>&lt;0.05 m/s</code>에서는 metric만 <code>π/2</code>로 기록하며 reward 식은 바꾸지 않는다. 세 값 모두 config/CLI로 조절 가능하다.</div>
+
+  <h3>On/off 및 실행 검증</h3>
+<pre><code>PY=~/.holosoma_deps/miniconda3/envs/hssim/bin/python
+GEN=logs/motion_gen/terrain_4090/checkpoints/final.pt
+SEED=data/motion_gen/processed_paperscale/lafan1_walk4_subject1.npz
+TRACKER=logs/WholeBodyTracking/20260711_122501-g1_29dof_wbt_gen_manager-locomotion/model_12000.pt
+
+# ON: terrain preset 기본값 weight=1.0
+$PY src/holosoma/holosoma/train_agent.py exp:g1-29dof-wbt-gen-terrain logger:disabled \
+  --training.num-envs 64 --training.checkpoint=$TRACKER \
+  --algo.config.num-learning-iterations 1 --algo.config.save-interval 999999 \
+  --command.setup-terms.motion-command.params.motion-config.generator-checkpoint=$GEN \
+  --command.setup-terms.motion-command.params.motion-config.motion-file=$SEED
+
+# OFF ablation
+# 위 명령에 다음을 추가:
+--reward.terms.motion-heading-alignment.weight=0.0
+
+# unit/config regression
+$PY -m pytest src/holosoma/holosoma/managers/reward/tests/test_heading.py \
+  src/holosoma/holosoma/config_types/tests/test_tyro_cli.py -q
+# 8 passed</code></pre>
+
+  <ul>
+    <li>ON run <code>20260713_080555-g1_29dof_wbt_gen_terrain_manager-locomotion</code>이 iteration 12,000을 완료했다. TensorBoard에 <code>Env/motion/heading_error_rad=1.4921</code>, <code>heading_reward_raw=0.0440</code>, <code>heading_speed_mps=0.4722</code>를 기록했다.</li>
+    <li>같은 ON run에 별도 <code>Episode/rew_motion_heading_alignment=-0.00568</code>, <code>RawEpisode/raw_rew_motion_heading_alignment=-0.28379</code>가 생겼고 기존 position/orientation/body tracking reward tag는 그대로 분리되어 있다.</li>
+    <li>OFF run <code>20260713_080625-g1_29dof_wbt_gen_terrain_manager-locomotion</code>도 동일하게 완료했다. Config weight는 0.0이고 TensorBoard에서 두 episodic heading reward tag만 사라졌다. Error/raw/speed metrics는 평가 비교를 위해 의도적으로 계속 기록한다.</li>
+    <li>두 run 모두 actor 443/critic 575 warm-start 확장, 실제 terrain scan, frozen generator, checkpoint 저장을 유지했다.</li>
+  </ul>
+  <div class="callout ok"><b>Task 7.2 완료</b>: reward ON/OFF 양쪽을 실제 Isaac Sim PPO로 실행했고, heading signal과 기존 reference tracking signal을 독립 tag로 확인했다.</div>
+</section>
+
+<section>
+  <h2>남은 작업</h2>
+  <p>다음 우선순위는 Task 7.1이다. Proprioceptive 네 항목만 5 frame으로 늘리고 generated reference와 terrain scan은 current frame으로 유지해야 한다. 그 다음 Task 7.3에서 positive box/stair/hurdle mesh, 자동 difficulty 상승, terrain-balanced sampling과 success logging을 연결한다.</p>
+</section>
+
+<footer>HoloSoma motion_gen · Stage 7 진행 문서 · 이전: <a href="motion_generator_stage6_ko.html">Stage 6 terrain 연결</a></footer>
+</main>
+</body>
+</html>

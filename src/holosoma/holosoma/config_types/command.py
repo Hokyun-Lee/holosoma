@@ -170,3 +170,17 @@ class GeneratedMotionConfig(MotionConfig):
     the Stage-6 terrain preset enables it and requires a scan-trained
     generator checkpoint.
     """
+
+    heading_reward_epsilon: float = 1.0e-6
+    """Positive denominator epsilon for the heading reward.
+
+    The paper does not publish this value; it is an implementation choice
+    exposed for ablation and numerical tuning.
+    """
+
+    heading_error_speed_threshold: float = 0.05
+    """Speed in m/s below which logged heading error is reported as pi/2.
+
+    This affects metrics only, not the reward equation.  The value is an
+    implementation choice because travel direction is undefined at rest.
+    """

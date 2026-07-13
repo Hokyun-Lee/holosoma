@@ -37,6 +37,7 @@ from loguru import logger
 from holosoma.config_types.command import GeneratedMotionConfig
 from holosoma.managers.command.base import CommandTermBase
 from holosoma.managers.command.terms.wbt import MotionCommand
+from holosoma.managers.reward.terms.heading import velocity_heading_error_rad, velocity_heading_reward
 from holosoma.motion_gen.features import quat_conjugate, quat_mul, quat_normalize, quat_yaw
 from holosoma.motion_gen.sampling import MotionGenerator, MotionGeneratorInput
 from holosoma.utils.rotations import quat_apply, quat_inverse, yaw_quat
@@ -77,6 +78,10 @@ class GeneratedMotionCommand(MotionCommand):
         super().setup()
 
         assert self.gen_cfg.generator_checkpoint, "generator_checkpoint must be set"
+        if self.gen_cfg.heading_reward_epsilon <= 0.0:
+            raise ValueError("heading_reward_epsilon must be positive")
+        if self.gen_cfg.heading_error_speed_threshold < 0.0:
+            raise ValueError("heading_error_speed_threshold must be non-negative")
         self.generator = MotionGenerator.from_checkpoint(
             self.gen_cfg.generator_checkpoint, device=str(self.device), use_ema=self.gen_cfg.use_ema
         )
@@ -359,6 +364,18 @@ class GeneratedMotionCommand(MotionCommand):
 
     def update_metrics(self) -> None:
         super().update_metrics()
+        velocity_xy = self.robot_root_lin_vel_w[:, :2]
+        self.metrics["motion/heading_error_rad"] = velocity_heading_error_rad(
+            velocity_xy,
+            self.target_heading_w,
+            speed_threshold=self.gen_cfg.heading_error_speed_threshold,
+        )
+        self.metrics["motion/heading_reward_raw"] = velocity_heading_reward(
+            velocity_xy,
+            self.target_heading_w,
+            epsilon=self.gen_cfg.heading_reward_epsilon,
+        )
+        self.metrics["motion/heading_speed_mps"] = torch.linalg.vector_norm(velocity_xy, dim=-1)
         if not self._use_sim_terrain_scan:
             return
         scan = self._terrain_state.local_height_scan
@@ -377,6 +394,11 @@ class GeneratedMotionCommand(MotionCommand):
         ).abs()
 
     # ------------------------------------------------------------------ reference properties
+
+    @property
+    def target_heading_w(self) -> torch.Tensor:
+        """Per-environment unit target direction in the world XY frame."""
+        return self._headings
 
     def _at_idx(self, buf: torch.Tensor) -> torch.Tensor:
         return buf[self._arange, self.window_idx.clamp(max=self._horizon - 1)]

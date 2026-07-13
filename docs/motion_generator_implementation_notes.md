@@ -317,6 +317,28 @@ flat scan by a synthetic 30 cm obstacle changed generated features by mean
 Related tests: 51 passed, Ruff clean. The current terrain mix is still the old
 flat/rough/depression set; positive box/stair/hurdle curriculum is Stage 7.3.
 
+## Stage 7.2: world-heading reward (2026-07-13, docs/motion_generator_stage7_ko.html)
+
+The terrain generated-motion preset now adds a separately configurable
+`motion_heading_alignment` term using measured world-frame root velocity and
+the generator's unit world-heading condition:
+`dot(v_xy, d_xy) / (norm(v_xy) + epsilon)`. The Stage-5 flat preset has no new
+reward term. Default terrain weight 1.0 and epsilon 1e-6 are implementation
+choices; CLI weight 0 disables the term. Logged direction error uses pi/2 for
+speed below 0.05 m/s (also a configurable implementation choice) because
+travel direction is undefined at rest; this convention does not alter the
+reward equation.
+
+Both 64-env Isaac runs completed one PPO iteration from the legacy tracker:
+ON `20260713_080555-*` and OFF `20260713_080625-*`. The ON TensorBoard file has
+instantaneous heading error/reward/speed plus independent Episode and
+RawEpisode heading tags; the OFF file retains diagnostic metrics but omits
+only the episodic reward tags. The measured ON values at iteration 12,000 were
+error 1.4921 rad, raw alignment 0.0440, and speed 0.4722 m/s. The terrain scan,
+443/575 checkpoint expansion, and frozen generator remained active. Unit and
+CLI tests: 8 passed. Five-frame proprioceptive history (7.1) and terrain
+curriculum (7.3) remain.
+
 ## Known limitations / not yet verified
 
 - Terrain-aware closed-loop dataflow and PPO startup are validated, but no
