@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+from collections.abc import Mapping
 from pathlib import Path
 
 import tyro
@@ -83,6 +84,30 @@ def select_base_experiment(
     return EXPERIMENT_DEFAULTS[key], key
 
 
+def _saved_generator_checkpoint(motion_config: object | None) -> str:
+    """Read a generator path from typed or checkpoint-deserialized config.
+
+    ``CommandTermCfg.params`` is intentionally typed as ``dict[str, object]``.
+    Consequently, reconstructing an :class:`ExperimentConfig` from checkpoint
+    metadata preserves its nested motion config as a plain mapping, while
+    current presets carry a :class:`GeneratedMotionConfig` dataclass.
+    """
+    if motion_config is None:
+        return ""
+    if isinstance(motion_config, Mapping):
+        value = motion_config.get("generator_checkpoint", "")
+    else:
+        value = getattr(motion_config, "generator_checkpoint", "")
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise TypeError(
+            "Saved motion_config.generator_checkpoint must be a string, "
+            f"got {type(value).__name__}"
+        )
+    return value
+
+
 def _replace_motion_config(
     config: ExperimentConfig,
     *,
@@ -104,9 +129,7 @@ def _replace_motion_config(
     if args.motion_file is not None:
         updates["motion_file"] = args.motion_file
     if isinstance(motion_config, GeneratedMotionConfig):
-        inherited_generator = (
-            getattr(saved_motion_config, "generator_checkpoint", "") if saved_motion_config is not None else ""
-        )
+        inherited_generator = _saved_generator_checkpoint(saved_motion_config)
         generator_checkpoint = args.generator_checkpoint or motion_config.generator_checkpoint or inherited_generator
         if not generator_checkpoint:
             raise ValueError(

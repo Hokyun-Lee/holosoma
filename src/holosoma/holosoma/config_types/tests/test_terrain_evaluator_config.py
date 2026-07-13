@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 import torch
 from holosoma.config_types.command import GeneratedMotionConfig
 from holosoma.config_types.eval_callback import TerrainMetricsConfig
 from holosoma.config_values.wbt.g1.experiment_ablation import (
+    g1_29dof_wbt_ablation_a_fixed_reference,
     g1_29dof_wbt_ablation_b_generator_blind,
     g1_29dof_wbt_ablation_c_full_no_finetune,
 )
@@ -15,6 +18,20 @@ from holosoma.evaluate_wbt_terrain import (
     select_base_experiment,
 )
 from holosoma.managers.curriculum.terms.terrain import target_heading_forward_progress_m
+
+
+def _with_saved_motion_config(motion_config: object):
+    command = g1_29dof_wbt_ablation_b_generator_blind.command
+    setup_terms = dict(command.setup_terms)
+    motion_term = setup_terms["motion_command"]
+    setup_terms["motion_command"] = dataclasses.replace(
+        motion_term,
+        params={**motion_term.params, "motion_config": motion_config},
+    )
+    return dataclasses.replace(
+        g1_29dof_wbt_ablation_b_generator_blind,
+        command=dataclasses.replace(command, setup_terms=setup_terms),
+    )
 
 
 def test_explicit_current_preset_can_override_saved_checkpoint_config() -> None:
@@ -55,6 +72,56 @@ def test_prepare_config_freezes_level_and_generator_sampling() -> None:
     assert prepared.training.seed == 17
     assert prepared.training.export_onnx is False
     assert prepared.training.max_eval_steps == 8 * 500
+
+
+@pytest.mark.parametrize("serialized", [False, True], ids=["dataclass", "checkpoint-dict"])
+def test_generator_checkpoint_inherits_from_saved_motion_config(serialized: bool) -> None:
+    saved_motion_config = g1_29dof_wbt_ablation_b_generator_blind.command.setup_terms[
+        "motion_command"
+    ].params["motion_config"]
+    saved_motion_config = dataclasses.replace(
+        saved_motion_config,
+        generator_checkpoint="saved_generator.pt",
+    )
+    if serialized:
+        saved_motion_config = dataclasses.asdict(saved_motion_config)
+
+    prepared = prepare_terrain_evaluation_config(
+        g1_29dof_wbt_ablation_c_full_no_finetune.get_eval_config(),
+        saved_config=_with_saved_motion_config(saved_motion_config),
+        args=TerrainEvaluationRunConfig(checkpoint="model.pt", episode_count=8),
+    )
+
+    motion_config = prepared.command.setup_terms["motion_command"].params["motion_config"]
+    assert motion_config.generator_checkpoint == "saved_generator.pt"
+
+
+def test_explicit_generator_checkpoint_overrides_saved_value() -> None:
+    prepared = prepare_terrain_evaluation_config(
+        g1_29dof_wbt_ablation_c_full_no_finetune.get_eval_config(),
+        saved_config=_with_saved_motion_config({"generator_checkpoint": "saved_generator.pt"}),
+        args=TerrainEvaluationRunConfig(
+            checkpoint="model.pt",
+            episode_count=8,
+            generator_checkpoint="explicit_generator.pt",
+        ),
+    )
+
+    motion_config = prepared.command.setup_terms["motion_command"].params["motion_config"]
+    assert motion_config.generator_checkpoint == "explicit_generator.pt"
+
+
+def test_fixed_reference_rejects_explicit_generator_checkpoint() -> None:
+    with pytest.raises(ValueError, match="supplied for a fixed-reference command"):
+        prepare_terrain_evaluation_config(
+            g1_29dof_wbt_ablation_a_fixed_reference.get_eval_config(),
+            saved_config=_with_saved_motion_config({"generator_checkpoint": "saved_generator.pt"}),
+            args=TerrainEvaluationRunConfig(
+                checkpoint="model.pt",
+                episode_count=8,
+                generator_checkpoint="explicit_generator.pt",
+            ),
+        )
 
 
 def test_metrics_callback_collection_is_opt_in_and_carries_runtime_controls() -> None:
