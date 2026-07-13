@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, List
 
 import torch
 
-from holosoma.config_types.command import GeneratedMotionConfig
 from holosoma.config_types.reward import RewardTermCfg
 from holosoma.managers.command.terms.wbt import MotionCommand
 from holosoma.managers.reward.base import RewardTermBase
@@ -111,12 +110,10 @@ def motion_global_body_ang_vel(env: WholeBodyTrackingManager, sigma: float) -> t
 
 
 def motion_heading_alignment(env: WholeBodyTrackingManager) -> torch.Tensor:
-    """Reward measured world-frame root velocity along the generated heading."""
+    """Reward measured world-frame root velocity along the command heading."""
     motion_command = _get_motion_command_and_assert_type(env)
     if not hasattr(motion_command, "target_heading_w"):
-        raise TypeError("motion_heading_alignment requires a generated-motion heading command")
-    if not isinstance(motion_command.motion_cfg, GeneratedMotionConfig):
-        raise TypeError("motion_heading_alignment requires GeneratedMotionConfig")
+        raise TypeError("motion_heading_alignment requires a motion command exposing target_heading_w")
     return velocity_heading_reward(
         motion_command.robot_root_lin_vel_w[:, :2],
         motion_command.target_heading_w,

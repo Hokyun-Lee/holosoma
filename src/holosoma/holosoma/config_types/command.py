@@ -130,6 +130,53 @@ class MotionConfig:
     # noise related
     noise_to_initial_pose: NoiseToInitialPoseConfig = field(default_factory=NoiseToInitialPoseConfig)
 
+    heading_reward_epsilon: float = 1.0e-6
+    """Positive denominator epsilon for the optional heading reward.
+
+    The paper does not publish this value; it is an implementation choice
+    exposed for both fixed and generated reference commands.
+    """
+
+    heading_error_speed_threshold: float = 0.05
+    """Measured speed below which logged heading error is reported as pi/2."""
+
+    reference_heading_source: str = "velocity_then_lookahead"
+    """Heading source for fixed references.
+
+    ``velocity_then_lookahead`` uses reference root XY velocity first and a
+    future root displacement second. ``lookahead_then_velocity`` reverses that
+    priority. Generated commands provide their conditioned heading directly.
+    """
+
+    reference_heading_lookahead_s: float = 0.5
+    """Lookahead duration used to infer a fixed reference's travel direction."""
+
+    reference_heading_speed_threshold: float = 0.05
+    """Minimum reference root XY speed considered a valid heading source."""
+
+    reference_heading_displacement_threshold_m: float = 0.02
+    """Minimum lookahead XY displacement considered a valid heading source."""
+
+    reference_heading_stationary_fallback: str = "root_yaw"
+    """Fixed-reference fallback when velocity and lookahead are stationary.
+
+    Supported choices are ``root_yaw`` and ``world_x``.
+    """
+
+    configure_local_terrain_scan: bool = False
+    """Configure a simulator scan for tracker observations in fixed-reference tasks."""
+
+    local_terrain_scan_x_min: float = -0.3
+    local_terrain_scan_x_max: float = 1.3
+    local_terrain_scan_y_min: float = -0.8
+    local_terrain_scan_y_max: float = 0.8
+    local_terrain_scan_spacing: float = 0.1
+    """Local scan grid in metres, flattened x-major with y changing fastest.
+
+    These defaults match the generator dataset contract (17 x 17 = 289 raw
+    absolute world-Z heights). The paper does not publish these values.
+    """
+
 
 @dataclass(frozen=True)
 class GeneratedMotionConfig(MotionConfig):
@@ -179,20 +226,6 @@ class GeneratedMotionConfig(MotionConfig):
     still occur every ``replan_interval_s``.  It defaults off to preserve the
     Stage-5 flat scheduler and is enabled by the terrain preset.  The paper
     does not specify this assertion; exposing it is an implementation choice.
-    """
-
-    heading_reward_epsilon: float = 1.0e-6
-    """Positive denominator epsilon for the heading reward.
-
-    The paper does not publish this value; it is an implementation choice
-    exposed for ablation and numerical tuning.
-    """
-
-    heading_error_speed_threshold: float = 0.05
-    """Speed in m/s below which logged heading error is reported as pi/2.
-
-    This affects metrics only, not the reward equation.  The value is an
-    implementation choice because travel direction is undefined at rest.
     """
 
     body_origin_penetration_threshold_m: float = 0.02

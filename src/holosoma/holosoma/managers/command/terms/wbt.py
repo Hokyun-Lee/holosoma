@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import re
 from pathlib import Path
@@ -12,6 +13,8 @@ from loguru import logger
 from holosoma.config_types.command import MotionConfig, NoiseToInitialPoseConfig
 from holosoma.envs.wbt.wbt_manager import WholeBodyTrackingManager
 from holosoma.managers.command.base import CommandTermBase
+from holosoma.managers.reward.terms.heading import velocity_heading_error_rad, velocity_heading_reward
+from holosoma.motion_gen.terrain import ScanGrid
 from holosoma.utils.file_cache import cached_open
 from holosoma.utils.path import resolve_data_file_path
 from holosoma.utils.rotations import (
@@ -525,6 +528,93 @@ def get_filtered_body_names(body_list: List[str], pattern: str) -> List[str]:
     return [body_name for body_name in body_list if re.match(pattern, body_name)]
 
 
+def select_reference_heading(
+    velocity_xy: torch.Tensor,
+    lookahead_displacement_xy: torch.Tensor,
+    fallback_xy: torch.Tensor,
+    *,
+    source: str,
+    speed_threshold: float,
+    displacement_threshold_m: float,
+) -> torch.Tensor:
+    """Select a unit fixed-reference heading from velocity/lookahead/fallback."""
+    if source not in {"velocity_then_lookahead", "lookahead_then_velocity"}:
+        raise ValueError(f"Unsupported reference_heading_source: {source!r}")
+    if (
+        not math.isfinite(speed_threshold)
+        or not math.isfinite(displacement_threshold_m)
+        or speed_threshold < 0.0
+        or displacement_threshold_m < 0.0
+    ):
+        raise ValueError("Reference heading thresholds must be finite and non-negative")
+    if velocity_xy.shape != lookahead_displacement_xy.shape or velocity_xy.shape != fallback_xy.shape:
+        raise ValueError("Reference heading tensors must have the same shape")
+    if velocity_xy.ndim != 2 or velocity_xy.shape[-1] != 2:
+        raise ValueError(f"Reference heading tensors must have shape (N, 2), got {tuple(velocity_xy.shape)}")
+
+    def _unit(values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        norms = torch.linalg.vector_norm(values, dim=-1, keepdim=True)
+        return values / norms.clamp_min(1.0e-12), norms.squeeze(-1)
+
+    velocity_unit, velocity_norm = _unit(velocity_xy)
+    lookahead_unit, lookahead_norm = _unit(lookahead_displacement_xy)
+    fallback_unit, fallback_norm = _unit(fallback_xy)
+    if torch.any(fallback_norm <= 1.0e-12):
+        raise ValueError("Reference heading fallback vectors must be non-zero")
+
+    heading = fallback_unit
+    velocity_valid = (velocity_norm >= speed_threshold) & (velocity_norm > 1.0e-12)
+    lookahead_valid = (lookahead_norm >= displacement_threshold_m) & (lookahead_norm > 1.0e-12)
+    if source == "velocity_then_lookahead":
+        heading = torch.where(lookahead_valid[:, None], lookahead_unit, heading)
+        heading = torch.where(velocity_valid[:, None], velocity_unit, heading)
+    else:
+        heading = torch.where(velocity_valid[:, None], velocity_unit, heading)
+        heading = torch.where(lookahead_valid[:, None], lookahead_unit, heading)
+    return heading
+
+
+def configure_motion_terrain_scan(motion_cfg: MotionConfig, env: Any) -> ScanGrid | None:
+    """Configure the fixed-command tracker scan using the dataset grid contract."""
+    if not motion_cfg.configure_local_terrain_scan:
+        return None
+    values = {
+        "local_terrain_scan_x_min": motion_cfg.local_terrain_scan_x_min,
+        "local_terrain_scan_x_max": motion_cfg.local_terrain_scan_x_max,
+        "local_terrain_scan_y_min": motion_cfg.local_terrain_scan_y_min,
+        "local_terrain_scan_y_max": motion_cfg.local_terrain_scan_y_max,
+        "local_terrain_scan_spacing": motion_cfg.local_terrain_scan_spacing,
+    }
+    if any(not math.isfinite(value) for value in values.values()):
+        raise ValueError("Local terrain scan grid values must be finite")
+    if motion_cfg.local_terrain_scan_spacing <= 0.0:
+        raise ValueError("local_terrain_scan_spacing must be positive")
+    if motion_cfg.local_terrain_scan_x_max < motion_cfg.local_terrain_scan_x_min:
+        raise ValueError("local terrain scan x_max must be >= x_min")
+    if motion_cfg.local_terrain_scan_y_max < motion_cfg.local_terrain_scan_y_min:
+        raise ValueError("local terrain scan y_max must be >= y_min")
+    for axis, lower, upper in (
+        ("x", motion_cfg.local_terrain_scan_x_min, motion_cfg.local_terrain_scan_x_max),
+        ("y", motion_cfg.local_terrain_scan_y_min, motion_cfg.local_terrain_scan_y_max),
+    ):
+        intervals = (upper - lower) / motion_cfg.local_terrain_scan_spacing
+        if not math.isclose(intervals, round(intervals), abs_tol=1.0e-6):
+            raise ValueError(f"Local terrain scan {axis} extent must be divisible by spacing")
+
+    grid = ScanGrid(
+        x_min=motion_cfg.local_terrain_scan_x_min,
+        x_max=motion_cfg.local_terrain_scan_x_max,
+        y_min=motion_cfg.local_terrain_scan_y_min,
+        y_max=motion_cfg.local_terrain_scan_y_max,
+        spacing=motion_cfg.local_terrain_scan_spacing,
+    )
+    terrain_state = env.terrain_manager.get_state("locomotion_terrain")
+    if terrain_state is None or not hasattr(terrain_state, "configure_local_height_scan"):
+        raise RuntimeError("Fixed-reference terrain scan requires a configurable locomotion terrain state")
+    terrain_state.configure_local_height_scan(grid)
+    return grid
+
+
 class MotionCommand(CommandTermBase):
     def __init__(self, cfg: Any, env: WholeBodyTrackingManager):
         super().__init__(cfg, env)
@@ -541,6 +631,31 @@ class MotionCommand(CommandTermBase):
     def setup(self) -> None:
         self.num_envs = self._env.num_envs
         self.device = self._env.device
+
+        if not math.isfinite(self.motion_cfg.heading_reward_epsilon) or self.motion_cfg.heading_reward_epsilon <= 0.0:
+            raise ValueError("heading_reward_epsilon must be positive")
+        finite_nonnegative = {
+            "heading_error_speed_threshold": self.motion_cfg.heading_error_speed_threshold,
+            "reference_heading_lookahead_s": self.motion_cfg.reference_heading_lookahead_s,
+            "reference_heading_speed_threshold": self.motion_cfg.reference_heading_speed_threshold,
+            "reference_heading_displacement_threshold_m": (
+                self.motion_cfg.reference_heading_displacement_threshold_m
+            ),
+        }
+        for name, value in finite_nonnegative.items():
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be finite and non-negative")
+        if self.motion_cfg.reference_heading_source not in {
+            "velocity_then_lookahead",
+            "lookahead_then_velocity",
+        }:
+            raise ValueError(f"Unsupported reference_heading_source: {self.motion_cfg.reference_heading_source!r}")
+        if self.motion_cfg.reference_heading_stationary_fallback not in {"root_yaw", "world_x"}:
+            raise ValueError(
+                "reference_heading_stationary_fallback must be 'root_yaw' or 'world_x', got "
+                f"{self.motion_cfg.reference_heading_stationary_fallback!r}"
+            )
+        self._local_terrain_scan_grid = configure_motion_terrain_scan(self.motion_cfg, self._env)
 
         robot_body_names = self._env.simulator._body_list  # type: ignore[attr-defined]
         robot_body_names_alias = [FAKE_BODY_NAME_ALIASES.get(bn, bn) for bn in robot_body_names]
@@ -932,6 +1047,32 @@ class MotionCommand(CommandTermBase):
     def root_ang_vel_w(self) -> torch.Tensor:
         return self.motion.body_ang_vel_w[self.time_steps, 0]
 
+    @property
+    def target_heading_w(self) -> torch.Tensor:
+        """Unit travel direction for a fixed reference in the world XY frame."""
+        lookahead_frames = max(0, round(self.motion_cfg.reference_heading_lookahead_s / self._env.dt))
+        per_motion_end = self.motion.motion_end_idx[self.motion_ids]
+        future_steps = torch.minimum(self.time_steps + lookahead_frames, per_motion_end - 1)
+        current_xy = self.motion.body_pos_w[self.time_steps, 0, :2]
+        future_xy = self.motion.body_pos_w[future_steps, 0, :2]
+        displacement_xy = future_xy - current_xy
+
+        if self.motion_cfg.reference_heading_stationary_fallback == "root_yaw":
+            yaw = get_euler_xyz(self.root_quat_w, w_last=True)[2]
+            fallback_xy = torch.stack([torch.cos(yaw), torch.sin(yaw)], dim=-1)
+        else:
+            fallback_xy = torch.zeros_like(displacement_xy)
+            fallback_xy[:, 0] = 1.0
+
+        return select_reference_heading(
+            self.root_lin_vel_w[:, :2],
+            displacement_xy,
+            fallback_xy,
+            source=self.motion_cfg.reference_heading_source,
+            speed_threshold=self.motion_cfg.reference_heading_speed_threshold,
+            displacement_threshold_m=self.motion_cfg.reference_heading_displacement_threshold_m,
+        )
+
     #########################################################################################
     ## Robot from simulator
     #########################################################################################
@@ -1064,6 +1205,19 @@ class MotionCommand(CommandTermBase):
 
         self.metrics["motion/error_joint_pos"] = torch.norm(self.joint_pos - self.robot_joint_pos, dim=-1)
         self.metrics["motion/error_joint_vel"] = torch.norm(self.joint_vel - self.robot_joint_vel, dim=-1)
+
+        velocity_xy = self.robot_root_lin_vel_w[:, :2]
+        self.metrics["motion/heading_error_rad"] = velocity_heading_error_rad(
+            velocity_xy,
+            self.target_heading_w,
+            speed_threshold=self.motion_cfg.heading_error_speed_threshold,
+        )
+        self.metrics["motion/heading_reward_raw"] = velocity_heading_reward(
+            velocity_xy,
+            self.target_heading_w,
+            epsilon=self.motion_cfg.heading_reward_epsilon,
+        )
+        self.metrics["motion/heading_speed_mps"] = torch.linalg.vector_norm(velocity_xy, dim=-1)
 
         if self.motion_cfg.use_adaptive_timesteps_sampler:
             self.adaptive_timesteps_sampler.get_stats()
