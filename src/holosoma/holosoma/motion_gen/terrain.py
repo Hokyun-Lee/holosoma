@@ -37,11 +37,11 @@ class ScanGrid:
 
     @property
     def nx(self) -> int:
-        return int(round((self.x_max - self.x_min) / self.spacing)) + 1
+        return round((self.x_max - self.x_min) / self.spacing) + 1
 
     @property
     def ny(self) -> int:
-        return int(round((self.y_max - self.y_min) / self.spacing)) + 1
+        return round((self.y_max - self.y_min) / self.spacing) + 1
 
     @property
     def dim(self) -> int:
@@ -54,19 +54,115 @@ class ScanGrid:
         gx, gy = np.meshgrid(xs, ys, indexing="ij")
         return np.stack([gx.reshape(-1), gy.reshape(-1)], axis=-1)
 
+    def offsets_tensor(
+        self,
+        *,
+        device: torch.device | str,
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        """Torch equivalent of :meth:`offsets` with identical x-major order."""
+        xs = self.x_min + self.spacing * torch.arange(self.nx, device=device, dtype=dtype)
+        ys = self.y_min + self.spacing * torch.arange(self.ny, device=device, dtype=dtype)
+        gx, gy = torch.meshgrid(xs, ys, indexing="ij")
+        return torch.stack([gx.reshape(-1), gy.reshape(-1)], dim=-1)
+
     def to_array(self) -> np.ndarray:
         return np.array([self.x_min, self.x_max, self.y_min, self.y_max, self.spacing])
 
     @staticmethod
-    def from_array(a: np.ndarray) -> "ScanGrid":
+    def from_array(a: np.ndarray) -> ScanGrid:
         return ScanGrid(*[float(v) for v in np.asarray(a).reshape(-1)])
 
 
+def local_scan_world_xy(
+    root_xy: torch.Tensor,
+    root_yaw: torch.Tensor,
+    grid: ScanGrid,
+) -> torch.Tensor:
+    """Transform a heading-aligned scan grid into world XY coordinates.
+
+    Args:
+        root_xy: ``(N, 2)`` world-frame root positions.
+        root_yaw: ``(N,)`` world-frame root yaw angles in radians.
+        grid: Dataset/checkpoint scan definition.
+
+    Returns:
+        ``(N, grid.dim, 2)`` world XY points.  Index ``x_idx * ny + y_idx``
+        matches :meth:`ScanGrid.offsets`, so y changes fastest.
+    """
+    if root_xy.ndim != 2 or root_xy.shape[-1] != 2:
+        raise ValueError(f"root_xy must have shape (N, 2), got {tuple(root_xy.shape)}")
+    if root_yaw.ndim != 1 or root_yaw.shape[0] != root_xy.shape[0]:
+        raise ValueError(
+            f"root_yaw must have shape ({root_xy.shape[0]},), got {tuple(root_yaw.shape)}"
+        )
+    if not root_xy.is_floating_point() or not root_yaw.is_floating_point():
+        raise TypeError("root_xy and root_yaw must be floating-point tensors")
+    if root_xy.device != root_yaw.device:
+        raise ValueError(f"root_xy and root_yaw must share a device, got {root_xy.device} and {root_yaw.device}")
+
+    offsets = grid.offsets_tensor(device=root_xy.device, dtype=root_xy.dtype)
+    local_x = offsets[:, 0].unsqueeze(0)
+    local_y = offsets[:, 1].unsqueeze(0)
+    c = torch.cos(root_yaw).unsqueeze(1)
+    s = torch.sin(root_yaw).unsqueeze(1)
+    world_x = root_xy[:, :1] + c * local_x - s * local_y
+    world_y = root_xy[:, 1:] + s * local_x + c * local_y
+    return torch.stack([world_x, world_y], dim=-1)
+
+
+def save_height_scan_debug(
+    path: str | Path,
+    *,
+    root_xy: torch.Tensor,
+    root_yaw: torch.Tensor,
+    world_xy: torch.Tensor,
+    terrain_height: torch.Tensor,
+    grid: ScanGrid,
+) -> Path:
+    """Save an auditable local-scan snapshot without changing its values.
+
+    Heights are absolute world-Z values in metres, exactly as supplied to the
+    generator.  No centering or normalization is applied.
+    """
+    expected_world = (root_xy.shape[0], grid.dim, 2)
+    expected_height = (root_xy.shape[0], grid.dim)
+    if tuple(world_xy.shape) != expected_world:
+        raise ValueError(f"world_xy must have shape {expected_world}, got {tuple(world_xy.shape)}")
+    if tuple(terrain_height.shape) != expected_height:
+        raise ValueError(
+            f"terrain_height must have shape {expected_height}, got {tuple(terrain_height.shape)}"
+        )
+    if root_yaw.ndim != 1 or root_yaw.shape[0] != root_xy.shape[0]:
+        raise ValueError(f"root_yaw must have shape ({root_xy.shape[0]},), got {tuple(root_yaw.shape)}")
+
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    def as_numpy(value: torch.Tensor) -> np.ndarray:
+        return value.detach().cpu().numpy()
+
+    np.savez_compressed(
+        output,
+        root_xy=as_numpy(root_xy),
+        root_yaw=as_numpy(root_yaw),
+        local_xy=grid.offsets(),
+        world_xy=as_numpy(world_xy),
+        terrain_height=as_numpy(terrain_height),
+        grid=grid.to_array(),
+        grid_shape=np.asarray([grid.nx, grid.ny], dtype=np.int64),
+        flatten_order=np.asarray("x-major,y-fastest"),
+        height_units=np.asarray("absolute-world-z-metres"),
+    )
+    return output
+
+
 def _parse_obj_vertices(path: Path) -> np.ndarray:
-    verts = []
-    for line in path.read_text().splitlines():
-        if line.startswith("v "):
-            verts.append([float(v) for v in line.split()[1:4]])
+    verts = [
+        [float(v) for v in line.split()[1:4]]
+        for line in path.read_text().splitlines()
+        if line.startswith("v ")
+    ]
     return np.asarray(verts)
 
 
@@ -85,7 +181,7 @@ class BoxTerrain:
             self._edges.append((a, b - a))  # origin, direction per edge
 
     @staticmethod
-    def from_urdf(urdf_path: str | Path) -> "BoxTerrain":
+    def from_urdf(urdf_path: str | Path) -> BoxTerrain:
         urdf_path = Path(urdf_path)
         text = urdf_path.read_text()
         polygons: list[np.ndarray] = []
@@ -160,7 +256,6 @@ def interpolate_scan_heights(
     """
     B = scan.shape[0]
     nx, ny = grid.nx, grid.ny
-    grid2d = scan.view(B, nx, ny)
 
     fx = (query_xy[..., 0] - grid.x_min) / grid.spacing
     fy = (query_xy[..., 1] - grid.y_min) / grid.spacing

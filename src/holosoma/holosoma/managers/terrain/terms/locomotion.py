@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Tuple
 
 from holosoma.managers.terrain.base import TerrainTermBase
+from holosoma.motion_gen.terrain import (
+    ScanGrid,
+    local_scan_world_xy,
+    save_height_scan_debug,
+)
 from holosoma.simulator.shared.terrain import Terrain
 from holosoma.utils import draw, warp_utils
 from holosoma.utils.rotations import quat_apply_yaw
@@ -103,11 +109,97 @@ class TerrainLocomotion(TerrainTermBase):
     def feet_heights(self) -> torch.Tensor:
         return self._feet_heights
 
+    @property
+    def local_height_scan(self) -> torch.Tensor:
+        if not hasattr(self, "_local_height_scan"):
+            raise RuntimeError("Local height scan is not configured. Call configure_local_height_scan() first.")
+        return self._local_height_scan
+
+    @property
+    def local_height_scan_valid(self) -> torch.Tensor:
+        if not hasattr(self, "_local_height_scan_valid"):
+            raise RuntimeError("Local height scan is not configured. Call configure_local_height_scan() first.")
+        return self._local_height_scan_valid
+
     def update_heights(self, env_ids=None):
         idx = env_ids if env_ids is not None else slice(None)
         self._base_heights[idx], self._ray_hits_world_base[idx] = self._get_base_heights(env_ids)
         if self._compute_feet_heights:
             self._feet_heights[idx], self._ray_hits_world_feet[idx] = self._get_feet_heights(env_ids)
+
+    def configure_local_height_scan(self, grid: ScanGrid) -> None:
+        """Allocate the checkpoint-defined generator scan buffers.
+
+        This may run before :meth:`setup` because generated-motion command
+        setup precedes terrain setup in ``BaseTask``.
+        """
+        existing = getattr(self, "_local_scan_grid", None)
+        if existing is not None and existing != grid:
+            raise ValueError(f"Local height scan already configured with {existing}, cannot replace it with {grid}")
+        if existing is not None:
+            return
+
+        self._local_scan_grid = grid
+        self._local_height_scan = torch.zeros(self.num_envs, grid.dim, device=self.device)
+        self._local_scan_world_xy = torch.zeros(self.num_envs, grid.dim, 2, device=self.device)
+        self._local_scan_root_xy = torch.zeros(self.num_envs, 2, device=self.device)
+        self._local_scan_root_yaw = torch.zeros(self.num_envs, device=self.device)
+        self._local_height_scan_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
+    def query_local_height_scan(
+        self,
+        root_xy: torch.Tensor,
+        root_yaw: torch.Tensor,
+        grid: ScanGrid,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return absolute world-Z scan values and their world XY locations."""
+        world_xy = local_scan_world_xy(root_xy, root_yaw, grid)
+        heights = self.query_terrain_heights(world_xy.reshape(-1, 2)).reshape(root_xy.shape[0], grid.dim)
+        return heights, world_xy
+
+    def update_local_height_scan(
+        self,
+        root_xy: torch.Tensor,
+        root_yaw: torch.Tensor,
+        env_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Query and cache scans for all environments or an explicit subset."""
+        if not hasattr(self, "_local_scan_grid"):
+            raise RuntimeError("Local height scan is not configured. Call configure_local_height_scan() first.")
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+        else:
+            env_ids = env_ids.to(device=self.device, dtype=torch.long).reshape(-1)
+        if root_xy.shape[0] != env_ids.numel():
+            raise ValueError(
+                f"root batch ({root_xy.shape[0]}) must match env_ids ({env_ids.numel()})"
+            )
+
+        heights, world_xy = self.query_local_height_scan(root_xy, root_yaw, self._local_scan_grid)
+        self._local_height_scan[env_ids] = heights
+        self._local_scan_world_xy[env_ids] = world_xy
+        self._local_scan_root_xy[env_ids] = root_xy
+        self._local_scan_root_yaw[env_ids] = root_yaw
+        self._local_height_scan_valid[env_ids] = True
+        return heights
+
+    def save_local_height_scan_debug(self, path: str | Path, env_id: int = 0) -> Path:
+        """Persist one cached scan for coordinate/order inspection."""
+        if not hasattr(self, "_local_scan_grid"):
+            raise RuntimeError("Local height scan is not configured. Call configure_local_height_scan() first.")
+        if not 0 <= env_id < self.num_envs:
+            raise IndexError(f"env_id must be in [0, {self.num_envs}), got {env_id}")
+        if not bool(self._local_height_scan_valid[env_id]):
+            raise RuntimeError(f"Local height scan for env {env_id} has not been updated yet.")
+        sl = slice(env_id, env_id + 1)
+        return save_height_scan_debug(
+            path,
+            root_xy=self._local_scan_root_xy[sl],
+            root_yaw=self._local_scan_root_yaw[sl],
+            world_xy=self._local_scan_world_xy[sl],
+            terrain_height=self._local_height_scan[sl],
+            grid=self._local_scan_grid,
+        )
 
     def _get_env_origins(self):
         """Sets environment origins. On rough terrain the origins are defined by the terrain platforms.
@@ -276,3 +368,13 @@ class TerrainLocomotion(TerrainTermBase):
             for j in range(len(self.env.feet_height_indices)):
                 position = self._ray_hits_world_feet[env_id, j].detach().cpu().numpy()
                 draw.draw_sphere(self.env.simulator, position, 0.02, (0, 1, 0), env_id)
+        if hasattr(self, "_local_height_scan_valid") and bool(self._local_height_scan_valid[env_id]):
+            scan_points = torch.cat(
+                [
+                    self._local_scan_world_xy[env_id],
+                    self._local_height_scan[env_id, :, None],
+                ],
+                dim=-1,
+            )
+            for position in scan_points.detach().cpu().numpy():
+                draw.draw_sphere(self.env.simulator, position, 0.012, (0, 0.6, 1), env_id)

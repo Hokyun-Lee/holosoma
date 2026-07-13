@@ -47,8 +47,8 @@ footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted
     </ul>
     <h3>Task 6.2 — Local terrain height scan</h3>
     <ul>
-      <li>☐ flat scan ≈ 0</li><li>☐ box/stair/hurdle 위치 검증</li>
-      <li>☐ yaw 일관성 검증</li><li>☐ visualization/debug 저장</li>
+      <li>☑ flat scan ≈ 0</li><li>☑ box/stair/hurdle 위치 검증</li>
+      <li>☑ yaw 일관성 검증</li><li>☑ visualization/debug 저장</li>
     </ul>
     <h3>Task 6.3 — Generator/tracker 연결</h3>
     <ul>
@@ -99,6 +99,36 @@ $PY src/holosoma/holosoma/train_agent.py exp:g1-29dof-wbt-gen-terrain logger:dis
     <li><code>terrain_locomotion_mix</code> 선택은 Task 6.1의 실행 분리용 구현 선택이다. 현재 구성(flat/rough/low-obstacles)은 최종 box/stair/hurdle curriculum이 아니며 Task 7.3에서 교체한다.</li>
     <li>Task 6.1에서는 observation shape(Actor 154, Critic 286)을 유지해 Stage-5 tracker를 strict-load했다. Generator 입력은 아직 zero scan이며 Task 6.2–6.3에서 실제 scan으로 교체한다.</li>
   </ul>
+</section>
+
+<section>
+  <h2>Task 6.2 결과 <small>(2026-07-13)</small></h2>
+  <p>Dataset 전처리와 simulator가 서로 다른 grid를 갖지 않도록 <code>terrain_4090</code> checkpoint의 <code>cfg.data.scan_grid</code>를 단일 정의로 사용한다. 현재 checkpoint의 값은 x <code>[-0.3, 1.3]</code>, y <code>[-0.8, 0.8]</code>, 간격 <code>0.1 m</code>, <code>17×17=289</code>이다. 이 범위·해상도는 논문 공개값이 아니라 Stage 3에서 정한 구현 선택이다.</p>
+
+  <div class="table"><table>
+    <tr><th>계약</th><th>구현·검증</th></tr>
+    <tr><td>좌표</td><td>robot root XY와 root yaw를 기준으로 local +x=전방, +y=좌측을 world XY로 회전·이동</td></tr>
+    <tr><td>flatten</td><td><code>meshgrid(indexing="ij")</code>, index=<code>x_idx×17+y_idx</code>; 즉 x-major, y-fastest</td></tr>
+    <tr><td>값/단위</td><td>기존 <code>TerrainLocomotion.query_terrain_heights</code>의 GPU Warp raycast hit Z, absolute world Z metre; normalization 없음</td></tr>
+    <tr><td>runtime buffer</td><td>env별 <code>(N,289)</code> scan·<code>(N,289,2)</code> world XY·valid mask를 cache하며 subset env update를 지원</td></tr>
+    <tr><td>debug</td><td>cyan scan-point draw 경로와 metadata를 포함한 compressed NPZ 저장 경로 제공</td></tr>
+  </table></div>
+
+  <h3>검증 명령과 결과</h3>
+<pre><code># CPU coordinate/order/shape/debug-save regression
+$PY -m pytest src/holosoma/holosoma/motion_gen/tests/test_terrain.py -q
+# 10 passed
+
+# simulator와 같은 Trimesh → Warp GPU raycast 경로
+$PY -m holosoma.motion_gen.scripts.validate_sim_height_scan \
+  --out logs/motion_gen/stage6/height_scan_debug.npz
+# flat_max_abs_m=0.00001526
+# obstacle_max_error_m=0.00001526
+# yaw_max_error_m=0.00002289</code></pre>
+
+  <p>GPU 진단 장면은 한 scan 안의 서로 겹치지 않는 y lane에 30 cm box, 10→20→30 cm stair, 60 cm hurdle을 배치했다. 같은 mesh와 robot을 world에서 90° 회전·이동한 뒤에도 local scan 차이는 최대 <code>2.289×10⁻⁵ m</code>였다. 오차는 z=100 m에서 시작하는 float32 ray hit의 수치 오차 범위다. 저장된 <code>height_scan_debug.npz</code>는 <code>terrain_height (1,289)</code>, <code>world_xy (1,289,2)</code>, grid, flatten 순서, 단위 metadata를 포함한다.</p>
+
+  <div class="callout warn"><b>범위 구분</b>: 위 box/stair/hurdle mesh는 scan 좌표·raycast 검증용 deterministic diagnostic이다. Task 6.1의 학습 preset은 아직 기존 flat/rough/depression mix이며, positive obstacle 생성과 난이도 curriculum은 Task 7.3에서 별도로 구현한다. Task 6.2는 scan 취득 API와 검증을 완료했고 generator/tracker가 이 cache를 실제로 소비하는 변경은 Task 6.3이다.</div>
 </section>
 
 <footer>HoloSoma motion_gen · Stage 6 진행 문서 · 이전: <a href="motion_generator_closedloop_ko.html">Stage 5 폐루프</a></footer>
