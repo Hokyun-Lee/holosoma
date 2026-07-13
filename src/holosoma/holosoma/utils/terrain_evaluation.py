@@ -367,6 +367,10 @@ def write_terrain_evaluation_outputs(
                 "terrain height minus rigid-body origin Z, clamped at zero; "
                 "this is not collision-shape or mesh penetration"
             ),
+            "tracker_correction_exemplar": (
+                "first thresholded reduction in the body-origin penetration proxy; "
+                "not proof of collision resolution or intentional policy correction"
+            ),
         },
         "summary": summary,
         "episodes": [_record_to_json(record) for record in accumulator.records],

@@ -56,6 +56,7 @@ class TerrainEvaluationRunConfig:
     fall_root_height_m: float = 0.45
     fall_upright_cosine: float = 0.5
     body_origin_penetration_threshold_m: float = 0.02
+    body_origin_correction_min_improvement_m: float = 0.01
     heading_speed_threshold_mps: float = 0.05
     torch_deterministic: bool = False
     fail_on_incomplete: bool = True
@@ -222,6 +223,7 @@ def build_metrics_callbacks(
         fall_root_height_m=args.fall_root_height_m,
         fall_upright_cosine=args.fall_upright_cosine,
         body_origin_penetration_threshold_m=args.body_origin_penetration_threshold_m,
+        body_origin_correction_min_improvement_m=args.body_origin_correction_min_improvement_m,
         heading_speed_threshold_mps=args.heading_speed_threshold_mps,
         evaluation_seed=args.seed,
         fixed_terrain_level=args.fixed_terrain_level,

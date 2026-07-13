@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 import torch
+from holosoma.config_types.command import GeneratedMotionConfig
+from holosoma.config_types.eval_callback import TerrainMetricsConfig
 from holosoma.config_values.wbt.g1.experiment_ablation import (
     g1_29dof_wbt_ablation_b_generator_blind,
     g1_29dof_wbt_ablation_c_full_no_finetune,
@@ -63,6 +65,7 @@ def test_metrics_callback_collection_is_opt_in_and_carries_runtime_controls() ->
             fixed_terrain_level=4,
             deterministic_generator=True,
             generator_sampling_seed=9,
+            body_origin_correction_min_improvement_m=0.015,
         ),
         variant="D",
     )
@@ -74,6 +77,19 @@ def test_metrics_callback_collection_is_opt_in_and_carries_runtime_controls() ->
     assert config.fixed_terrain_level == 4
     assert config.deterministic_generator
     assert config.generator_sampling_seed == 9
+    assert config.body_origin_correction_min_improvement_m == pytest.approx(0.015)
+
+
+def test_correction_improvement_default_matches_generated_motion_diagnostic() -> None:
+    assert (
+        TerrainMetricsConfig().body_origin_correction_min_improvement_m
+        == GeneratedMotionConfig(
+            motion_file="motion.npz",
+            body_name_ref=["torso"],
+            body_names_to_track=["torso"],
+        ).body_origin_correction_min_improvement_m
+        == 0.01
+    )
 
 
 def test_episode_count_must_split_evenly_across_curriculum_types() -> None:

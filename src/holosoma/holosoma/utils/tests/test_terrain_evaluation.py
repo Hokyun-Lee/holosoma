@@ -12,6 +12,7 @@ import torch
 from holosoma.agents.callbacks.terrain_metrics import TerrainMetricsCallback
 from holosoma.config_types.command import GeneratedMotionConfig
 from holosoma.config_types.eval_callback import TerrainMetricsConfig
+from holosoma.motion_gen.terrain import ScanGrid
 from holosoma.utils.terrain_evaluation import TerrainEvaluationAccumulator, write_terrain_evaluation_outputs
 
 
@@ -187,6 +188,9 @@ class _FakeTerrainState:
         self.terrain_levels = torch.tensor([2])
         self.num_curriculum_levels = 4
         self.set_calls: list[int] = []
+        self.reference_height = 0.0
+        self.robot_height = 0.0
+        self.local_height_scan_configured = False
 
     def set_curriculum_origins(self, env_ids: torch.Tensor, levels) -> None:
         levels_tensor = torch.as_tensor(levels, dtype=torch.long).reshape(-1)
@@ -196,7 +200,14 @@ class _FakeTerrainState:
         self.set_calls.append(int(levels_tensor[0]))
 
     def query_terrain_heights(self, xy: torch.Tensor) -> torch.Tensor:
-        return torch.zeros(xy.shape[0])
+        reference = torch.full(
+            (xy.shape[0],),
+            self.reference_height,
+            dtype=xy.dtype,
+            device=xy.device,
+        )
+        robot = torch.full_like(reference, self.robot_height)
+        return torch.where(xy[:, 0] > 0.5, reference, robot)
 
 
 class _FakeCurriculum:
@@ -255,6 +266,7 @@ def _fake_callback_runtime(tmp_path: Path):
             time_outs=torch.tensor([False]),
         ),
         reward_manager=_FakeRewardManager(),
+        episode_length_buf=torch.tensor([0]),
         _update_log_dict=lambda: None,
     )
     checkpoint = tmp_path / "model.pt"
@@ -296,7 +308,9 @@ def test_fake_env_callback_forces_runtime_controls_and_captures_terminal_pose(tm
     assert curriculum.enabled and curriculum.min_level == curriculum.max_level == 1
     assert command.gen_cfg.deterministic_sampling and command.gen_cfg.sampling_seed == 7
 
-    actor_state = callback.on_pre_eval_env_step({"stop": False})
+    actor_state = callback.on_pre_eval_env_step(
+        {"stop": False, "step": 0, "actions": torch.zeros(1, 29)}
+    )
     assert not actor_state["stop"]
     # The wrapped hook sees this terminal pose before any reset can overwrite it.
     env.simulator.robot_root_states[0, 0] = 1.6
@@ -310,7 +324,111 @@ def test_fake_env_callback_forces_runtime_controls_and_captures_terminal_pose(tm
 
     payload = json.loads((tmp_path / "callback.json").read_text())
     assert payload["metadata"]["deterministic_generator"] is True
+    assert payload["metadata"]["first_correction_exemplar"]["found"] is False
+    assert payload["metadata"]["first_correction_exemplar"]["path"] is None
+    assert not (tmp_path / "callback_first_correction_exemplar.npz").exists()
     # Runtime controls are restored for callers that reuse one algorithm object.
     assert command.gen_cfg.sampling_seed == 99
     assert terrain_state.terrain_levels.tolist() == [2]
     assert not curriculum.enabled
+
+
+def test_first_correction_exemplar_threshold_one_shot_and_serialization(tmp_path: Path) -> None:
+    env, command, terrain_state, _curriculum, loop = _fake_callback_runtime(tmp_path)
+    command.robot_body_pos_w = torch.tensor([[[0.0, 0.0, 0.0]]])
+    command.body_pos_relative_w = torch.tensor([[[1.0, 0.0, 0.0]]])
+    grid = ScanGrid(x_min=0.0, x_max=0.1, y_min=0.0, y_max=0.1, spacing=0.1)
+    terrain_state.local_height_scan_configured = True
+    terrain_state._local_scan_grid = grid
+    terrain_state._local_height_scan = torch.tensor([[0.0, 0.1, 0.2, 0.3]])
+    terrain_state._local_height_scan_valid = torch.tensor([True])
+    terrain_state._local_scan_root_xy = torch.tensor([[0.2, -0.1]])
+    terrain_state._local_scan_root_yaw = torch.tensor([0.3])
+    terrain_state._local_scan_world_xy = torch.arange(8, dtype=torch.float32).reshape(1, 4, 2)
+    terrain_state.local_height_scan = terrain_state._local_height_scan
+    terrain_state.local_height_scan_valid = terrain_state._local_height_scan_valid
+    terrain_state.local_height_scan_root_xy = terrain_state._local_scan_root_xy
+    terrain_state.local_height_scan_root_yaw = terrain_state._local_scan_root_yaw
+
+    callback = TerrainMetricsCallback(
+        TerrainMetricsConfig(
+            enabled=True,
+            output_prefix=str(tmp_path / "correction"),
+            variant="D",
+            episode_count=1,
+            body_origin_penetration_threshold_m=0.02,
+            body_origin_correction_min_improvement_m=0.01,
+        ),
+        loop,
+    )
+    callback.on_pre_evaluate_policy()
+
+    def step(*, step_index: int, reference_height: float, robot_height: float, action: float) -> None:
+        terrain_state.reference_height = reference_height
+        terrain_state.robot_height = robot_height
+        env.episode_length_buf[0] = step_index + 1
+        callback.on_pre_eval_env_step(
+            {
+                "stop": False,
+                "step": step_index,
+                "actions": torch.full((1, 29), action),
+            }
+        )
+        env._update_log_dict()
+
+    # Below reference threshold, then below improvement threshold: neither qualifies.
+    step(step_index=0, reference_height=0.019, robot_height=0.0, action=0.0)
+    assert callback._correction_exemplar is None
+    step(step_index=1, reference_height=0.03, robot_height=0.025, action=1.0)
+    assert callback._correction_exemplar is None
+
+    # First qualifying exact frame is retained even when a stronger case follows.
+    step(step_index=2, reference_height=0.03, robot_height=0.01, action=2.0)
+    assert callback._correction_exemplar is not None
+    step(step_index=3, reference_height=0.08, robot_height=0.0, action=3.0)
+    env.termination_manager.time_outs[0] = True
+    step(step_index=4, reference_height=0.09, robot_height=0.0, action=4.0)
+    callback.on_post_evaluate_policy()
+
+    exemplar_path = tmp_path / "correction_first_correction_exemplar.npz"
+    assert exemplar_path.is_file()
+    with np.load(exemplar_path, allow_pickle=False) as exemplar:
+        assert exemplar["evaluation_step"].item() == 2
+        assert exemplar["episode_step"].item() == 3
+        assert exemplar["env_id"].item() == 0
+        assert exemplar["terrain_type"].item() == "box"
+        assert exemplar["terrain_level"].item() == 0
+        assert exemplar["target_heading_w"].shape == (2,)
+        assert exemplar["action"].shape == (29,)
+        assert np.all(exemplar["action"] == 2.0)
+        assert exemplar["root_state_w"].shape == (13,)
+        assert exemplar["robot_body_pos_w"].shape == (1, 3)
+        assert exemplar["reference_body_pos_w"].shape == (1, 3)
+        np.testing.assert_allclose(exemplar["reference_body_terrain_height_w"], [0.03])
+        np.testing.assert_allclose(exemplar["robot_body_terrain_height_w"], [0.01])
+        np.testing.assert_allclose(exemplar["reference_body_origin_penetration_m"], [0.03])
+        np.testing.assert_allclose(exemplar["robot_body_origin_penetration_m"], [0.01])
+        assert exemplar["reference_max_body_origin_penetration_m"].item() == pytest.approx(0.03)
+        assert exemplar["robot_max_body_origin_penetration_m"].item() == pytest.approx(0.01)
+        assert exemplar["reference_minus_robot_max_body_origin_penetration_m"].item() == pytest.approx(0.02)
+        assert exemplar["correction_proxy_case"].item() is True
+        assert exemplar["local_scan_height_w"].shape == (4,)
+        assert exemplar["local_scan_local_xy"].shape == (4, 2)
+        assert exemplar["local_scan_world_xy"].shape == (4, 2)
+        np.testing.assert_allclose(exemplar["local_scan_root_xy_w"], [0.2, -0.1])
+        assert exemplar["local_scan_root_yaw_w"].item() == pytest.approx(0.3)
+        assert "not collision-shape" in exemplar["proxy_limitation"].item()
+        assert "quaternion_xyzw" in exemplar["root_state_layout"].item()
+
+    payload = json.loads((tmp_path / "correction.json").read_text())
+    exemplar_metadata = payload["metadata"]["first_correction_exemplar"]
+    assert exemplar_metadata["found"] is True
+    assert Path(exemplar_metadata["path"]) == exemplar_path.resolve()
+    assert exemplar_metadata["selection_condition"] == {
+        "reference_max_body_origin_penetration_m_gte": 0.02,
+        "reference_minus_robot_max_body_origin_penetration_m_gte": 0.01,
+    }
+    assert "not proof" in exemplar_metadata["limitation"]
+    step_metrics = payload["summary"]["overall"]["step_metrics"]
+    assert step_metrics["terrain/tracker_body_origin_correction_case"]["max"] == 1.0
+    assert "terrain/tracker_body_origin_correction_proxy_m" in step_metrics

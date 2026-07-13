@@ -113,6 +113,8 @@ class TerrainMetricsConfig:
     fall_root_height_m: float = 0.45
     fall_upright_cosine: float = 0.5
     body_origin_penetration_threshold_m: float = 0.02
+    body_origin_correction_min_improvement_m: float = 0.01
+    """Minimum reference-minus-robot max body-origin proxy improvement saved as an exemplar."""
     heading_speed_threshold_mps: float = 0.05
     evaluation_seed: int = 42
     fixed_terrain_level: int = 0

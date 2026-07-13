@@ -57,6 +57,9 @@ class TerrainMetricsCallback(RLEvalCallback):
         self._original_generator_config: GeneratedMotionConfig | None = None
         self._original_curriculum_runtime: dict[str, Any] | None = None
         self._original_terrain_levels: torch.Tensor | None = None
+        self._current_actions: torch.Tensor | None = None
+        self._current_eval_step = -1
+        self._correction_exemplar: dict[str, np.ndarray] | None = None
         self.accumulator: TerrainEvaluationAccumulator | None = None
         self.output_paths: dict[str, Path] = {}
 
@@ -69,8 +72,16 @@ class TerrainMetricsCallback(RLEvalCallback):
             raise ValueError("fall_root_height_m must be non-negative")
         if not 0.0 <= self.config.fall_upright_cosine <= 1.0:
             raise ValueError("fall_upright_cosine must be in [0, 1]")
-        if self.config.body_origin_penetration_threshold_m < 0.0:
-            raise ValueError("body_origin_penetration_threshold_m must be non-negative")
+        if (
+            not math.isfinite(self.config.body_origin_penetration_threshold_m)
+            or self.config.body_origin_penetration_threshold_m < 0.0
+        ):
+            raise ValueError("body_origin_penetration_threshold_m must be finite and non-negative")
+        if (
+            not math.isfinite(self.config.body_origin_correction_min_improvement_m)
+            or self.config.body_origin_correction_min_improvement_m < 0.0
+        ):
+            raise ValueError("body_origin_correction_min_improvement_m must be finite and non-negative")
         if self.config.heading_speed_threshold_mps < 0.0:
             raise ValueError("heading_speed_threshold_mps must be non-negative")
         if self.config.fixed_terrain_level < 0:
@@ -124,6 +135,19 @@ class TerrainMetricsCallback(RLEvalCallback):
         if accumulator.complete:
             actor_state["stop"] = True
             return actor_state
+
+        actions = actor_state.get("actions")
+        if not torch.is_tensor(actions) or actions.ndim != 2 or actions.shape[0] != self._env.num_envs:
+            actual_shape = None if not torch.is_tensor(actions) else tuple(actions.shape)
+            raise RuntimeError(
+                "Terrain correction exemplars require current actions shaped "
+                f"({self._env.num_envs}, A), got {actual_shape}"
+            )
+        self._current_actions = actions.detach().clone()
+        eval_step = actor_state.get("step", -1)
+        if isinstance(eval_step, bool) or not isinstance(eval_step, int):
+            raise TypeError(f"actor_state['step'] must be an int, got {type(eval_step).__name__}")
+        self._current_eval_step = eval_step
 
         inactive_ids = np.flatnonzero(~accumulator.active_mask)
         if inactive_ids.size:
@@ -350,14 +374,18 @@ class TerrainMetricsCallback(RLEvalCallback):
             if torch.is_tensor(value) and value.shape == (self._env.num_envs,):
                 metrics[name] = value
 
-        metrics.update(self._body_origin_penetration_proxy_metrics())
+        proxy_metrics, proxy_frame = self._body_origin_penetration_proxy_metrics()
+        metrics.update(proxy_metrics)
+        self._capture_first_correction_exemplar(proxy_frame, headings)
         contact_count = self._undesired_contact_count()
         if contact_count is not None:
             metrics["terrain/undesired_contact_body_count"] = contact_count
             metrics["terrain/undesired_contact_any"] = (contact_count > 0).to(dtype=torch.float32)
         return metrics
 
-    def _body_origin_penetration_proxy_metrics(self) -> dict[str, torch.Tensor]:
+    def _body_origin_penetration_proxy_metrics(
+        self,
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
         """Compute scan-independent body-origin diagnostics for every variant.
 
         These values compare point origins with terrain height.  They are not
@@ -366,18 +394,50 @@ class TerrainMetricsCallback(RLEvalCallback):
 
         robot_body_pos = self._motion_command.robot_body_pos_w
         reference_body_pos = self._motion_command.body_pos_relative_w
-        return {
-            **self._origin_penetration_metrics("robot", robot_body_pos),
-            **self._origin_penetration_metrics("reference", reference_body_pos),
+        if robot_body_pos.shape != reference_body_pos.shape:
+            raise RuntimeError(
+                "Robot/reference body arrays must match for the correction proxy, got "
+                f"{tuple(robot_body_pos.shape)} and {tuple(reference_body_pos.shape)}"
+            )
+        robot_height, robot_penetration = self._origin_penetration_frame("robot", robot_body_pos)
+        reference_height, reference_penetration = self._origin_penetration_frame(
+            "reference", reference_body_pos
+        )
+        robot_max = robot_penetration.max(dim=-1).values
+        reference_max = reference_penetration.max(dim=-1).values
+        signed_improvement = reference_max - robot_max
+        correction_case = (
+            (reference_max >= self.config.body_origin_penetration_threshold_m)
+            & (signed_improvement >= self.config.body_origin_correction_min_improvement_m)
+        )
+        metrics = {
+            **self._origin_penetration_metrics("robot", robot_penetration),
+            **self._origin_penetration_metrics("reference", reference_penetration),
+            "terrain/tracker_body_origin_penetration_improvement_m": signed_improvement,
+            "terrain/tracker_body_origin_correction_proxy_m": signed_improvement.clamp_min(0.0),
+            "terrain/tracker_body_origin_correction_case": correction_case.to(dtype=torch.float32),
         }
+        frame = {
+            "robot_body_pos_w": robot_body_pos,
+            "reference_body_pos_w": reference_body_pos,
+            "robot_body_terrain_height_w": robot_height,
+            "reference_body_terrain_height_w": reference_height,
+            "robot_body_origin_penetration_m": robot_penetration,
+            "reference_body_origin_penetration_m": reference_penetration,
+            "correction_case": correction_case,
+        }
+        return metrics, frame
 
-    def _origin_penetration_metrics(self, prefix: str, body_pos: torch.Tensor) -> dict[str, torch.Tensor]:
+    def _origin_penetration_frame(self, prefix: str, body_pos: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if body_pos.ndim != 3 or body_pos.shape[0] != self._env.num_envs or body_pos.shape[-1] != 3:
             raise RuntimeError(f"Expected {prefix} body positions shaped (N, B, 3), got {tuple(body_pos.shape)}")
         terrain_height = self._terrain_state.query_terrain_heights(body_pos[..., :2].reshape(-1, 2)).reshape(
             body_pos.shape[:2]
         )
         penetration = (terrain_height - body_pos[..., 2]).clamp_min(0.0)
+        return terrain_height, penetration
+
+    def _origin_penetration_metrics(self, prefix: str, penetration: torch.Tensor) -> dict[str, torch.Tensor]:
         stem = f"terrain/{prefix}_body_origin_penetration"
         return {
             f"{stem}_mean_m": penetration.mean(dim=-1),
@@ -386,6 +446,148 @@ class TerrainMetricsCallback(RLEvalCallback):
                 penetration > self.config.body_origin_penetration_threshold_m
             ).to(dtype=torch.float32).mean(dim=-1),
         }
+
+    def _capture_first_correction_exemplar(
+        self,
+        frame: dict[str, torch.Tensor],
+        headings: torch.Tensor,
+    ) -> None:
+        """Capture one exact action/pre-reset body-origin proxy improvement frame."""
+        if self._correction_exemplar is not None:
+            return
+        active = torch.as_tensor(
+            self._require_accumulator().active_mask,
+            dtype=torch.bool,
+            device=self._env.device,
+        )
+        candidate_ids = torch.nonzero(frame["correction_case"] & active, as_tuple=False).flatten()
+        if candidate_ids.numel() == 0:
+            return
+        if self._current_actions is None:
+            raise RuntimeError("Current evaluation actions were not captured before the simulator step")
+        env_id = int(candidate_ids[0].item())
+        env_id_tensor = candidate_ids[:1]
+        terrain_types, terrain_levels = self._terrain_labels(env_id_tensor)
+        episode_length_buf = getattr(self._env, "episode_length_buf", None)
+        episode_step = -1 if episode_length_buf is None else int(episode_length_buf[env_id].item())
+        motion_cfg = self._motion_command.motion_cfg
+        body_names = tuple(getattr(motion_cfg, "body_names_to_track", ()))
+        if len(body_names) != frame["robot_body_pos_w"].shape[1]:
+            body_names = tuple(f"body_{index}" for index in range(frame["robot_body_pos_w"].shape[1]))
+        robot_penetration = frame["robot_body_origin_penetration_m"][env_id]
+        reference_penetration = frame["reference_body_origin_penetration_m"][env_id]
+        robot_max = robot_penetration.max()
+        reference_max = reference_penetration.max()
+
+        exemplar: dict[str, np.ndarray] = {
+            "env_id": np.asarray(env_id, dtype=np.int64),
+            "terrain_type": np.asarray(terrain_types[0]),
+            "terrain_level": np.asarray(int(terrain_levels[0].item()), dtype=np.int64),
+            "evaluation_step": np.asarray(self._current_eval_step, dtype=np.int64),
+            "episode_step": np.asarray(episode_step, dtype=np.int64),
+            "target_heading_w": self._to_numpy(headings[env_id]),
+            "action": self._to_numpy(self._current_actions[env_id]),
+            "root_state_w": self._to_numpy(self._env.simulator.robot_root_states[env_id]),
+            "body_names": np.asarray(body_names),
+            "robot_body_pos_w": self._to_numpy(frame["robot_body_pos_w"][env_id]),
+            "reference_body_pos_w": self._to_numpy(frame["reference_body_pos_w"][env_id]),
+            "robot_body_terrain_height_w": self._to_numpy(frame["robot_body_terrain_height_w"][env_id]),
+            "reference_body_terrain_height_w": self._to_numpy(
+                frame["reference_body_terrain_height_w"][env_id]
+            ),
+            "robot_body_origin_penetration_m": self._to_numpy(
+                frame["robot_body_origin_penetration_m"][env_id]
+            ),
+            "reference_body_origin_penetration_m": self._to_numpy(
+                reference_penetration
+            ),
+            "robot_max_body_origin_penetration_m": self._to_numpy(robot_max),
+            "reference_max_body_origin_penetration_m": self._to_numpy(reference_max),
+            "reference_minus_robot_max_body_origin_penetration_m": self._to_numpy(
+                reference_max - robot_max
+            ),
+            "correction_proxy_case": np.asarray(True),
+            "reference_penetration_threshold_m": np.asarray(
+                self.config.body_origin_penetration_threshold_m,
+                dtype=np.float64,
+            ),
+            "minimum_improvement_threshold_m": np.asarray(
+                self.config.body_origin_correction_min_improvement_m,
+                dtype=np.float64,
+            ),
+            "proxy_limitation": np.asarray(
+                "Body-origin terrain-height proxy only; not collision-shape penetration or proof of policy intent."
+            ),
+            "root_state_layout": np.asarray("position_xyz,quaternion_xyzw,linear_velocity_xyz,angular_velocity_xyz"),
+            "body_position_frame_units": np.asarray("world_xyz_metres"),
+            "action_semantics": np.asarray("raw_policy_action_passed_to_environment_step"),
+        }
+        exemplar.update(self._local_scan_exemplar_arrays(env_id))
+        self._validate_correction_exemplar(exemplar)
+        self._correction_exemplar = exemplar
+
+    def _local_scan_exemplar_arrays(self, env_id: int) -> dict[str, np.ndarray]:
+        configured = bool(getattr(self._terrain_state, "local_height_scan_configured", False))
+        empty = {
+            "local_scan_configured": np.asarray(False),
+            "local_scan_valid": np.asarray(False),
+            "local_scan_height_w": np.empty((0,), dtype=np.float32),
+            "local_scan_root_xy_w": np.empty((0,), dtype=np.float32),
+            "local_scan_root_yaw_w": np.asarray(np.nan, dtype=np.float32),
+            "local_scan_local_xy": np.empty((0, 2), dtype=np.float32),
+            "local_scan_world_xy": np.empty((0, 2), dtype=np.float32),
+            "local_scan_grid": np.empty((0,), dtype=np.float32),
+            "local_scan_flatten_order": np.asarray("x-major,y-fastest"),
+            "local_scan_height_units": np.asarray("absolute-world-z-metres"),
+        }
+        if not configured:
+            return empty
+        grid = getattr(self._terrain_state, "_local_scan_grid", None)
+        local_xy = np.empty((0, 2), dtype=np.float32) if grid is None else grid.offsets()
+        grid_array = np.empty((0,), dtype=np.float32) if grid is None else grid.to_array()
+        world_xy = getattr(self._terrain_state, "_local_scan_world_xy", None)
+        world_xy_array = (
+            np.empty((0, 2), dtype=np.float32)
+            if world_xy is None
+            else self._to_numpy(world_xy[env_id])
+        )
+        return {
+            "local_scan_configured": np.asarray(True),
+            "local_scan_valid": np.asarray(bool(self._terrain_state.local_height_scan_valid[env_id])),
+            "local_scan_height_w": self._to_numpy(self._terrain_state.local_height_scan[env_id]),
+            "local_scan_root_xy_w": self._to_numpy(self._terrain_state.local_height_scan_root_xy[env_id]),
+            "local_scan_root_yaw_w": self._to_numpy(self._terrain_state.local_height_scan_root_yaw[env_id]),
+            "local_scan_local_xy": local_xy,
+            "local_scan_world_xy": world_xy_array,
+            "local_scan_grid": grid_array,
+            "local_scan_flatten_order": np.asarray("x-major,y-fastest"),
+            "local_scan_height_units": np.asarray("absolute-world-z-metres"),
+        }
+
+    @staticmethod
+    def _validate_correction_exemplar(exemplar: dict[str, np.ndarray]) -> None:
+        robot_pos = exemplar["robot_body_pos_w"]
+        reference_pos = exemplar["reference_body_pos_w"]
+        if robot_pos.ndim != 2 or robot_pos.shape[-1] != 3 or reference_pos.shape != robot_pos.shape:
+            raise RuntimeError(
+                "Correction exemplar body positions must share shape (B, 3), got "
+                f"{robot_pos.shape} and {reference_pos.shape}"
+            )
+        body_count = robot_pos.shape[0]
+        if exemplar["body_names"].shape != (body_count,):
+            raise RuntimeError(f"Correction exemplar body_names must have shape ({body_count},)")
+        for name in (
+            "robot_body_terrain_height_w",
+            "reference_body_terrain_height_w",
+            "robot_body_origin_penetration_m",
+            "reference_body_origin_penetration_m",
+        ):
+            if exemplar[name].shape != (body_count,):
+                raise RuntimeError(f"Correction exemplar {name} must have shape ({body_count},)")
+        if exemplar["target_heading_w"].shape != (2,):
+            raise RuntimeError("Correction exemplar target_heading_w must have shape (2,)")
+        if exemplar["action"].ndim != 1 or exemplar["root_state_w"].ndim != 1:
+            raise RuntimeError("Correction exemplar action and root_state_w must be one-dimensional")
 
     def _undesired_contact_count(self) -> torch.Tensor | None:
         reward_manager = getattr(self._env, "reward_manager", None)
@@ -433,11 +635,36 @@ class TerrainMetricsCallback(RLEvalCallback):
         output_prefix = Path(self.config.output_prefix)
         if not output_prefix.is_absolute():
             output_prefix = Path(self.training_loop.log_dir) / output_prefix
+        exemplar_path = output_prefix.parent / f"{output_prefix.name}_first_correction_exemplar.npz"
+        exemplar_metadata = {
+            "found": self._correction_exemplar is not None,
+            "path": None,
+            "selection_condition": {
+                "reference_max_body_origin_penetration_m_gte": (
+                    self.config.body_origin_penetration_threshold_m
+                ),
+                "reference_minus_robot_max_body_origin_penetration_m_gte": (
+                    self.config.body_origin_correction_min_improvement_m
+                ),
+            },
+            "simultaneous_match_tie_break": "lowest env_id on the first qualifying timestep",
+            "limitation": (
+                "This is a body-origin terrain-height proxy exemplar, not collision-shape or mesh "
+                "penetration and not proof that the policy intentionally corrected the reference."
+            ),
+        }
+        if self._correction_exemplar is not None:
+            exemplar_path.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(exemplar_path, **self._correction_exemplar)
+            exemplar_metadata["path"] = str(exemplar_path.resolve())
+        metadata["first_correction_exemplar"] = exemplar_metadata
         self.output_paths = write_terrain_evaluation_outputs(
             accumulator=accumulator,
             output_prefix=output_prefix,
             metadata=metadata,
         )
+        if self._correction_exemplar is not None:
+            self.output_paths["correction_exemplar"] = exemplar_path
         self._outputs_written = True
         logger.info(
             "TerrainMetricsCallback: saved {} episodes to {}",
