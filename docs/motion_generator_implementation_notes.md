@@ -642,242 +642,252 @@ The final checkpoint is
 `logs/motion_gen/terrain_robust_fk_4090/checkpoints/final.pt` (290,483,143
 bytes), SHA-256
 `7c63764b771ec43fb5d463d77b6860eee8e46f1db5c0b196554f98cc527ed5fa`.
-Remaining work is to tune the clean/robustness trade-off and train the Stage-9
-tracker closed-loop against this frozen generator. Real collision/contact and
-obstacle crossing must be measured in simulation rather than inferred from
+This is the frozen generator used by the completed Stage-9/10 tracker runs.
+The clean/robustness trade-off still needs tuning, and real collision/contact
+or obstacle crossing must be measured in simulation rather than inferred from
 the Stage-8 body-origin proxy.
 
-## Stage 9: terrain closed-loop PPO wiring and gate (2026-07-13, docs/motion_generator_stage9_ko.html)
+## Stage 9: terrain closed-loop PPO and corrected production (2026-07-14, docs/motion_generator_stage9_ko.html)
 
-`exp:g1-29dof-wbt-gen-terrain` closes the intended loop without changing the
-Stage-5 flat preset: each 50 Hz policy step packs measured simulator state and
-the shared `(N, 289)` local terrain scan, non-bootstrap replans require two
-measured history frames, and every 25 control steps the frozen robust+FK
-generator produces a 25-frame reference with 2-step DDIM. The tracker consumes
-five-frame proprioception plus the current reference/scan; only tracker
-actor/critic parameters enter PPO. A runtime check fails if any generator
-parameter is trainable. Bootstrap uses the seed clip's two frames once; all
-later condition-history frames are simulator measurements.
+`exp:g1-29dof-wbt-gen-terrain` keeps Stage 5 unchanged and closes the intended
+terrain loop. At 50 Hz it packs simulator root/joint/14-body measurements and a
+shared `(N, 289)` local scan; after the one seed-clip bootstrap, every replan
+requires two measured history frames. Every 25 policy steps (0.5 s, 2 Hz) the
+frozen robust+FK generator produces 25 reference frames with two DDIM steps.
+The tracker sees five-frame proprioception plus the current reference and scan,
+and only actor/critic parameters enter PPO. Runtime aborts if any generator
+parameter is trainable. The generator uses internal `wxyz`; Isaac `xyzw` is
+converted only at the boundary.
 
-Curriculum outcome state is schema v3 with
-`progress_semantics="target_heading_signed_v1"`. Each episode captures its
-start XY and normalized target heading, then gates crossing on the maximum
-non-negative signed projection along that fixed heading. Success requires a
-comparable complete episode, no fall/non-timeout termination, at least 90% of
-the 500-step timeout, and at least 1.5 m signed progress. Lateral/backward
-travel therefore cannot count as a crossing. Version-2 radial-progress state
-cannot be converted: migration preserves durable levels/streaks and resets
-crossing/progress state. These gates, thresholds, ten levels, and obstacle
-geometry are implementation choices, not published paper values.
+Curriculum schema v3 uses
+`progress_semantics="target_heading_signed_v1"`: maximum non-negative
+projection from episode-start XY along the episode-start heading. A crossing
+requires no fall/non-timeout termination, at least 90% of the 500-step timeout,
+and at least 1.5 m signed progress. Five successes raise a level and two
+failures lower it within L0..L9. These gates, obstacle geometry, scan grid,
+1,024 envs, and 3,000-update budget are implementation choices, not values
+published in arXiv:2604.17335.
 
-The 64-env Isaac gate at
-`logs/WholeBodyTracking/20260713_100144-g1_29dof_wbt_gen_terrain_manager-locomotion/model_12001.pt`
-(SHA-256
-`d4fe42db0349d630fb4ec9d58979cc37867708fb3d68d2913e216c177264ad41`)
-completed two PPO iterations, crossed a non-bootstrap replan boundary, loaded
-the optimizer, expanded the Stage-5 actor/critic inputs from 154/286 to
-702/834, preserved equal 16-env quotas for flat/box/stair/hurdle, saved v3
-curriculum state, and logged zero trainable generator parameters. This is a
-wiring/checkpoint-migration gate, not evidence of recovery or obstacle
-performance.
+The old 1,024-env run `20260713_100222-*` and old A/E/F runs remain valid only
+for process/checkpoint integrity: their random phase XY could place the robot
+on a neighboring 8 m tile. They are superseded for every terrain performance
+claim. The corrected D run is:
 
-The 1,024-env, 3,000-update production run at
-`logs/WholeBodyTracking/20260713_100222-g1_29dof_wbt_gen_terrain_manager-locomotion/`
-completed naturally after its final save at 2026-07-13 20:38:34 KST. The final
-tracker is `model_14999.pt` (SHA-256
-`7e927e83681e5a5beef73c15dda311faa91fd543cec869a1c2559346b80af10a`),
-with both saved iteration fields equal to 14,999. The frozen generator was
-`logs/motion_gen/terrain_robust_fk_4090/checkpoints/final.pt` (SHA-256
-`7c63764b771ec43fb5d463d77b6860eee8e46f1db5c0b196554f98cc527ed5fa`):
-runtime recorded step 10,000, zero trainable generator parameters, simulator
-scan input, a 25-control-step replan interval, two denoise steps, random
-episode heading, and the fully-measured-history guard. The serialized config
-agrees (`replan_interval_s=0.5`, `use_sim_terrain_scan=true`,
-`require_fully_measured_history=true`, `past_noise_std=0.0`). No
-Traceback/ERROR/OOM/Killed/NaN/Inf marker was present in `train.log`.
+- directory:
+  `logs/WholeBodyTracking/20260713_124451-g1_29dof_wbt_ablation_d_full_terrain_ft-locomotion/`
+- fair checkpoint `model_12500.pt`, SHA-256
+  `2dd0b09c5b6141e1eb0dd627da32102bcbd32865f6a09659d09dd4847a9ba9e0`
+- final checkpoint `model_14999.pt`, SHA-256
+  `d5850aad610b9bebf1613cd9473853225dbc06b23f007230d05e92bd328efad8`
+- natural final save/end: 2026-07-13 23:21:27 KST; both iteration fields
+  equal 14,999; actor/critic inputs are 702/834.
 
-A CPU finite audit of the final checkpoint found zero non-finite values in
-the model (17 tensors / 1,119,803 elements), optimizer (51 / 2,239,623),
-normalizers (8 / 4,610), and curriculum+environment state (22 / 13,533). The
-actor/critic input widths are 702/834. At TensorBoard step 14,999, all 488
-expected scalar tags were present exactly once and finite. Exact selected
-values were: environment/train mean episode length 441.062744/443.559998,
-train reward 21.556921, relative-body/global-ref-position/global-ref-orientation/
-body-linear-velocity rewards 0.853199/0.419497/0.390161/0.678832,
-body-position/reference-position/reference-rotation errors
-0.047850 m/0.055799 m/0.133334 rad, heading error 0.629092 rad, heading raw
-alignment 0.707746, episode heading reward 0.611144, current signed progress
-1.221730 m, contact-any 0.056315, contact-body count 0.067627, mean policy
-noise 0.382510, KL 0.010113, measured-history valid count 1.997396, and two
-denoise steps. The observed replan interval averaged 23.353069 steps because
-episode-reset boundaries shorten it. The correction-case/proxy-improvement
-values 0.113688/0.005820 m remain body-origin proxies, not collision geometry.
+The corrected final checkpoint has zero non-finite elements in model
+(17 tensors / 1,119,803 elements), optimizer (51 / 2,239,623), normalizers
+(8 / 4,610), and environment state (22 / 13,533). Runtime and saved config
+agree on robust+FK generator step 10,000/EMA, zero trainable generator
+parameters, simulator scan, measured-history guard, random heading, 25-step
+replan, two denoise steps, `replan_interval_s=0.5`,
+`use_sim_terrain_scan=true`, `require_fully_measured_history=true`,
+`past_noise_std=0.0`, and training `reanchor=true / phase_horizon_steps=0`.
+Sampling during training was not the deterministic evaluation mode.
 
-The final curriculum state is schema v3 with
-`progress_semantics="target_heading_signed_v1"`, 1,024 envs, and exactly 256
-envs per terrain type. Current L0..L9 distributions (mean level) were flat
-`[0,0,0,0,0,0,0,0,7,249]` (8.972656), box
-`[17,71,87,54,16,9,2,0,0,0]` (2.062500), stair
-`[7,55,81,73,36,2,2,0,0,0]` (2.351562), and hurdle
-`[100,134,22,0,0,0,0,0,0,0]` (0.695312). Cumulative
-episode/success/survival/crossing/failure counts were respectively
-flat 38,654/34,252/35,521/35,187/4,402; box
-42,978/30,597/33,259/33,195/12,381; stair
-46,166/32,610/34,740/33,621/13,556; and hurdle
-42,676/29,601/32,832/32,700/13,075. These adaptive-training aggregates mix
-levels and time, and flat geometry is level-invariant; they are not fixed-level
-performance estimates. From step 12,500 to 14,999 the rollout contact-any
-value changed from 0.055827 to 0.056315, so contact reduction in particular
-cannot be claimed. Episode recovery, fall/contact reduction, obstacle-success
-improvement, and a causal tracker-correction case remain unchecked pending the
-common Stage-10 protocol.
+Reset audit found only configured noise: startup 1,024 starts had maximum
+absolute x/y/radial tile-center offsets 0.049998/0.049995/0.069307 m, with
+0/1,024 outside radius 1 m or the tile. A further 150 logged resets had maxima
+0.049652/0.049930/0.067165 m and 0/150 outside the tile. TensorBoard step
+14,999 contains all 488 expected finite scalar tags. Selected final values are:
+environment/train episode length 478.753876/482.649994, reward/noise/KL
+25.910803/0.353401/0.013253, relative-body/global-position/global-orientation/
+body-linear-velocity rewards 0.930758/0.462019/0.423966/0.769190,
+body/reference-position/reference-rotation errors
+0.047407 m/0.051963 m/0.125945 rad, heading error/raw/episode reward
+0.597559 rad/0.734315/0.695071, signed progress 1.179505 m, mean curriculum
+level 6.484131, contact-any/body-count 0.051717/0.053792 per rollout step,
+measured history 1.998006, denoise steps 2, observed replan interval 23.743694,
+and scan anchor XY/yaw errors 0/1.46368e-7 rad.
 
-The production artifact above predates the terrain-reset alignment correction.
-It remains valid evidence that the 3,000-update process completed naturally,
-the generator stayed frozen, the closed-loop dataflow ran, and all audited
-tensors/scalars were finite. It is **superseded for terrain performance**:
-episode starts inherited raw phase XY instead of being centered on their
-assigned 8 m tile. The corrected D run at
-`logs/WholeBodyTracking/20260713_124451-g1_29dof_wbt_ablation_d_full_terrain_ft-locomotion/`
-is currently in progress, so no final checkpoint result or performance box is
-recorded. Its startup `model_12000.pt` env state already provides an actual
-reanchor check: across 1,024 starts, maximum absolute x/y offsets from tile
-center were 0.049998/0.049995 m, maximum radius was 0.069307 m, and both
-radius>1 m and outside-4 m counts were 0/1,024. Only configured reset noise
-remains.
+The corrected fixed-L1, seed-42 evaluation gives this fair-to-final recovery:
 
-The first actual D-final common-evaluator smoke exposed that Isaac Sim returns
-`robot_root_states` as a `RootStatesProxy`, which has no direct tensor dtype.
-Commit `4f6b71d` slices the proxy before reading the canonical tensor metadata
-and fixes eval-config override propagation. Retry 3 then exited successfully
-and wrote `complete=true` JSON/CSV with the exact four-episode quota (one each
-for flat/box/stair/hurdle at fixed level 1) under
-`logs/terrain_evaluations/stage10/smoke/D_final_l1_retry3*`. All four tiny
-smoke episodes terminated for bad tracking after 8/8/14/8 steps and none
-succeeded. This verifies the real simulator evaluation path, quota, terminal
-capture, and serialization only; it is not a performance result. Follow-up
-audit also found that it used the legacy forced phase zero (a nearly stationary
-seed segment), batch-dependent deterministic DDIM noise, and no motion XY
-reanchoring, so it is superseded even as an evaluation protocol example.
+| metric | D fair `12500` | D final `14999` |
+|---|---:|---:|
+| mean episode length | 415.06 | 473.86 |
+| success / fall | 54% / 17% | 82% / 4% |
+| flat / box / stair / hurdle success | 96 / 24 / 92 / 4% | 100 / 84 / 92 / 52% |
+| episode any-contact OR | 77/100 | 99/100 |
+| contact-step fraction | 1,078/41,506 = 2.597% | 2,440/47,386 = 5.149% |
+| undesired-contact bodies/step | 1,182/41,506 = 0.02848 | 2,516/47,386 = 0.05310 |
 
-Commits `32546da` and `7edf0e1` make Stage-10 evaluation sample a uniform valid
-phase and derive DDIM/condition noise independently from env, episode, and
-replan identity, with batch-order/subset/reset regression coverage. Commits
-`884a26b` and `d748e46` add terrain XY reanchoring and command-specific phase
-horizons. The corrected-protocol real Isaac smoke under
-`logs/terrain_evaluations/stage10/smoke/D_legacy_tracker_l1_corrected_protocol*`
-completed exactly four level-1 episodes (one flat/box/stair/hurdle) and recorded
-3/4 successes. This is only a four-episode protocol smoke using the legacy
-misaligned-trained `model_14999.pt`, not final terrain performance or an
-improvement claim. Its saved correction exemplar is likewise only a body-origin
-proxy from that legacy tracker, not the causal Stage-9 completion case.
+Thus Stage-9 checklist state is: actual state `[x]`, actual terrain `[x]`,
+frozen generator `[x]`, 2-step replan `[x]`, episode-length recovery `[x]`,
+obstacle success increase `[x]`, combined fall/collision decrease `[ ]`, and a
+causal tracker-correction case `[ ]`. Falls improved, but all contact measures
+rose. The last checkbox stays open because the six validated exemplars are
+body-origin height proxies, not collision geometry or evidence of policy
+intent.
 
-HoloSoma's timeout predicate is `episode_length_buf > max_episode_length`.
-Consequently the evaluator accumulator records a default timeout episode as
-501 steps, while the command advances exactly 500 times before reset; the
-correct fixed-reference phase horizon is therefore 500. Commit `523b197`
-changes only the one-env `max_eval_steps` upper bound to 501 steps per episode.
-Its focused suite reported 15 passed and Ruff clean; the broader reset/evaluator
-suite reported 88 passed and Ruff clean.
+The six exemplar visual sets (NPZ plus `_visual.json`/`_visual.png`) are A,
+D-fair, and E under `.../corrected_seed42_v1/common_l1/`, D-final under
+`.../d_final_l1/`, and D-final 30/60 cm under the two `stress_*` directories.
+The D-final box exemplar has reference left-ankle proxy 0.0441646 m and robot
+proxy zero (reference z 0.0358449 m, queried terrain z 0.0800095 m). Reference
+and robot query XY differ, so it is not a clean-crossing or causal-correction
+case. B/C/F/rough had no threshold-qualified frame.
 
-## Stage 10: ablation and evaluation infrastructure (implementation-only, docs/motion_generator_stage10_ko.html)
+## Stage 10: completed ablation and evaluation (2026-07-14, docs/motion_generator_stage10_ko.html)
 
-Six current-config experiment presets define the reduced comparison from the
-same Stage-5 BASE `model_12000.pt`: A fixed generated reference with tracker
-terrain/history and heading reward; B terrain-blind online generator with the
-legacy tracker and no heading reward/update; C full terrain architecture with
-no fine-tuning; D full terrain fine-tuning; E generator terrain only (tracker
-scan removed); and F full terrain setup with heading-reward weight zero. A, D,
-E, and F use the same 501 logged-update reduced budget; B/C use zero new
-updates. Pre-fix A (`20260713_114424-*`), D (`20260713_100222-*`), E
-(`20260713_115808-*`), and F (`20260713_121418-*`) completed and produced
-integrity-valid checkpoints, but all are superseded for terrain performance by
-the reset-alignment finding. Corrected D (`20260713_124451-*`) is in progress;
-corrected A/E/F training and all A-F common performance evaluation remain
-pending.
+All eight Stage-10 result checklist items are complete in the narrow sense that
+the planned runs, exact quotas, artifacts, and latency output exist. Completion
+does not mean every hypothesis was supported. The common comparison uses the
+same Stage-5 BASE, SHA-256
+`fafb20e89962935d4c5980a6531c9cc538cf71fea541496a8723995e48c4819b`.
+A/D/E/F use 501 logged iterations; B/C use zero updates. Corrected checkpoints
+are:
 
-A is intentionally based on the Stage-4 fixed generated-reference NPZ. Its
-heading is inferred from root XY velocity, then a 0.5 s displacement, then
-root yaw; the trajectory is not randomly yaw-rotated. Rotating only the
-heading would make positions/orientations/velocities inconsistent, while a
-correct augmentation must rotate the entire trajectory. A therefore does not
-share B-F's random-heading command distribution, limiting especially the
-interpretation of heading comparisons. Its 997-frame raw reference has 847
-frames (84.955%) outside radius 1 m and 119 (11.936%) outside a 4 m tile
-half-width, with x `[-5.267, 0.175]` m and y `[-0.144, 2.501]` m. Without a
-future horizon, 499 of 996 possible starts (50.10%) could hit clip end before a
-500-step episode. Reanchoring plus horizon 500 removes those two protocol bugs,
-but 51 of the 497 valid start windows (10.26%) naturally travel across a tile
-boundary. That residual is a structural limitation of A's one fixed clip, not
-a reanchor failure.
+- fixed-reference baseline `[x]`; generator-only baseline `[x]`;
+  fine-tuning ablation `[x]`; tracker-terrain-observation ablation `[x]`;
+  heading-reward ablation `[x]`; 30/60 cm evaluation `[x]`; unseen rough
+  evaluation `[x]`; RTX 4090 two-step inference latency `[x]`.
 
-The actual 1,024-env pre-fix episode-start audit found radius>1 m / outside-tile
-counts of 883/575 for legacy Stage-9 `model_12000.pt`, 865/610 for
-`model_14999.pt`, 873/108 for old A `model_12500.pt`, 859/613 for old E, and
-870/620 for old F. Maximum nearest-raw-phase residual was 0.0663 m, consistent
-with reset noise. These exact checkpoint counts are why the old artifacts are
-retained for integrity/architecture provenance but excluded from terrain
-success/fall/contact comparisons.
+- A:
+  `logs/WholeBodyTracking/20260713_142246-g1_29dof_wbt_ablation_a_fixed_reference_terrain_ft-locomotion/model_12500.pt`,
+  SHA-256 `643c00d26bca38e72781bd9ec631ac3345835e171f46b09bb2d17257360521d9`
+- D fair/final: paths and hashes listed in Stage 9 above
+- E:
+  `logs/WholeBodyTracking/20260713_143609-g1_29dof_wbt_ablation_e_generator_terrain_only_ft-locomotion/model_12500.pt`,
+  SHA-256 `96928c758b51d2c577b3d80ff548e213c1214c9ddf68b028cfd0f83bb39a2f4b`
+- F successful retry:
+  `logs/WholeBodyTracking/20260713_145931-g1_29dof_wbt_ablation_f_no_heading_reward_ft-stage10_corrected_seed42/model_12500.pt`,
+  SHA-256 `7b398406e2799bbfb895e17c899419b4871e8613aa7a9050520238fe1b086595`
 
-`evaluate_wbt_terrain.py` supplies a shared fixed-difficulty protocol and
-records schema-versioned JSON, summary CSV, and per-episode CSV with checkpoint
-paths/hashes and raw numerators/denominators. The requested episode total must
-divide evenly by the number of active terrain types; the evaluator assigns an
-exact equal quota (default 100 episodes -> 25 each for flat/box/stair/hurdle)
-and excludes vectorized-step overflow episodes from every denominator. It
-disables adaptive curriculum/env-state restore, uses the episode-start target
-heading for signed progress, and records success/fall/timeout/bad-tracking,
-heading/tracking error, contact, episode length, and body-origin penetration
-proxies. It now samples a uniform valid motion phase, forces reset XY
-reanchoring for every A-F variant, derives a 500-command-advance horizon from
-the effective default 10 s simulator config, and derives deterministic
-generator noise from env/episode/replan identity so batch order, subsets, and
-asynchronous resets do not change another sample. HoloSoma records timeout at
-step 501, but the command advances only 500 times before reset; these are
-intentionally distinct. Training/preset reanchor/horizon semantics are Stage-5
-flat false/0, A true/500, B false/0, and generated terrain C/D/E/F true/0;
-Stage-10 evaluation overrides every A-F variant to true/effective-500. An
-opt-in `rough` type supports unseen-terrain evaluation without changing the
-production four-type training distribution; fixed 0.30/0.60 m obstacle
-overrides are evaluation choices and have not been run.
+The first F attempt `20260713_145342-*` stopped after about four minutes with
+only `model_12000.pt`: W&B offline video tried to launch a missing `ffmpeg` and
+raised `FileNotFoundError: 'ffmpeg'` / `Video encoding failed`. The retry set
+`logger.video=false` and completed. The failed run and all old pre-fix
+A/D/E/F artifacts are integrity-only and excluded from performance tables.
 
-The evaluator can save the first threshold-qualified tracker-correction
-exemplar as compressed NPZ plus JSON metadata. Qualification only means that
-the reference body-origin penetration proxy is at least 0.02 m and the
-reference-minus-robot proxy improves by at least 0.01 m. It is neither
-collision-shape/mesh penetration nor causal evidence that the policy
-intentionally corrected a bad reference. If no frame qualifies, it records
-`found=false` and creates no NPZ. No common evaluation has run, so no exemplar
-result exists yet. The corrected-protocol four-episode smoke did save one
-proxy exemplar, but because it uses the legacy misaligned-trained tracker and
-only four episodes, it is explicitly not accepted as the final causal
-correction case.
+All outputs are rooted at
+`logs/terrain_evaluations/stage10/corrected_seed42_v1/`. Ten evaluator calls
+exited zero with `complete=true` and 100/100 episodes. Common A-F, D-final,
+30 cm, and 60 cm each use exactly 25 flat/box/stair/hurdle episodes; rough uses
+100 rough episodes. The common protocol uses fixed L1, evaluation/training seed
+42, uniform valid phase, XY reanchor, horizon 500, deterministic generator and
+per-env sampling, and generator seed 0. `torch_deterministic=false`, and there
+is only one training/evaluation seed, so no bitwise or multi-seed confidence
+claim is made. Timeout records 501 simulator steps while the command advances
+500 times before reset.
 
-`benchmark_inference_latency.py` implements warm-up and CUDA-event/host-clock
-timing for batch-one 2-step PyTorch generator inference, normalized tracker
-actor inference, and their sequential module calls, including checkpoint
-hashes and mean/median/p95/min/max/std output. Its scope explicitly excludes
-Isaac stepping, terrain raycasts, observation/reference assembly, transfers,
-ONNX/TensorRT, and a functional generator-to-tracker closed loop; sequential
-timing is only two modules called on one CUDA stream. No RTX 4090 benchmark has
-run, so module-only GPU latency and deployment/end-to-end latency remain
-pending. The A-F presets, quota/evaluator/serializer, rough opt-in, exemplar
-writer, and latency helpers passed their documented CPU tests; those tests do
-not constitute simulator evaluation or GPU timing.
+The fresh strict 10-source/5-group report has no protocol mismatch and is:
+
+- `report/stage10_corrected_seed42_v1_contact_clarified.json`, SHA-256
+  `61984e070a206c728a1c9c407342ceda9413a79e86b27529d27aed94ed977fe1`
+- `report/stage10_corrected_seed42_v1_contact_clarified.csv`, SHA-256
+  `89002781ae0961c3707d626c7c6cee33b0f7bbd000799827a1777339a5005013`
+- `report/stage10_corrected_seed42_v1_contact_clarified.md`, SHA-256
+  `f92e31354c10ec8a43182a87896090ae31805b9894923e74bf66a15ebcc4d21f`
+
+The earlier `report/stage10_corrected_seed42_v1.{json,csv,md}` prefix is
+superseded because its contact-column wording is ambiguous; final citations
+must use the `_contact_clarified` prefix above.
+
+Contact columns are deliberately distinct: episode any-contact is an episode
+OR; contact-step fraction is contact-positive recorded steps / all recorded
+steps; bodies/step is the sum of active undesired-contact bodies / all recorded
+steps. None is a mesh-penetration or clean-crossing metric.
+
+| variant | success | fall | survival | episode contact | contact steps | heading rad | body err m | progress m | length |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| A | 30% | 10% | 52% | 93% | 919/37,154 = 2.474% | 1.229 | 0.0556 | 1.336 | 371.54 |
+| B | 0% | 0% | 98% | 50% | 178/49,170 = 0.362% | 1.464 | 0.0260 | 0.224 | 491.70 |
+| C | 0% | 0% | 98% | 55% | 199/49,170 = 0.405% | 1.472 | 0.0262 | 0.207 | 491.70 |
+| D fair | 54% | 17% | 58% | 77% | 1,078/41,506 = 2.597% | 0.467 | 0.0412 | 2.345 | 415.06 |
+| E | 66% | 7% | 70% | 69% | 409/43,874 = 0.932% | 0.474 | 0.0418 | 2.247 | 438.74 |
+| F | 0% | 0% | 99% | 62% | 179/49,632 = 0.361% | 1.555 | 0.0206 | 0.082 | 496.32 |
+
+C-to-D shows that fine-tuning changes directed progress/success, but also
+raises falls/contact. E exceeds fair-budget D (66% vs 54% success, 7% vs 17%
+fall, and lower step contact), so this single-seed experiment does **not** show
+a tracker-terrain-scan benefit; it also cannot prove the scan is harmful. F
+survives but is stationary (0.082 m progress, 1.555 rad heading error, 0%
+success), making heading reward essential for directed locomotion under this
+protocol. A uses one fixed clip rather than B-F's random-heading command
+distribution, limiting its absolute comparison; 10.26% of its valid windows
+naturally cross a tile boundary even after reset reanchoring.
+
+D-final fixed-L1 is 82% success, 4% fall, 89% survival, 99/100 episode contact,
+2,440/47,386 = 5.149% contact steps, 2,516/47,386 = 0.05310 bodies/step,
+0.465 rad heading error, 0.0411 m body error, 2.052 m progress, and 473.86 mean
+steps. Terrain success is flat/box/stair/hurdle 100/84/92/52%.
+
+Stress results are:
+
+- 30 cm all-four L0: 72% success, 6% fall, 86% survival, 100/100 episode
+  contact, 4,180/48,304 = 8.654% contact steps, 2.060 m progress. Hurdle alone
+  is 0/25 success, 6/25 fall, and 22.462% contact steps.
+- 60 cm all-four L0: 69% success, 1% fall, 96% survival, 100/100 episode
+  contact, 6,163/48,837 = 12.620% contact steps, 1.984 m progress. Hurdle alone
+  is 0/25 success, 0/25 fall, and 39.571% contact steps.
+- unseen rough L9: 8% success, 25% fall, 59% survival, 100/100 episode contact,
+  5,225/38,378 = 13.615% contact steps, 1.801 rad heading error, 0.067 m body
+  error, and 0.820 m progress. This is a collapse.
+
+Terrain-specific success/fall/contact-step percentages for
+D-final L1 / 30 cm L0 / 60 cm L0 are: flat
+`100/0/3.154 / 100/0/2.371 / 96/0/2.435`; box
+`84/8/2.855 / 96/0/5.908 / 84/0/6.149`; stair
+`92/0/7.160 / 92/0/5.852 / 96/4/2.952`; and hurdle
+`52/8/7.809 / 0/24/22.462 / 0/0/39.571`.
+
+Thus the overall 30/60 cm success comes from flat/box/stair and is not evidence
+of a clean hurdle crossing. Fixed 0.30/0.60 m geometry, L0/L9, 100 episodes,
+four envs, and 1.5 m threshold are preregistered implementation/evaluation
+choices, not paper values.
+
+The RTX 4090 module-only result is
+`latency/D_final_pytorch_cuda.json` (PyTorch 2.7.0+cu128, float32, batch one,
+two DDIM steps, warm-up 50, measured 500). CUDA-event mean/median/p95 are
+3.25656/3.18248/3.64224 ms for the generator,
+0.07823/0.07434/0.08369 ms for the tracker, and
+3.35356/3.28349/3.67616 ms sequentially. The generator-every-25-steps estimate
+is 0.2084916 ms/policy step. This excludes Isaac Sim, raycasts, observation and
+reference assembly, transfers/bus, a functional connected closed loop,
+ONNX/TensorRT, and deployment end-to-end latency.
+
+W&B project/group is `hkleetony-dyros/WholeBodyTracking` /
+`stage10_corrected_seed42`: [D `8kh28k5w`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/8kh28k5w),
+[A `9i00geyd`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/9i00geyd),
+[E `hkqexdqe`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/hkqexdqe),
+[successful F `qrk3845o`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/qrk3845o),
+[evaluation `jcrms4zx`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/jcrms4zx),
+and [artifact `stage10-corrected-evaluation-seed42:v0`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/artifacts/evaluation/stage10-corrected-evaluation-seed42/v0).
+The failed F offline id `x3xmyiya` was not synchronized. The artifact contains
+the 40 evaluation files uploaded before the six local visual PNG/JSON sets were
+added, so the local output tree is authoritative for those visuals. Commit
+`6c7aacc` makes the three contact denominators explicit in code and fresh
+reports.
 
 ## Known limitations / not yet verified
 
-- Terrain-aware closed-loop dataflow, PPO startup, and a full 1,024-env,
-  3,000-update production run are validated with a finite final checkpoint,
-  but that pre-fix checkpoint is superseded for terrain performance because
-  reset phases could start on adjacent 8 m tiles. The corrected D rerun is in
-  progress. Adaptive curriculum rollouts are not a fixed-level baseline
-  comparison; common-protocol episode recovery, fall/contact reduction,
-  positive obstacle-success improvement, and causal tracker correction remain
-  unmeasured.
-- 2-step DDIM quality is validated offline and used in closed-loop training;
-  a module-only PyTorch CUDA benchmark exists but has not been run. Simulator
-  end-to-end, ONNX/TensorRT, and deployment latency/export remain unverified.
+- Corrected terrain-aware closed-loop training and all Stage-10 rows completed,
+  but every checkpoint/evaluation uses training/evaluation seed 42 once.
+  Episode counts do not capture training-seed variance, so A-F differences and
+  D fair-to-final recovery have no multi-seed confidence interval.
+- E outperforms fair-budget D, so tracker terrain observation benefit is not
+  demonstrated. F's near-stationary survival shows heading reward is necessary
+  for directed locomotion in this protocol, not necessarily every protocol.
+- D-final raises obstacle success and lowers falls, but episode/step/body
+  contact all increase from D fair. The combined fall/collision checklist stays
+  open. Episode contact is an OR, step contact is duration-normalized, and
+  neither proves or disproves a clean crossing.
+- 30/60 cm hurdle success is 0/25 with 22.462%/39.571% contact-step fractions;
+  unseen rough L9 collapses to 8% success and 25% falls. Terrain closed-loop
+  behavior is therefore not robust to these stresses.
+- Six exemplar visuals pass schema/hash/finite/scan validation but remain
+  body-origin height proxies. Collision-shape/mesh intersection, contact-force
+  replay, and policy-intent causality are not verified.
+- 2-step DDIM quality is validated offline, used in closed-loop training, and
+  benchmarked module-only on RTX 4090. Simulator end-to-end, ONNX/TensorRT, and
+  deployment latency/export remain unverified.
 - Paperscale generation reaches 0.0546 m full-val MPJPE (terrain checkpoint
   0.0393 on its earlier fixed validation batch). Stage-8 fixed-history stress
   tests show a real terrain-conditioned response, but foot/knee direction and
@@ -891,11 +901,8 @@ not constitute simulator evaluation or GPU timing.
   checkpoint. The generator uses only standard ops
   (Linear/LayerNorm/TransformerEncoder/sinusoidal embeddings), no known
   blockers, but unverified.
-- Pre-fix Stage-10 A/E/F training completed with integrity-valid checkpoints,
-  but those artifacts are superseded for terrain performance together with old
-  D. Corrected A/E/F training, all preregistered A-F common evaluation, 30/60 cm
-  and unseen-rough evaluation, terrain closed-loop convergence, MuJoCo
-  sim-to-sim, and sim-to-real remain.
+- Pre-fix Stage-9/A/E/F and the first failed F artifacts are retained only for
+  integrity/provenance. MuJoCo sim-to-sim and real G1 verification remain.
 
 Before running any A-F simulator result, the common primary terrain row was
 fixed at curriculum level 1. In the fair-budget D snapshot (`model_12500.pt`),
@@ -911,12 +918,13 @@ results.
 
 1. 29-DoF vs paper's 23-DoF: a future tracker trained on paper-style 23-DoF
    references would need a remap; keeping 29-DoF end-to-end avoids this.
-2. Contact proxy (height+speed thresholds) is crude; real contact labels from
-   physics replay would improve foot-slide supervision.
+2. Active undesired contact is a contact-force threshold from the reward term,
+   while body-origin penetration is a separate height proxy. Neither is exact
+   collision-mesh penetration; geometry/contact replay is still needed.
 3. Receding-horizon distribution shift: structured condition noise is now
-   implemented and narrows the matched noisy-validation gap, and one terrain
-   closed-loop tracker fine-tuning run completed. Fixed-level common evaluation
-   and multi-seed training/evaluation are still required before calling it
-   converged or robust.
+   implemented and narrows the matched noisy-validation gap. Corrected
+   closed-loop training and fixed-level evaluation completed, but multi-seed
+   evaluation and tall-hurdle/rough robustness are still required before
+   calling it converged or robust.
 4. LAFAN1 license (CC BY-NC-ND) forbids redistribution of retargeted
    derivatives — generated models trained on it inherit non-commercial terms.
