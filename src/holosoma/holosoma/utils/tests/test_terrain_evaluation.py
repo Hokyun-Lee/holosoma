@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import dataclasses
 import json
+import random
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -263,6 +264,12 @@ def _fake_callback_runtime(tmp_path: Path):
             "motion/error_joint_pos": torch.tensor([0.6]),
             "motion/error_joint_vel": torch.tensor([0.7]),
         },
+        sampling_counter_reset_count=0,
+    )
+    command.reset_deterministic_sampling_counters = lambda: setattr(
+        command,
+        "sampling_counter_reset_count",
+        command.sampling_counter_reset_count + 1,
     )
     env = SimpleNamespace(
         num_envs=1,
@@ -322,6 +329,9 @@ def test_fake_env_callback_forces_runtime_controls_and_captures_terminal_pose(tm
     assert terrain_state.terrain_levels.tolist() == [1]
     assert curriculum.enabled and curriculum.min_level == curriculum.max_level == 1
     assert command.gen_cfg.deterministic_sampling and command.gen_cfg.sampling_seed == 7
+    assert command.gen_cfg.deterministic_per_env_sampling
+    assert command.gen_cfg.evaluation_phase_mode == "uniform"
+    assert command.sampling_counter_reset_count == 1
 
     actor_state = callback.on_pre_eval_env_step(
         {"stop": False, "step": 0, "actions": torch.zeros(1, 29)}
@@ -339,13 +349,46 @@ def test_fake_env_callback_forces_runtime_controls_and_captures_terminal_pose(tm
 
     payload = json.loads((tmp_path / "callback.json").read_text())
     assert payload["metadata"]["deterministic_generator"] is True
+    assert payload["metadata"]["deterministic_per_env_sampling"] is True
+    assert payload["metadata"]["evaluation_phase_mode"] == "uniform"
     assert payload["metadata"]["first_correction_exemplar"]["found"] is False
     assert payload["metadata"]["first_correction_exemplar"]["path"] is None
     assert not (tmp_path / "callback_first_correction_exemplar.npz").exists()
     # Runtime controls are restored for callers that reuse one algorithm object.
     assert command.gen_cfg.sampling_seed == 99
+    assert not command.gen_cfg.deterministic_per_env_sampling
+    assert command.gen_cfg.evaluation_phase_mode == "zero"
     assert terrain_state.terrain_levels.tolist() == [2]
     assert not curriculum.enabled
+
+
+def test_callback_reseeds_after_setup_reset_independent_of_variant_rng_history(tmp_path: Path) -> None:
+    samples = []
+    for variant, burn_count in (("B", 3), ("D", 19)):
+        torch.manual_seed(999)
+        np.random.seed(999)
+        random.seed(999)
+        torch.rand(burn_count)
+        np.random.rand(burn_count)
+        for _ in range(burn_count):
+            random.random()
+        _env, command, _terrain, _curriculum, loop = _fake_callback_runtime(tmp_path)
+        callback = TerrainMetricsCallback(
+            TerrainMetricsConfig(
+                enabled=True,
+                variant=variant,
+                episode_count=1,
+                evaluation_seed=71,
+            ),
+            loop,
+        )
+        callback.on_pre_evaluate_policy()
+        samples.append((torch.rand(4), np.random.rand(4), [random.random() for _ in range(4)]))
+        assert command.sampling_counter_reset_count == 1
+
+    torch.testing.assert_close(samples[0][0], samples[1][0])
+    np.testing.assert_array_equal(samples[0][1], samples[1][1])
+    assert samples[0][2] == samples[1][2]
 
 
 def test_first_correction_exemplar_threshold_one_shot_and_serialization(tmp_path: Path) -> None:

@@ -49,7 +49,9 @@ class TerrainEvaluationRunConfig:
     output_prefix: str = "terrain_evaluation"
     seed: int = 42
     fixed_terrain_level: int = 0
+    evaluation_phase_mode: str = "uniform"
     deterministic_generator: bool = True
+    deterministic_per_env_sampling: bool = True
     generator_sampling_seed: int = 0
     generator_checkpoint: str | None = None
     motion_file: str | None = None
@@ -125,7 +127,7 @@ def _replace_motion_config(
 
     saved_term = saved_config.command.setup_terms.get("motion_command")
     saved_motion_config = None if saved_term is None else saved_term.params.get("motion_config")
-    updates: dict[str, object] = {}
+    updates: dict[str, object] = {"evaluation_phase_mode": args.evaluation_phase_mode}
     if args.motion_file is not None:
         updates["motion_file"] = args.motion_file
     if isinstance(motion_config, GeneratedMotionConfig):
@@ -140,6 +142,7 @@ def _replace_motion_config(
             {
                 "generator_checkpoint": generator_checkpoint,
                 "deterministic_sampling": args.deterministic_generator,
+                "deterministic_per_env_sampling": args.deterministic_per_env_sampling,
                 "sampling_seed": args.generator_sampling_seed,
             }
         )
@@ -185,8 +188,14 @@ def prepare_terrain_evaluation_config(
     """Apply evaluator invariants after all general ExperimentConfig overrides."""
     if args.episode_count < 1:
         raise ValueError("episode_count must be >= 1")
-    if args.generator_sampling_seed < 0:
-        raise ValueError("generator_sampling_seed must be non-negative")
+    if not 0 <= args.generator_sampling_seed <= (1 << 63) - 1:
+        raise ValueError("generator_sampling_seed must be in [0, 2^63 - 1]")
+    if args.evaluation_phase_mode not in {"zero", "uniform"}:
+        raise ValueError("evaluation_phase_mode must be 'zero' or 'uniform'")
+    if args.deterministic_per_env_sampling and not args.deterministic_generator:
+        raise ValueError(
+            "deterministic_per_env_sampling requires deterministic_generator=True"
+        )
     layout = config.terrain.terrain_term.curriculum_layout
     if layout.enabled:
         terrain_type_count = len(layout.terrain_types)
@@ -250,7 +259,9 @@ def build_metrics_callbacks(
         heading_speed_threshold_mps=args.heading_speed_threshold_mps,
         evaluation_seed=args.seed,
         fixed_terrain_level=args.fixed_terrain_level,
+        evaluation_phase_mode=args.evaluation_phase_mode,
         deterministic_generator=args.deterministic_generator,
+        deterministic_per_env_sampling=args.deterministic_per_env_sampling,
         generator_sampling_seed=args.generator_sampling_seed,
         fail_on_incomplete=args.fail_on_incomplete,
     )

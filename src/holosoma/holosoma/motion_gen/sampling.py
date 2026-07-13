@@ -41,6 +41,36 @@ from holosoma.motion_gen.normalization import FeatureNormalizer
 from holosoma.motion_gen.terrain import ScanGrid
 from holosoma.motion_gen.training import CKPT_FORMAT_VERSION
 
+_TORCH_SEED_MAX = (1 << 63) - 1
+
+
+def per_sample_standard_normal(
+    seeds: torch.Tensor,
+    sample_shape: tuple[int, ...],
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Draw one independent normal sample per seed, preserving row identity.
+
+    A separate generator per row makes the result invariant to batch order
+    and to evaluating a subset of environments.
+    """
+    if seeds.ndim != 1:
+        raise ValueError(f"per-sample seeds must have shape (B,), got {tuple(seeds.shape)}")
+    if seeds.dtype == torch.bool or seeds.dtype.is_floating_point or seeds.dtype.is_complex:
+        raise TypeError("per-sample seeds must use an integer dtype")
+    seed_values = [int(value) for value in seeds.detach().cpu().tolist()]
+    if any(value < 0 or value > _TORCH_SEED_MAX for value in seed_values):
+        raise ValueError(f"per-sample seeds must be in [0, {_TORCH_SEED_MAX}]")
+    rows = []
+    for value in seed_values:
+        generator = torch.Generator(device=device.type).manual_seed(value)
+        rows.append(torch.randn(sample_shape, device=device, dtype=dtype, generator=generator))
+    if not rows:
+        return torch.empty((0, *sample_shape), device=device, dtype=dtype)
+    return torch.stack(rows, dim=0)
+
 
 @dataclass
 class MotionGeneratorInput:
@@ -133,12 +163,17 @@ class MotionGenerator:
         deterministic: bool = False,
         seed: int = 0,
         guidance_scale: float | None = None,
+        per_sample_seeds: torch.Tensor | None = None,
+        init_noise: torch.Tensor | None = None,
     ) -> MotionGeneratorOutput:
         """Generate H future frames (world frame) for a batch of conditions.
 
         num_steps: DDIM steps; None = full-step ancestral DDPM. Few-step
         settings (e.g. the paper's deployment value of 2) are experimental.
         deterministic: fixed-seed initial noise + DDIM eta=0.
+        per_sample_seeds: optional ``(B,)`` integer DDIM seeds whose rows are
+        independent of batch order/subsetting. Requires deterministic DDIM.
+        init_noise: optional explicit DDIM initial noise ``(B, H, D)``.
         guidance_scale: classifier-free guidance (needs cond_dropout > 0 at
         training time); combined linearly in the model's prediction space.
         """
@@ -147,6 +182,35 @@ class MotionGenerator:
         if self.layout.dim != D:
             raise ValueError(f"past_motion feature dim {D} != layout dim {self.layout.dim}")
         H = self.cfg.data.future_frames
+        shape = (bsz, H, self.layout.dim)
+        if per_sample_seeds is not None and init_noise is not None:
+            raise ValueError("per_sample_seeds and init_noise are mutually exclusive")
+        if (per_sample_seeds is not None or init_noise is not None) and num_steps is None:
+            raise ValueError("per-sample seeds and explicit initial noise require DDIM sampling")
+        if per_sample_seeds is not None and not deterministic:
+            raise ValueError("per_sample_seeds requires deterministic=True")
+        if deterministic and not 0 <= seed <= _TORCH_SEED_MAX:
+            raise ValueError(f"seed must be in [0, {_TORCH_SEED_MAX}]")
+        ddim_init_noise = None
+        if per_sample_seeds is not None:
+            if per_sample_seeds.shape != (bsz,):
+                raise ValueError(
+                    f"per_sample_seeds must have shape ({bsz},), got {tuple(per_sample_seeds.shape)}"
+                )
+            ddim_init_noise = per_sample_standard_normal(
+                per_sample_seeds,
+                shape[1:],
+                device=self.device,
+                dtype=past_world.dtype,
+            )
+        elif init_noise is not None:
+            if init_noise.shape != shape:
+                raise ValueError(f"init_noise must have shape {shape}, got {tuple(init_noise.shape)}")
+            if not init_noise.dtype.is_floating_point:
+                raise TypeError("init_noise must use a floating-point dtype")
+            ddim_init_noise = init_noise.to(device=self.device, dtype=past_world.dtype)
+            if not bool(torch.isfinite(ddim_init_noise).all()):
+                raise ValueError("init_noise must contain only finite values")
 
         past_canon, transform = canonicalize_window(past_world, self.layout, anchor_index=P - 1)
         if inp.target_heading is not None:
@@ -180,12 +244,17 @@ class MotionGenerator:
         generator = None
         if deterministic:
             generator = torch.Generator(device=self.device.type).manual_seed(seed)
-        shape = (bsz, H, self.layout.dim)
         if num_steps is None:
             x0_norm = self.diffusion.ddpm_sample(model_fn, shape, self.device, generator=generator)
         else:
             x0_norm = self.diffusion.ddim_sample(
-                model_fn, shape, self.device, num_steps=num_steps, eta=0.0, generator=generator
+                model_fn,
+                shape,
+                self.device,
+                num_steps=num_steps,
+                eta=0.0,
+                generator=generator,
+                init_noise=ddim_init_noise,
             )
 
         canon = self.normalizer.denormalize(x0_norm)

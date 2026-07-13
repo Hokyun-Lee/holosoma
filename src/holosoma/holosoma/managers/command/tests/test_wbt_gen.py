@@ -12,6 +12,7 @@ from holosoma.managers.command.terms.wbt_gen import (
     GeneratedMotionCommand,
     _body_origin_penetration_proxy,
     _validate_nonnegative_finite,
+    derive_per_env_sampling_seed,
 )
 from holosoma.motion_gen.features import FeatureLayout
 from holosoma.motion_gen.sampling import MotionGeneratorOutput
@@ -36,6 +37,7 @@ def _scheduler_command(
     cmd._bootstrap_replan_count = torch.zeros(num_envs, dtype=torch.long)
     cmd._closed_loop_replan_count = torch.zeros(num_envs, dtype=torch.long)
     cmd._last_replan_interval_steps = torch.zeros(num_envs, dtype=torch.long)
+    cmd._replan_ordinal = torch.zeros(num_envs, dtype=torch.long)
     cmd.gen_cfg = SimpleNamespace(
         require_fully_measured_history=require_fully_measured_history
     )
@@ -202,7 +204,7 @@ def test_replan_metrics_include_configured_two_denoise_steps(monkeypatch: pytest
     assert cmd.metrics["generator/denoise_steps"].tolist() == [2.0, 2.0]
 
 
-def test_generated_window_calls_two_step_denoising() -> None:
+def test_generated_window_calls_two_step_denoising_and_preserves_legacy_seed() -> None:
     cmd = GeneratedMotionCommand.__new__(GeneratedMotionCommand)
     layout = FeatureLayout(
         joint_names=("waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint"),
@@ -237,11 +239,18 @@ def test_generated_window_calls_two_step_denoising() -> None:
     cmd._win_body_lin_vel = torch.zeros_like(cmd._win_body_pos)
     cmd._win_ref_quat = torch.zeros(1, horizon, 4)
 
-    calls: list[tuple[int, bool, int, torch.Tensor]] = []
+    calls: list[tuple[int, bool, int, torch.Tensor, torch.Tensor | None]] = []
 
     class _RecordingGenerator:
-        def generate(self, inp, num_steps: int, deterministic: bool, seed: int) -> MotionGeneratorOutput:
-            calls.append((num_steps, deterministic, seed, inp.past_motion.clone()))
+        def generate(
+            self,
+            inp,
+            num_steps: int,
+            deterministic: bool,
+            seed: int,
+            per_sample_seeds: torch.Tensor | None,
+        ) -> MotionGeneratorOutput:
+            calls.append((num_steps, deterministic, seed, inp.past_motion.clone(), per_sample_seeds))
             root_quat = torch.zeros(1, horizon, 4)
             root_quat[..., 0] = 1.0
             return MotionGeneratorOutput(
@@ -261,7 +270,44 @@ def test_generated_window_calls_two_step_denoising() -> None:
     assert calls[0][1] is True
     assert calls[0][2] == 17
     torch.testing.assert_close(calls[0][3], calls[1][3])
+    assert calls[0][4] is None
     assert not torch.equal(calls[0][3], cmd._history)
+
+    cmd.gen_cfg.deterministic_per_env_sampling = True
+    cmd.device = torch.device("cpu")
+    cmd._episode_index = torch.tensor([3])
+    cmd._replan_ordinal = torch.tensor([4])
+    cmd._generate_window(torch.tensor([0]))
+    torch.testing.assert_close(
+        calls[2][4],
+        torch.tensor([derive_per_env_sampling_seed(17, env_id=0, episode=3, replan=4)]),
+    )
+
+
+def test_per_env_seed_changes_for_each_identity_axis() -> None:
+    baseline = derive_per_env_sampling_seed(17, env_id=2, episode=3, replan=4)
+    seeds = {
+        baseline,
+        derive_per_env_sampling_seed(18, env_id=2, episode=3, replan=4),
+        derive_per_env_sampling_seed(17, env_id=3, episode=3, replan=4),
+        derive_per_env_sampling_seed(17, env_id=2, episode=4, replan=4),
+        derive_per_env_sampling_seed(17, env_id=2, episode=3, replan=5),
+    }
+    assert len(seeds) == 5
+    assert all(0 <= seed <= (1 << 63) - 1 for seed in seeds)
+
+
+def test_deterministic_sampling_counter_reset_is_per_environment() -> None:
+    cmd = GeneratedMotionCommand.__new__(GeneratedMotionCommand)
+    cmd.num_envs = 3
+    cmd.device = torch.device("cpu")
+    cmd._episode_index = torch.tensor([4, 5, 6])
+    cmd._replan_ordinal = torch.tensor([7, 8, 9])
+
+    cmd.reset_deterministic_sampling_counters(torch.tensor([1]))
+
+    assert cmd._episode_index.tolist() == [4, -1, 6]
+    assert cmd._replan_ordinal.tolist() == [7, 0, 9]
 
 
 def test_body_origin_penetration_proxy_uses_scan_anchor_yaw_and_validity() -> None:

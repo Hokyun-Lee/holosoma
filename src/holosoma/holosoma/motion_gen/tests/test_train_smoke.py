@@ -130,6 +130,64 @@ def test_generator_inference_and_determinism(trained):
     assert (outs[0].root_pos[0, 0] - anchor).norm() < 10.0
 
 
+def test_per_sample_ddim_is_invariant_to_batch_order_and_subset(trained):
+    gen = MotionGenerator.from_checkpoint(
+        str(trained.out_dir / "checkpoints" / "final.pt"), device="cpu"
+    )
+    past = torch.stack([trained.val_dataset[index]["past"] for index in range(3)])
+    heading = torch.tensor([[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]])
+    terrain = torch.stack(
+        [trained.val_dataset[index]["terrain"] for index in range(3)]
+    )
+    seeds = torch.tensor([101, 202, 303], dtype=torch.long)
+    full = gen.generate(
+        MotionGeneratorInput(
+            past_motion=past,
+            target_heading=heading,
+            terrain_height=terrain,
+        ),
+        num_steps=2,
+        deterministic=True,
+        per_sample_seeds=seeds,
+    )
+    selection = torch.tensor([2, 0])
+    subset = gen.generate(
+        MotionGeneratorInput(
+            past_motion=past[selection],
+            target_heading=heading[selection],
+            terrain_height=terrain[selection],
+        ),
+        num_steps=2,
+        deterministic=True,
+        per_sample_seeds=seeds[selection],
+    )
+    torch.testing.assert_close(full.features[selection], subset.features, rtol=1e-5, atol=1e-6)
+
+
+def test_per_sample_ddim_validation(trained):
+    gen = MotionGenerator.from_checkpoint(
+        str(trained.out_dir / "checkpoints" / "final.pt"), device="cpu"
+    )
+    past = trained.val_dataset[0]["past"].unsqueeze(0)
+    inp = MotionGeneratorInput(past_motion=past)
+    with pytest.raises(ValueError, match="deterministic=True"):
+        gen.generate(inp, num_steps=2, per_sample_seeds=torch.tensor([1]))
+    with pytest.raises(ValueError, match="require DDIM"):
+        gen.generate(
+            inp,
+            num_steps=None,
+            deterministic=True,
+            per_sample_seeds=torch.tensor([1]),
+        )
+    with pytest.raises(ValueError, match="shape"):
+        gen.generate(
+            inp,
+            num_steps=2,
+            deterministic=True,
+            per_sample_seeds=torch.tensor([1, 2]),
+        )
+
+
 def test_receding_horizon_shapes(trained):
     gen = MotionGenerator.from_checkpoint(str(trained.out_dir / "checkpoints" / "final.pt"), device="cpu")
     past = trained.val_dataset[0]["past"]

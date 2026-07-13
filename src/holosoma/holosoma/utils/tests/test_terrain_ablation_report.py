@@ -83,6 +83,8 @@ def _payload(
     per_type_quota: int = 2,
     success_count: int = 3,
     scenario_label: str = "",
+    evaluation_phase_mode: str = "uniform",
+    deterministic_per_env_sampling: bool = True,
 ) -> dict[str, Any]:
     requested_by_type = dict.fromkeys(terrain_types, per_type_quota)
     total = len(terrain_types) * per_type_quota
@@ -104,16 +106,20 @@ def _payload(
             "generator_checkpoint_sha256": "b" * 64,
             "evaluation_seed": evaluation_seed,
             "fixed_terrain_level": fixed_level,
+            "evaluation_phase_mode": evaluation_phase_mode,
             "deterministic_generator": True,
+            "deterministic_per_env_sampling": deterministic_per_env_sampling,
             "generator_sampling_seed": 7,
             "metrics_config": {
                 "variant": variant,
                 "scenario_label": scenario_label,
                 "evaluation_seed": evaluation_seed,
                 "fixed_terrain_level": fixed_level,
+                "evaluation_phase_mode": evaluation_phase_mode,
                 "episode_count": total,
                 "success_distance_m": success_distance_m,
                 "deterministic_generator": True,
+                "deterministic_per_env_sampling": deterministic_per_env_sampling,
                 "generator_sampling_seed": 7,
                 "fall_root_height_m": 0.45,
                 "fall_upright_cosine": 0.5,
@@ -244,10 +250,24 @@ def test_protocol_mismatch_fails_with_field_name(
     [
         (
             [
+                (("metadata", "evaluation_phase_mode"), "zero"),
+                (("metadata", "metrics_config", "evaluation_phase_mode"), "zero"),
+            ],
+            "evaluation_phase_mode",
+        ),
+        (
+            [
                 (("metadata", "deterministic_generator"), False),
                 (("metadata", "metrics_config", "deterministic_generator"), False),
             ],
             "deterministic_generator",
+        ),
+        (
+            [
+                (("metadata", "deterministic_per_env_sampling"), False),
+                (("metadata", "metrics_config", "deterministic_per_env_sampling"), False),
+            ],
+            "deterministic_per_env_sampling",
         ),
         (
             [

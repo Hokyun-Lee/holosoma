@@ -632,6 +632,11 @@ class MotionCommand(CommandTermBase):
         self.num_envs = self._env.num_envs
         self.device = self._env.device
 
+        if self.motion_cfg.evaluation_phase_mode not in {"zero", "uniform"}:
+            raise ValueError(
+                "evaluation_phase_mode must be 'zero' or 'uniform', got "
+                f"{self.motion_cfg.evaluation_phase_mode!r}"
+            )
         if not math.isfinite(self.motion_cfg.heading_reward_epsilon) or self.motion_cfg.heading_reward_epsilon <= 0.0:
             raise ValueError("heading_reward_epsilon must be positive")
         finite_nonnegative = {
@@ -734,17 +739,21 @@ class MotionCommand(CommandTermBase):
 
         # 0. Sample the time steps (and, for the adaptive sampler, the motion id).
         adaptive_global_idx = None
-        if self.motion_cfg.use_adaptive_timesteps_sampler:
+        if self._env.is_evaluating:
+            # Evaluation neither updates nor samples the adaptive failure
+            # distribution. The legacy mode starts at frame zero; Stage-10
+            # evaluation opts into a fresh uniform phase per episode.
+            if self.motion_cfg.evaluation_phase_mode == "zero":
+                phase = torch.zeros(n, device=self.device)
+            else:
+                phase = torch.rand(n, device=self.device)
+        elif self.motion_cfg.use_adaptive_timesteps_sampler:
             # Match BeyondMimic behavior: update failed bins from environments
             # that terminated before this reset, then sample new phases.
-            # Gate the failure-stat update on training mode so evaluation episodes
-            # don't contaminate the training sampler's failure distribution
-            # (the is_evaluating phase-zeroing below only affects sampling, not stats).
-            if not self._env.is_evaluating:
-                episode_failed = self._env.termination_manager.terminated[env_ids]
-                if torch.any(episode_failed):
-                    failed_at_time_step = self.time_steps[env_ids][episode_failed]
-                    self.adaptive_timesteps_sampler.update_current_bin_failed_count(failed_at_time_step)
+            episode_failed = self._env.termination_manager.terminated[env_ids]
+            if torch.any(episode_failed):
+                failed_at_time_step = self.time_steps[env_ids][episode_failed]
+                self.adaptive_timesteps_sampler.update_current_bin_failed_count(failed_at_time_step)
             # The sampler bins failures over the GLOBAL concatenated-motion frame
             # axis, so it must return a global frame index here. The motion id is
             # then derived from that index (NOT chosen independently), keeping the
@@ -753,13 +762,6 @@ class MotionCommand(CommandTermBase):
             phase = None
         else:
             phase = torch.rand(n, device=self.device)
-
-        if self._env.is_evaluating:
-            # Eval forces every env through the uniform/else branch below, which
-            # indexes `phase`, so it must be a real zero tensor even when the
-            # adaptive sampler left it as None.
-            phase = torch.zeros(n, device=self.device)
-            adaptive_global_idx = None  # eval starts every env at its motion's first frame
 
         if adaptive_global_idx is not None:
             # Map global frame index -> (motion_id, time_step). searchsorted on the

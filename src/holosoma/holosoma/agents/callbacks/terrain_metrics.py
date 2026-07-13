@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import random
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from holosoma.agents.callbacks.base_callback import RLEvalCallback
-from holosoma.config_types.command import GeneratedMotionConfig
+from holosoma.config_types.command import GeneratedMotionConfig, MotionConfig
 from holosoma.config_types.eval_callback import TerrainMetricsConfig
 from holosoma.managers.curriculum.terms.terrain import target_heading_forward_progress_m
 from holosoma.managers.observation.terms.wbt import get_projected_gravity
@@ -54,7 +55,7 @@ class TerrainMetricsCallback(RLEvalCallback):
         self._outputs_written = False
         self._fallback_start_root_xy: torch.Tensor | None = None
         self._fallback_episode_heading_w: torch.Tensor | None = None
-        self._original_generator_config: GeneratedMotionConfig | None = None
+        self._original_motion_config: MotionConfig | None = None
         self._original_curriculum_runtime: dict[str, Any] | None = None
         self._original_terrain_levels: torch.Tensor | None = None
         self._current_actions: torch.Tensor | None = None
@@ -86,6 +87,12 @@ class TerrainMetricsCallback(RLEvalCallback):
             raise ValueError("heading_speed_threshold_mps must be non-negative")
         if self.config.fixed_terrain_level < 0:
             raise ValueError("fixed_terrain_level must be non-negative")
+        if self.config.evaluation_phase_mode not in {"zero", "uniform"}:
+            raise ValueError("evaluation_phase_mode must be 'zero' or 'uniform'")
+        if self.config.deterministic_per_env_sampling and not self.config.deterministic_generator:
+            raise ValueError(
+                "deterministic_per_env_sampling requires deterministic_generator=True"
+            )
 
     def _get_env(self) -> Any:
         return self.training_loop._unwrap_env()
@@ -100,6 +107,17 @@ class TerrainMetricsCallback(RLEvalCallback):
         self._terrain_state = self._env.terrain_manager.get_state("locomotion_terrain")
         self._terrain_curriculum = self._env.curriculum_manager.get_term("terrain_curriculum")
         self._enforce_runtime_controls()
+        # PPO performs a setup reset before callbacks and a second reset after
+        # them. Re-seed here so the evaluated episode phases/headings are not
+        # affected by model construction or that setup-only reset.
+        random.seed(self.config.evaluation_seed)
+        np.random.seed(self.config.evaluation_seed % (2**32))
+        torch.manual_seed(self.config.evaluation_seed)
+        reset_sampling_counters = getattr(
+            self._motion_command, "reset_deterministic_sampling_counters", None
+        )
+        if reset_sampling_counters is not None:
+            reset_sampling_counters()
         self._fallback_start_root_xy = torch.zeros(
             self._env.num_envs,
             2,
@@ -184,11 +202,18 @@ class TerrainMetricsCallback(RLEvalCallback):
 
     def _enforce_runtime_controls(self) -> None:
         motion_config = getattr(self._motion_command, "motion_cfg", None)
+        if isinstance(motion_config, MotionConfig):
+            self._original_motion_config = motion_config
+            motion_config = dataclasses.replace(
+                motion_config,
+                evaluation_phase_mode=self.config.evaluation_phase_mode,
+            )
+            self._motion_command.motion_cfg = motion_config
         if isinstance(motion_config, GeneratedMotionConfig):
-            self._original_generator_config = motion_config
             deterministic_config = dataclasses.replace(
                 motion_config,
                 deterministic_sampling=self.config.deterministic_generator,
+                deterministic_per_env_sampling=self.config.deterministic_per_env_sampling,
                 sampling_seed=self.config.generator_sampling_seed,
             )
             self._motion_command.motion_cfg = deterministic_config
@@ -222,9 +247,10 @@ class TerrainMetricsCallback(RLEvalCallback):
             curriculum.max_level = self.config.fixed_terrain_level
 
     def _restore_runtime_controls(self) -> None:
-        if self._original_generator_config is not None:
-            self._motion_command.motion_cfg = self._original_generator_config
-            self._motion_command.gen_cfg = self._original_generator_config
+        if self._original_motion_config is not None:
+            self._motion_command.motion_cfg = self._original_motion_config
+            if isinstance(self._original_motion_config, GeneratedMotionConfig):
+                self._motion_command.gen_cfg = self._original_motion_config
         if self._original_terrain_levels is not None:
             env_ids = torch.arange(self._env.num_envs, dtype=torch.long, device=self._env.device)
             self._terrain_state.set_curriculum_origins(env_ids, self._original_terrain_levels)
@@ -625,7 +651,9 @@ class TerrainMetricsCallback(RLEvalCallback):
             "checkpoint_sha256": checkpoint_sha256(checkpoint_path),
             "evaluation_seed": self.config.evaluation_seed,
             "fixed_terrain_level": self.config.fixed_terrain_level,
+            "evaluation_phase_mode": self.config.evaluation_phase_mode,
             "deterministic_generator": self.config.deterministic_generator,
+            "deterministic_per_env_sampling": self.config.deterministic_per_env_sampling,
             "generator_sampling_seed": self.config.generator_sampling_seed,
             "metrics_config": dataclasses.asdict(self.config),
             "evaluation_config": serialized_config,

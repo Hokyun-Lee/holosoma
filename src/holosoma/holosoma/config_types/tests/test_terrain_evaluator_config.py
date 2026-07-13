@@ -60,7 +60,9 @@ def test_prepare_config_freezes_level_and_generator_sampling() -> None:
         args=args,
     )
     motion_config = prepared.command.setup_terms["motion_command"].params["motion_config"]
+    assert motion_config.evaluation_phase_mode == "uniform"
     assert motion_config.deterministic_sampling
+    assert motion_config.deterministic_per_env_sampling
     assert motion_config.sampling_seed == 23
     assert motion_config.generator_checkpoint == "robust_generator.pt"
     terrain_params = prepared.curriculum.setup_terms["terrain_curriculum"].params
@@ -124,6 +126,37 @@ def test_fixed_reference_rejects_explicit_generator_checkpoint() -> None:
         )
 
 
+def test_fixed_reference_uses_uniform_evaluation_phase() -> None:
+    prepared = prepare_terrain_evaluation_config(
+        g1_29dof_wbt_ablation_a_fixed_reference.get_eval_config(),
+        saved_config=g1_29dof_wbt_ablation_a_fixed_reference,
+        args=TerrainEvaluationRunConfig(checkpoint="model.pt", episode_count=8),
+    )
+    motion_config = prepared.command.setup_terms["motion_command"].params["motion_config"]
+    assert motion_config.evaluation_phase_mode == "uniform"
+
+
+def test_invalid_evaluation_phase_mode_is_rejected() -> None:
+    with pytest.raises(ValueError, match="evaluation_phase_mode"):
+        prepare_terrain_evaluation_config(
+            g1_29dof_wbt_ablation_a_fixed_reference.get_eval_config(),
+            saved_config=g1_29dof_wbt_ablation_a_fixed_reference,
+            args=TerrainEvaluationRunConfig(
+                checkpoint="model.pt",
+                episode_count=8,
+                evaluation_phase_mode="middle",
+            ),
+        )
+
+
+def test_non_stage10_defaults_preserve_legacy_sampling() -> None:
+    motion_config = g1_29dof_wbt_ablation_b_generator_blind.command.setup_terms[
+        "motion_command"
+    ].params["motion_config"]
+    assert motion_config.evaluation_phase_mode == "zero"
+    assert not motion_config.deterministic_per_env_sampling
+
+
 def test_metrics_callback_collection_is_opt_in_and_carries_runtime_controls() -> None:
     callbacks = build_metrics_callbacks(
         TerrainEvaluationRunConfig(
@@ -142,7 +175,9 @@ def test_metrics_callback_collection_is_opt_in_and_carries_runtime_controls() ->
     assert config.variant == "D"
     assert config.episode_count == 12
     assert config.fixed_terrain_level == 4
+    assert config.evaluation_phase_mode == "uniform"
     assert config.deterministic_generator
+    assert config.deterministic_per_env_sampling
     assert config.generator_sampling_seed == 9
     assert config.body_origin_correction_min_improvement_m == pytest.approx(0.015)
 

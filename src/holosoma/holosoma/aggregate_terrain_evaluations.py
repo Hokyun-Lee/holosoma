@@ -26,7 +26,9 @@ PROTOCOL_FIELDS = (
     "success_distance_m",
     "episode_quotas",
     "terrain_types",
+    "evaluation_phase_mode",
     "deterministic_generator",
+    "deterministic_per_env_sampling",
     "generator_sampling_seed",
     "fall_root_height_m",
     "fall_upright_cosine",
@@ -116,7 +118,9 @@ class _LoadedEvaluation:
     checkpoint_sha256: str
     generator_checkpoint_path: str | None
     generator_checkpoint_sha256: str | None
+    evaluation_phase_mode: str
     deterministic_generator: bool | None
+    deterministic_per_env_sampling: bool
     generator_sampling_seed: int | None
     protocol: dict[str, Any]
     quota: dict[str, Any]
@@ -327,9 +331,19 @@ def _metadata_protocol(metadata: Mapping[str, Any], summary: Mapping[str, Any], 
         summary.get("requested_per_terrain_type"),
         f"{context}.summary.requested_per_terrain_type",
     )
+    evaluation_phase_mode = metadata.get("evaluation_phase_mode")
+    if evaluation_phase_mode not in {"zero", "uniform"}:
+        raise TerrainReportError(
+            f"{context}.metadata.evaluation_phase_mode must be 'zero' or 'uniform'"
+        )
     deterministic_generator = metadata.get("deterministic_generator")
     if not isinstance(deterministic_generator, bool):
         raise TerrainReportError(f"{context}.metadata.deterministic_generator must be boolean")
+    deterministic_per_env_sampling = metadata.get("deterministic_per_env_sampling")
+    if not isinstance(deterministic_per_env_sampling, bool):
+        raise TerrainReportError(
+            f"{context}.metadata.deterministic_per_env_sampling must be boolean"
+        )
     generator_sampling_seed = _integer(
         metadata.get("generator_sampling_seed"),
         f"{context}.metadata.generator_sampling_seed",
@@ -382,7 +396,9 @@ def _metadata_protocol(metadata: Mapping[str, Any], summary: Mapping[str, Any], 
         ("fixed_terrain_level", fixed_level),
         ("episode_count", requested_total),
         ("success_distance_m", success_distance),
+        ("evaluation_phase_mode", evaluation_phase_mode),
         ("deterministic_generator", deterministic_generator),
+        ("deterministic_per_env_sampling", deterministic_per_env_sampling),
         ("generator_sampling_seed", generator_sampling_seed),
     )
     for name, expected in consistency_fields:
@@ -402,7 +418,9 @@ def _metadata_protocol(metadata: Mapping[str, Any], summary: Mapping[str, Any], 
             "per_terrain_type": requested_by_type,
         },
         "terrain_types": list(requested_by_type),
+        "evaluation_phase_mode": evaluation_phase_mode,
         "deterministic_generator": deterministic_generator,
+        "deterministic_per_env_sampling": deterministic_per_env_sampling,
         "generator_sampling_seed": generator_sampling_seed,
         "fall_root_height_m": fall_root_height,
         "fall_upright_cosine": fall_upright_cosine,
@@ -558,6 +576,16 @@ def load_terrain_evaluation(path: str | Path) -> _LoadedEvaluation:
     deterministic = metadata.get("deterministic_generator")
     if deterministic is not None and not isinstance(deterministic, bool):
         raise TerrainReportError(f"{context}.metadata.deterministic_generator must be boolean")
+    evaluation_phase_mode = metadata.get("evaluation_phase_mode")
+    if evaluation_phase_mode not in {"zero", "uniform"}:
+        raise TerrainReportError(
+            f"{context}.metadata.evaluation_phase_mode must be 'zero' or 'uniform'"
+        )
+    deterministic_per_env_sampling = metadata.get("deterministic_per_env_sampling")
+    if not isinstance(deterministic_per_env_sampling, bool):
+        raise TerrainReportError(
+            f"{context}.metadata.deterministic_per_env_sampling must be boolean"
+        )
     sampling_seed = metadata.get("generator_sampling_seed")
     if sampling_seed is not None:
         sampling_seed = _integer(sampling_seed, f"{context}.metadata.generator_sampling_seed", minimum=0)
@@ -571,7 +599,9 @@ def load_terrain_evaluation(path: str | Path) -> _LoadedEvaluation:
         checkpoint_sha256=str(checkpoint_sha),
         generator_checkpoint_path=metadata.get("generator_checkpoint_path"),
         generator_checkpoint_sha256=generator_sha,
+        evaluation_phase_mode=evaluation_phase_mode,
         deterministic_generator=deterministic,
+        deterministic_per_env_sampling=deterministic_per_env_sampling,
         generator_sampling_seed=sampling_seed,
         protocol=protocol,
         quota=quota,
@@ -627,7 +657,9 @@ def _evaluation_json(item: _LoadedEvaluation) -> dict[str, Any]:
         "checkpoint_sha256": item.checkpoint_sha256,
         "generator_checkpoint_path": item.generator_checkpoint_path,
         "generator_checkpoint_sha256": item.generator_checkpoint_sha256,
+        "evaluation_phase_mode": item.evaluation_phase_mode,
         "deterministic_generator": item.deterministic_generator,
+        "deterministic_per_env_sampling": item.deterministic_per_env_sampling,
         "generator_sampling_seed": item.generator_sampling_seed,
         "protocol": item.protocol,
         "quota": item.quota,
@@ -714,7 +746,11 @@ def _iter_report_rows(report: Mapping[str, Any]):
                 "evaluation_seed": result["protocol"]["evaluation_seed"],
                 "fixed_terrain_level": result["protocol"]["fixed_terrain_level"],
                 "success_distance_m": result["protocol"]["success_distance_m"],
+                "evaluation_phase_mode": result["protocol"]["evaluation_phase_mode"],
                 "deterministic_generator": result["protocol"]["deterministic_generator"],
+                "deterministic_per_env_sampling": result["protocol"][
+                    "deterministic_per_env_sampling"
+                ],
                 "generator_sampling_seed": result["protocol"]["generator_sampling_seed"],
                 "fall_root_height_m": result["protocol"]["fall_root_height_m"],
                 "fall_upright_cosine": result["protocol"]["fall_upright_cosine"],
@@ -824,7 +860,9 @@ def write_ablation_report(report: Mapping[str, Any], output_prefix: str | Path) 
         "evaluation_seed",
         "fixed_terrain_level",
         "success_distance_m",
+        "evaluation_phase_mode",
         "deterministic_generator",
+        "deterministic_per_env_sampling",
         "generator_sampling_seed",
         "fall_root_height_m",
         "fall_upright_cosine",

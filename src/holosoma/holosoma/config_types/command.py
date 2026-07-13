@@ -100,6 +100,13 @@ class MotionConfig:
     When non-empty, takes precedence over motion_file."""
 
     # motion sampling related
+    evaluation_phase_mode: str = "zero"
+    """Initial motion phase used while evaluating.
+
+    ``zero`` preserves the legacy first-frame behavior. ``uniform`` samples a
+    fresh phase within each selected motion at every episode reset.
+    """
+
     use_adaptive_timesteps_sampler: bool = False
     """During training, whether to prioritize training on motion segments where the robot fails often."""
 
@@ -206,6 +213,13 @@ class GeneratedMotionConfig(MotionConfig):
 
     Disabled by default to preserve the stochastic Stage-5--9 behavior.  The
     common Stage-10 evaluator enables it explicitly.
+    """
+
+    deterministic_per_env_sampling: bool = False
+    """Derive DDIM noise independently from env/episode/replan identity.
+
+    Disabled by default so Stage-5--9 retain their legacy batch-seeded
+    sampling. Stage-10 enables this together with deterministic sampling.
     """
 
     sampling_seed: int = 0

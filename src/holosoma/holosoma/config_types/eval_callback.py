@@ -118,7 +118,9 @@ class TerrainMetricsConfig:
     heading_speed_threshold_mps: float = 0.05
     evaluation_seed: int = 42
     fixed_terrain_level: int = 0
+    evaluation_phase_mode: str = "uniform"
     deterministic_generator: bool = True
+    deterministic_per_env_sampling: bool = True
     generator_sampling_seed: int = 0
     fail_on_incomplete: bool = True
 

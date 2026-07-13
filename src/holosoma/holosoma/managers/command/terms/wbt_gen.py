@@ -39,10 +39,60 @@ from holosoma.managers.command.base import CommandTermBase
 from holosoma.managers.command.terms.wbt import MotionCommand
 from holosoma.managers.reward.terms.heading import velocity_heading_error_rad, velocity_heading_reward
 from holosoma.motion_gen.features import quat_conjugate, quat_mul, quat_normalize, quat_yaw
-from holosoma.motion_gen.sampling import MotionGenerator, MotionGeneratorInput
+from holosoma.motion_gen.sampling import (
+    MotionGenerator,
+    MotionGeneratorInput,
+    per_sample_standard_normal,
+)
 from holosoma.motion_gen.terrain import ScanGrid, interpolate_scan_heights
 from holosoma.utils.rotations import quat_apply, quat_inverse, yaw_quat
 from holosoma.utils.rotations import quat_mul as quat_mul_sim
+
+_UINT64_MASK = (1 << 64) - 1
+_TORCH_SEED_MAX = (1 << 63) - 1
+_ENV_DOMAIN = 0x243F6A8885A308D3
+_EPISODE_DOMAIN = 0x13198A2E03707344
+_REPLAN_DOMAIN = 0xA4093822299F31D0
+_CONDITION_NOISE_DOMAIN = 0x082EFA98EC4E6C89
+
+
+def _splitmix64(value: int) -> int:
+    value = (value + 0x9E3779B97F4A7C15) & _UINT64_MASK
+    value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & _UINT64_MASK
+    value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & _UINT64_MASK
+    return (value ^ (value >> 31)) & _UINT64_MASK
+
+
+def derive_per_env_sampling_seed(base_seed: int, env_id: int, episode: int, replan: int) -> int:
+    """Return a stable signed-safe seed for one generated reference window.
+
+    Components are domain-separated and mixed with unsigned 64-bit wraparound;
+    the high bit is cleared because ``torch.Generator.manual_seed`` accepts
+    non-negative signed-int64 seeds portably.
+    """
+    components = {
+        "base_seed": base_seed,
+        "env_id": env_id,
+        "episode": episode,
+        "replan": replan,
+    }
+    for name, value in components.items():
+        if value < 0:
+            raise ValueError(f"{name} must be non-negative, got {value}")
+    if base_seed > _TORCH_SEED_MAX:
+        raise ValueError(f"base_seed must be <= {_TORCH_SEED_MAX}")
+    value = _splitmix64(base_seed)
+    for component, domain in (
+        (env_id, _ENV_DOMAIN),
+        (episode, _EPISODE_DOMAIN),
+        (replan, _REPLAN_DOMAIN),
+    ):
+        value = _splitmix64(value ^ domain ^ (component & _UINT64_MASK))
+    return value & _TORCH_SEED_MAX
+
+
+def _condition_noise_seed(sample_seed: int) -> int:
+    return _splitmix64(sample_seed ^ _CONDITION_NOISE_DOMAIN) & _TORCH_SEED_MAX
 
 
 def _wxyz(q_xyzw: torch.Tensor) -> torch.Tensor:
@@ -130,8 +180,12 @@ class GeneratedMotionCommand(MotionCommand):
             raise ValueError("heading_reward_epsilon must be positive")
         if self.gen_cfg.heading_error_speed_threshold < 0.0:
             raise ValueError("heading_error_speed_threshold must be non-negative")
-        if self.gen_cfg.sampling_seed < 0:
-            raise ValueError("sampling_seed must be non-negative")
+        if not 0 <= self.gen_cfg.sampling_seed <= _TORCH_SEED_MAX:
+            raise ValueError(f"sampling_seed must be in [0, {_TORCH_SEED_MAX}]")
+        if self.gen_cfg.deterministic_per_env_sampling and not self.gen_cfg.deterministic_sampling:
+            raise ValueError(
+                "deterministic_per_env_sampling requires deterministic_sampling=True"
+            )
         _validate_nonnegative_finite(
             self.gen_cfg.body_origin_penetration_threshold_m,
             "body_origin_penetration_threshold_m",
@@ -242,6 +296,8 @@ class GeneratedMotionCommand(MotionCommand):
         self._closed_loop_replan_count = torch.zeros(N, dtype=torch.long, device=dev)
         self._last_replan_interval_steps = torch.zeros(N, dtype=torch.long, device=dev)
         self._headings = torch.zeros(N, 2, device=dev)
+        self._episode_index = torch.full((N,), -1, dtype=torch.long, device=dev)
+        self._replan_ordinal = torch.zeros(N, dtype=torch.long, device=dev)
         self._arange = torch.arange(N, device=dev)
         if not self._use_sim_terrain_scan:
             self._terrain_zeros = torch.zeros(N, gen_data_cfg.terrain_dim, device=dev)
@@ -254,6 +310,7 @@ class GeneratedMotionCommand(MotionCommand):
             f"terrain={'sim_scan' if self._use_sim_terrain_scan else 'stage5_flat_zeros'}, "
             f"measured_history_guard={self.gen_cfg.require_fully_measured_history}, "
             f"deterministic_sampling={self.gen_cfg.deterministic_sampling}, "
+            f"deterministic_per_env_sampling={self.gen_cfg.deterministic_per_env_sampling}, "
             f"sampling_seed={self.gen_cfg.sampling_seed}, "
             "trainable generator params=0"
         )
@@ -303,20 +360,68 @@ class GeneratedMotionCommand(MotionCommand):
     @torch.no_grad()
     def _generate_window(self, env_ids: torch.Tensor) -> None:
         """Generate a reference window from the currently stored history."""
+        per_sample_seeds = None
+        if (
+            self.gen_cfg.deterministic_sampling
+            and getattr(self.gen_cfg, "deterministic_per_env_sampling", False)
+        ):
+            env_values = [int(value) for value in env_ids.detach().cpu().tolist()]
+            episode_values = [
+                int(value) for value in self._episode_index[env_ids].detach().cpu().tolist()
+            ]
+            replan_values = [
+                int(value) for value in self._replan_ordinal[env_ids].detach().cpu().tolist()
+            ]
+            per_sample_seeds = torch.tensor(
+                [
+                    derive_per_env_sampling_seed(
+                        self.gen_cfg.sampling_seed,
+                        env_id,
+                        episode,
+                        replan,
+                    )
+                    for env_id, episode, replan in zip(
+                        env_values, episode_values, replan_values, strict=True
+                    )
+                ],
+                dtype=torch.long,
+                device=self.device,
+            )
         past = self._history[env_ids].clone()
         if self.gen_cfg.past_noise_std > 0:
             # Paper: conditions are perturbed during training for robustness.
             condition_generator = None
-            if self.gen_cfg.deterministic_sampling:
-                condition_generator = torch.Generator(device=past.device.type).manual_seed(
-                    self.gen_cfg.sampling_seed + 1
+            if per_sample_seeds is not None:
+                condition_seeds = torch.tensor(
+                    [
+                        _condition_noise_seed(int(value))
+                        for value in per_sample_seeds.detach().cpu().tolist()
+                    ],
+                    dtype=torch.long,
+                    device=self.device,
                 )
-            condition_noise = torch.randn(
-                past.shape,
-                dtype=past.dtype,
-                device=past.device,
-                generator=condition_generator,
-            )
+                condition_noise = per_sample_standard_normal(
+                    condition_seeds,
+                    past.shape[1:],
+                    device=past.device,
+                    dtype=past.dtype,
+                )
+            elif self.gen_cfg.deterministic_sampling:
+                condition_generator = torch.Generator(device=past.device.type).manual_seed(
+                    (self.gen_cfg.sampling_seed + 1) & _TORCH_SEED_MAX
+                )
+                condition_noise = torch.randn(
+                    past.shape,
+                    dtype=past.dtype,
+                    device=past.device,
+                    generator=condition_generator,
+                )
+            else:
+                condition_noise = torch.randn(
+                    past.shape,
+                    dtype=past.dtype,
+                    device=past.device,
+                )
             past = past + condition_noise * self.gen_cfg.past_noise_std
             qs = self.layout.root_quat_slice
             past[..., qs] = quat_normalize(past[..., qs])
@@ -343,6 +448,7 @@ class GeneratedMotionCommand(MotionCommand):
             num_steps=self.gen_cfg.denoise_steps,
             deterministic=self.gen_cfg.deterministic_sampling,
             seed=self.gen_cfg.sampling_seed,
+            per_sample_seeds=per_sample_seeds,
         )
 
         dt = self._env.dt
@@ -402,6 +508,8 @@ class GeneratedMotionCommand(MotionCommand):
 
         observed_interval = self.window_idx[env_ids].clone()
         self._generate_window(env_ids)
+        if hasattr(self, "_replan_ordinal"):
+            self._replan_ordinal[env_ids] += 1
 
         if bootstrap:
             self._bootstrap_replan_count[env_ids] += 1
@@ -444,6 +552,9 @@ class GeneratedMotionCommand(MotionCommand):
         finally:
             self._seed_mode = False
 
+        self._episode_index[env_ids] += 1
+        self._replan_ordinal[env_ids] = 0
+
         # Conditioning history from the seed frames (t-past+1 .. t).
         t = self.time_steps[env_ids]
         start = self.motion.motion_start_idx[self.motion_ids[env_ids]]
@@ -466,6 +577,14 @@ class GeneratedMotionCommand(MotionCommand):
             self._headings[env_ids] = torch.stack([torch.cos(yaw), torch.sin(yaw)], dim=-1)
 
         self._replan(env_ids, bootstrap=True)
+
+    def reset_deterministic_sampling_counters(self, env_ids: torch.Tensor | None = None) -> None:
+        """Make the next reset start at episode zero for deterministic eval."""
+        env_ids = self._ensure_index_tensor(env_ids)
+        if env_ids.numel() == 0:
+            return
+        self._episode_index[env_ids] = -1
+        self._replan_ordinal[env_ids] = 0
 
     def step(self) -> None:
         # Measured-state history advances every policy step (50 Hz).
