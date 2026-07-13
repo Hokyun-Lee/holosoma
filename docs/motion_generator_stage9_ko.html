@@ -43,13 +43,13 @@ footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted
       <li><code>[x]</code> actual simulator terrain scan 사용</li>
       <li><code>[x]</code> frozen generator 확인 (<code>trainable generator params=0</code>)</li>
       <li><code>[x]</code> 25 control-step마다 2-step DDIM replanning 확인</li>
-      <li><code>[ ]</code> episode length 회복 — production 완료 후 공통 평가 필요</li>
+      <li><code>[ ]</code> episode length 회복 — production은 완료, 공통 평가 필요</li>
       <li><code>[ ]</code> fall/collision 감소 — 동일 protocol baseline 비교 필요</li>
       <li><code>[ ]</code> obstacle success rate 증가 — terrain×level 공통 평가 필요</li>
       <li><code>[ ]</code> tracker가 잘못된 reference를 수정하는 사례 — proxy가 아닌 사례 검증 필요</li>
     </ul>
   </div>
-  <div class="callout ok"><b>현재 상태</b>: Stage 9의 폐루프 wiring과 warm-start 경로는 64-env gate로 검증됐다. 1,024-env production run은 진행 중이므로 성능 관련 네 항목은 의도적으로 완료 처리하지 않았다.</div>
+  <div class="callout ok"><b>현재 상태</b>: Stage 9의 폐루프 wiring과 warm-start 경로를 64-env gate로 검증했고, 1,024-env production 3,000-update run도 자연 종료해 <code>model_14999.pt</code>를 저장했다. 다만 adaptive-training scalar는 고정 difficulty의 baseline 비교가 아니므로 성능 관련 네 항목은 의도적으로 완료 처리하지 않았다.</div>
 </section>
 
 <section>
@@ -85,7 +85,7 @@ footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted
     <tr><td>AdamW moments</td><td>154 / 286 input</td><td>702 / 834 input</td><td>actor 2개·critic 2개 moment tensor에 zero suffix</td></tr>
   </table></div>
   <p>64-env gate의 log는 actor <code>154→702</code>, critic <code>286→834</code>, 두 normalizer의 244 lag-column 복사, 네 optimizer moment 확장과 <code>Optimizer loaded from checkpoint</code>를 모두 남겼다. 저장된 <code>model_12001.pt</code>를 CPU에서 다시 읽어 첫 Linear shape가 각각 <code>(512,702)</code>, <code>(512,834)</code>이고 iteration이 12,001임을 확인했다.</p>
-  <p>Generator는 <code>logs/motion_gen/terrain_robust_fk_4090/checkpoints/final.pt</code>의 EMA를 사용한다. Runtime log는 checkpoint step 10,000, <code>terrain=sim_scan</code>, <code>measured_history_guard=True</code>, <code>trainable generator params=0</code>를 기록했다.</p>
+  <p>Generator는 <code>logs/motion_gen/terrain_robust_fk_4090/checkpoints/final.pt</code>의 EMA(SHA-256 <code>7c63764b771ec43fb5d463d77b6860eee8e46f1db5c0b196554f98cc527ed5fa</code>)를 사용한다. Production runtime log는 checkpoint step 10,000, <code>terrain=sim_scan</code>, <code>measured_history_guard=True</code>, <code>trainable generator params=0</code>, 25-step replan과 2-step denoising을 기록했다. 저장 config도 <code>replan_interval_s=0.5</code>, <code>use_sim_terrain_scan=true</code>, <code>require_fully_measured_history=true</code>, <code>past_noise_std=0.0</code>이다.</p>
   <div class="callout warn"><b>구현 선택</b>: 입력 suffix의 배치 순서, 신규 weight/moment의 0 초기화, lag normalizer 통계 복사, 기존 scalar count 보존은 논문 미공개 영역이다. 이 선택은 첫 action을 기존 tracker와 같게 유지하면서 새 관측에 점진적으로 적응시키기 위한 checkpoint 호환 정책이다.</div>
 </section>
 
@@ -107,6 +107,17 @@ success = non-initial complete episode
     <tr><td>mean max signed progress</td><td>0.07958 m</td><td>2-iteration wiring gate의 누적 상태, 성능 평가값 아님</td></tr>
     <tr><td>checkpoint curriculum state</td><td>v3 / 64 env / signed-v1</td><td><code>model_12001.pt</code>에서 직접 확인</td></tr>
   </table></div>
+  <h3>Production 종료 시 curriculum state</h3>
+  <p><code>model_14999.pt</code>의 state는 v3 / <code>target_heading_signed_v1</code> / 1,024 env이고, flat·box·stair·hurdle을 정확히 256 env씩 보유한다. 아래는 checkpoint 저장 시점의 <b>현재 level</b> 분포다.</p>
+  <div class="table"><table>
+    <tr><th>terrain</th><th>mean level</th><th>L0…L9 env count</th></tr>
+    <tr><td>flat</td><td>8.972656</td><td>[0, 0, 0, 0, 0, 0, 0, 0, 7, 249]</td></tr>
+    <tr><td>box</td><td>2.062500</td><td>[17, 71, 87, 54, 16, 9, 2, 0, 0, 0]</td></tr>
+    <tr><td>stair</td><td>2.351562</td><td>[7, 55, 81, 73, 36, 2, 2, 0, 0, 0]</td></tr>
+    <tr><td>hurdle</td><td>0.695312</td><td>[100, 134, 22, 0, 0, 0, 0, 0, 0, 0]</td></tr>
+    <tr><td>전체</td><td>3.520508</td><td>[124, 260, 190, 127, 52, 11, 4, 0, 7, 249]</td></tr>
+  </table></div>
+  <p>누적 episode/success/survival/crossing/failure count는 flat <code>38654/34252/35521/35187/4402</code>, box <code>42978/30597/33259/33195/12381</code>, stair <code>46166/32610/34740/33621/13556</code>, hurdle <code>42676/29601/32832/32700/13075</code>다. 이 누적치는 학습 시간 전체와 여러 difficulty level을 섞고, flat은 level이 올라가도 geometry가 변하지 않는다. 따라서 이것을 fixed-level obstacle success rate나 terrain 간 성능 순위로 해석하지 않는다.</p>
   <div class="callout warn"><b>구현 선택</b>: 90% timeout gate, 1.5 m crossing, 5-success/2-failure streak, 10 level과 각 level의 장애물 geometry는 논문 공개값이 아니다. 모두 config에 노출한 이 재현의 선택이다.</div>
 </section>
 
@@ -142,14 +153,30 @@ success = non-initial complete episode
   <h2>Evaluation env-state 호환성</h2>
   <p>Training checkpoint의 curriculum state는 env별 tensor를 포함하므로 64/1,024-env state를 4-env evaluation에 strict restore하면 shape가 맞지 않는다. <code>eval_agent.py</code>는 이제 기본 <code>restore_env_state=false</code>에서 curriculum과 episode-tracker state만 건너뛰고 policy와 actor/critic normalizer는 그대로 읽는다. 동일 env layout의 정확한 resume가 필요할 때만 명시적으로 state restore를 켠다.</p>
   <p>4-env, 505-step headless smoke는 expanded actor 702 / critic 834와 frozen generator를 로드하고 500-step reset 경계를 지난 뒤 exit 0으로 종료했다. 산출물은 <code>logs/WholeBodyTracking/20260713_094315-g1_29dof_wbt_gen_terrain_manager-eval/</code>에 저장됐다.</p>
+  <p>공통 evaluator를 실제 Isaac Sim에서 처음 호출하며 <code>robot_root_states</code>가 tensor가 아니라 <code>RootStatesProxy</code>라서 직접 <code>.dtype</code>를 읽을 수 없는 버그를 발견했다. Commit <code>4f6b71d</code>에서 proxy를 먼저 slice해 canonical tensor dtype을 얻도록 고치고 evaluator의 eval-config override 전달도 보강했다. 수정 후 D-final retry3는 exit 0, <code>complete=true</code>, fixed level 1의 flat/box/stair/hurdle 각 1 episode라는 정확한 quota로 JSON/CSV를 저장했다(<code>logs/terrain_evaluations/stage10/smoke/D_final_l1_retry3*</code>).</p>
+  <p>이 4-episode smoke는 네 episode 모두 bad-tracking으로 끝났고 길이는 flat/box/stair/hurdle 각각 8/8/14/8 step, success 0/4였다. 이는 serializer·quota·종료 capture가 실제 simulator에서 끝까지 동작했다는 회귀 확인일 뿐이며, 너무 작고 모두 조기 종료했으므로 정책 성능 근거로 사용하지 않는다.</p>
   <div class="callout warn"><b>범위</b>: 이 smoke는 서로 다른 env 수에서 checkpoint를 재생할 수 있다는 회귀 검증이다. Deterministic common-eval 결과나 Stage-9 성능 비교가 아니다.</div>
 </section>
 
 <section>
-  <h2>Production run <small>(진행 중)</small></h2>
-  <p>Run: <code>logs/WholeBodyTracking/20260713_100222-g1_29dof_wbt_gen_terrain_manager-locomotion/</code>. 1,024 env, 3,000 PPO iteration, save interval 500으로 시작했다. Base tracker, robust+FK generator, optimizer resume, 25-step/2-step 설정은 gate와 같다.</p>
-  <p>문서 작성 시점(2026-07-13 19:09 KST)에 process가 살아 있었고 TensorBoard scalar는 iteration 12,199까지 기록됐지만 첫 500-update checkpoint는 아직 생성되지 않았다. 장기 run은 이 문서 작업에서 읽기만 했으며 중단·재시작·수정하지 않았다.</p>
-  <div class="callout warn"><b>아직 결론 내리지 않음</b>: 진행 중 rolling scalar가 좋아 보이더라도 production 완료 checkpoint와 Stage-10 동일 조건 평가가 없으면 episode recovery, fall/contact 감소, obstacle success 증가를 판정하지 않는다.</div>
+  <h2>Production run <small>(완료)</small></h2>
+  <p>Run: <code>logs/WholeBodyTracking/20260713_100222-g1_29dof_wbt_gen_terrain_manager-locomotion/</code>. 1,024 env, 3,000 PPO update, save interval 500으로 Stage-5 <code>model_12000.pt</code>와 optimizer를 이어 학습했다. 2026-07-13 20:38:34 KST에 마지막 저장 뒤 자연 종료했으며 <code>train.log</code>에서 Traceback, ERROR, OOM, Killed, NaN/Inf를 찾지 못했다.</p>
+  <p>최종 tracker는 <code>model_14999.pt</code>(SHA-256 <code>7e927e83681e5a5beef73c15dda311faa91fd543cec869a1c2559346b80af10a</code>)이고 저장된 <code>iter</code>/<code>iteration</code>은 모두 14,999다. CPU finite audit 결과 model 17 tensor / 1,119,803 element, optimizer 51 / 2,239,623, normalizer 8 / 4,610, curriculum+env 22 / 13,533에서 non-finite element는 모두 0이었다. Actor/critic first-layer input width도 702/834로 확인했다.</p>
+  <div class="table"><table>
+    <tr><th>TensorBoard @ iteration 14,999</th><th>정확한 값</th></tr>
+    <tr><td>environment / train mean episode length</td><td>441.062744 / 443.559998 steps</td></tr>
+    <tr><td>train mean reward / policy noise / KL</td><td>21.556921 / 0.382510 / 0.010113</td></tr>
+    <tr><td>relative body / global ref pos / orient / body lin-vel reward</td><td>0.853199 / 0.419497 / 0.390161 / 0.678832</td></tr>
+    <tr><td>body-pos / ref-pos / ref-rot error</td><td>0.047850 m / 0.055799 m / 0.133334 rad</td></tr>
+    <tr><td>heading error / raw alignment / episode heading reward</td><td>0.629092 rad / 0.707746 / 0.611144</td></tr>
+    <tr><td>signed current progress / crossing threshold</td><td>1.221730 m / 1.5 m</td></tr>
+    <tr><td>mean curriculum level / terrain-type fraction range</td><td>3.519816 / 0</td></tr>
+    <tr><td>undesired-contact any / body count / episode reward</td><td>0.056315 / 0.067627 / −0.008034</td></tr>
+    <tr><td>measured-history valid / denoise steps / observed interval</td><td>1.997396 / 2 / 23.353069 steps</td></tr>
+    <tr><td>correction proxy case / mean improvement</td><td>0.113688 / 0.005820 m</td></tr>
+  </table></div>
+  <p>Iteration 14,999에 기록되어야 하는 488개 scalar tag가 모두 한 번씩 존재하고 finite임을 확인했다. Observed interval 평균이 25보다 작은 것은 episode reset 경계가 포함되기 때문이다. Correction 값은 14개 body origin과 scan 높이의 상관 proxy일 뿐 collision geometry가 아니다.</p>
+  <div class="callout warn"><b>성능 해석 보류</b>: adaptive rollout에서 iteration 12,500→14,999 사이 environment episode length는 422.8166→441.0627, heading error는 0.67806→0.62909 rad, progress는 1.10012→1.22173 m로 변했지만 contact-any는 0.0558268→0.0563151로 감소하지 않았다. 난이도 분포도 동시에 변했으므로 이 추세만으로 recovery, contact 감소, obstacle success를 판정하지 않고 Stage-10 fixed-level 공통 평가를 기다린다.</div>
 </section>
 
 <section>
@@ -200,13 +227,13 @@ $PY -m pytest -q \
     <tr><td><code>6243a86</code></td><td>reference/robot body-origin proxy, correction proxy, active undesired-contact 계측</td></tr>
     <tr><td><code>321afb7</code></td><td>target-heading signed-progress curriculum state v3</td></tr>
     <tr><td><code>6be39da</code></td><td>env 수가 다른 evaluation에서 env-state restore 분리</td></tr>
+    <tr><td><code>4f6b71d</code></td><td>Isaac <code>RootStatesProxy</code> evaluator 호환과 실제 4-episode smoke 복구</td></tr>
   </table></div>
 </section>
 
 <section>
   <h2>남은 문제와 완료 조건</h2>
   <ul>
-    <li>Production run을 끝까지 완료하고 마지막 checkpoint, optimizer, v3 curriculum state의 integrity를 확인해야 한다.</li>
     <li>Stage-5 flat tracker, terrain generator without fine-tuning, terrain tracker without generator 등과 동일 seed·episode·terrain에서 비교해야 한다.</li>
     <li>Episode length는 survival 하나만 말하므로 fall rate, physics-derived undesired contact, heading/tracking error, body-origin proxy를 함께 보고해야 한다.</li>
     <li>Obstacle success는 cumulative training scalar가 아니라 고정된 type×level 평가 episode에서 crossing과 fall을 함께 판정해야 한다.</li>

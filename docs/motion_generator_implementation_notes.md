@@ -649,15 +649,67 @@ curriculum state, and logged zero trainable generator parameters. This is a
 wiring/checkpoint-migration gate, not evidence of recovery or obstacle
 performance.
 
-The 1,024-env, 3,000-iteration production run remains in progress at
-`logs/WholeBodyTracking/20260713_100222-g1_29dof_wbt_gen_terrain_manager-locomotion/`.
-Verified intermediate snapshots are `model_12500.pt` (SHA-256
-`12aaa8ac7d21497551f5e8d7b2e0d19a878c3d482ceef293a1a7ec93ab9f17f3`)
-and `model_13000.pt` (SHA-256
-`dcdb5c532f9f65f2cc8af39eedfcc9994b160aaee77694c0b2516afb949059e3`).
-They establish checkpoint creation only. Production completion, convergence,
-episode-length recovery, fall/contact reduction, and increased obstacle
-success remain pending a completed run and the common Stage-10 protocol.
+The 1,024-env, 3,000-update production run at
+`logs/WholeBodyTracking/20260713_100222-g1_29dof_wbt_gen_terrain_manager-locomotion/`
+completed naturally after its final save at 2026-07-13 20:38:34 KST. The final
+tracker is `model_14999.pt` (SHA-256
+`7e927e83681e5a5beef73c15dda311faa91fd543cec869a1c2559346b80af10a`),
+with both saved iteration fields equal to 14,999. The frozen generator was
+`logs/motion_gen/terrain_robust_fk_4090/checkpoints/final.pt` (SHA-256
+`7c63764b771ec43fb5d463d77b6860eee8e46f1db5c0b196554f98cc527ed5fa`):
+runtime recorded step 10,000, zero trainable generator parameters, simulator
+scan input, a 25-control-step replan interval, two denoise steps, random
+episode heading, and the fully-measured-history guard. The serialized config
+agrees (`replan_interval_s=0.5`, `use_sim_terrain_scan=true`,
+`require_fully_measured_history=true`, `past_noise_std=0.0`). No
+Traceback/ERROR/OOM/Killed/NaN/Inf marker was present in `train.log`.
+
+A CPU finite audit of the final checkpoint found zero non-finite values in
+the model (17 tensors / 1,119,803 elements), optimizer (51 / 2,239,623),
+normalizers (8 / 4,610), and curriculum+environment state (22 / 13,533). The
+actor/critic input widths are 702/834. At TensorBoard step 14,999, all 488
+expected scalar tags were present exactly once and finite. Exact selected
+values were: environment/train mean episode length 441.062744/443.559998,
+train reward 21.556921, relative-body/global-ref-position/global-ref-orientation/
+body-linear-velocity rewards 0.853199/0.419497/0.390161/0.678832,
+body-position/reference-position/reference-rotation errors
+0.047850 m/0.055799 m/0.133334 rad, heading error 0.629092 rad, heading raw
+alignment 0.707746, episode heading reward 0.611144, current signed progress
+1.221730 m, contact-any 0.056315, contact-body count 0.067627, mean policy
+noise 0.382510, KL 0.010113, measured-history valid count 1.997396, and two
+denoise steps. The observed replan interval averaged 23.353069 steps because
+episode-reset boundaries shorten it. The correction-case/proxy-improvement
+values 0.113688/0.005820 m remain body-origin proxies, not collision geometry.
+
+The final curriculum state is schema v3 with
+`progress_semantics="target_heading_signed_v1"`, 1,024 envs, and exactly 256
+envs per terrain type. Current L0..L9 distributions (mean level) were flat
+`[0,0,0,0,0,0,0,0,7,249]` (8.972656), box
+`[17,71,87,54,16,9,2,0,0,0]` (2.062500), stair
+`[7,55,81,73,36,2,2,0,0,0]` (2.351562), and hurdle
+`[100,134,22,0,0,0,0,0,0,0]` (0.695312). Cumulative
+episode/success/survival/crossing/failure counts were respectively
+flat 38,654/34,252/35,521/35,187/4,402; box
+42,978/30,597/33,259/33,195/12,381; stair
+46,166/32,610/34,740/33,621/13,556; and hurdle
+42,676/29,601/32,832/32,700/13,075. These adaptive-training aggregates mix
+levels and time, and flat geometry is level-invariant; they are not fixed-level
+performance estimates. From step 12,500 to 14,999 the rollout contact-any
+value changed from 0.055827 to 0.056315, so contact reduction in particular
+cannot be claimed. Episode recovery, fall/contact reduction, obstacle-success
+improvement, and a causal tracker-correction case remain unchecked pending the
+common Stage-10 protocol.
+
+The first actual D-final common-evaluator smoke exposed that Isaac Sim returns
+`robot_root_states` as a `RootStatesProxy`, which has no direct tensor dtype.
+Commit `4f6b71d` slices the proxy before reading the canonical tensor metadata
+and fixes eval-config override propagation. Retry 3 then exited successfully
+and wrote `complete=true` JSON/CSV with the exact four-episode quota (one each
+for flat/box/stair/hurdle at fixed level 1) under
+`logs/terrain_evaluations/stage10/smoke/D_final_l1_retry3*`. All four tiny
+smoke episodes terminated for bad tracking after 8/8/14/8 steps and none
+succeeded. This verifies the real simulator evaluation path, quota, terminal
+capture, and serialization only; it is not a performance result.
 
 ## Stage 10: ablation and evaluation infrastructure (implementation-only, docs/motion_generator_stage10_ko.html)
 
@@ -715,11 +767,12 @@ not constitute simulator evaluation or GPU timing.
 
 ## Known limitations / not yet verified
 
-- Terrain-aware closed-loop dataflow and PPO startup are validated, and the
-  1,024-env production run has produced intermediate checkpoints while still
-  running. It has not been completed or shown to converge; common-protocol
-  episode recovery, fall/contact reduction, and positive obstacle-success
-  improvement remain unmeasured.
+- Terrain-aware closed-loop dataflow, PPO startup, and the full 1,024-env,
+  3,000-update production run are validated with a finite final checkpoint.
+  Adaptive curriculum rollouts are not a fixed-level baseline comparison;
+  common-protocol episode recovery, fall/contact reduction, positive
+  obstacle-success improvement, and causal tracker correction remain
+  unmeasured.
 - 2-step DDIM quality is validated offline and used in closed-loop training;
   a module-only PyTorch CUDA benchmark exists but has not been run. Simulator
   end-to-end, ONNX/TensorRT, and deployment latency/export remain unverified.
@@ -757,8 +810,9 @@ results.
 2. Contact proxy (height+speed thresholds) is crude; real contact labels from
    physics replay would improve foot-slide supervision.
 3. Receding-horizon distribution shift: structured condition noise is now
-   implemented and narrows the matched noisy-validation gap, but the robust
-   checkpoint has not yet undergone converged terrain closed-loop tracker
-   fine-tuning or multi-seed evaluation.
+   implemented and narrows the matched noisy-validation gap, and one terrain
+   closed-loop tracker fine-tuning run completed. Fixed-level common evaluation
+   and multi-seed training/evaluation are still required before calling it
+   converged or robust.
 4. LAFAN1 license (CC BY-NC-ND) forbids redistribution of retargeted
    derivatives — generated models trained on it inherit non-commercial terms.
