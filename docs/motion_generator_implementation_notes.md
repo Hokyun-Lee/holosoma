@@ -1,6 +1,6 @@
 # Motion Generator Implementation Notes
 
-First-stage reproduction of the diffusion motion generator from
+Staged reproduction of the diffusion motion generator and tracker from
 **"Learning Whole-Body Humanoid Locomotion via Motion Generation and Motion
 Tracking"** (arXiv:2604.17335), built inside HoloSoma for the Unitree G1.
 Korean user manual: `docs/motion_generator_ko.html`.
@@ -39,13 +39,13 @@ LR, EMA, loss weights, normalization frame, terrain scan resolution, CFG.
 | Feature dim / frame | 99 | **78** = 3+4+29+42 | consequence of the above |
 | Canonical frame | unspecified | anchor = last past frame; xy→0, yaw→0, z absolute; quats wxyz sign-continuous | common practice (MDM/PARC-style) |
 | Heading | "from base pose difference" | unit xy vector anchor→last future frame, fallback (1,0) below 5 cm displacement | paper gives no encoding details |
-| Terrain scan | used, resolution unknown | 121-dim (11×11 @0.1 m) interface, **zeros only (Phase A)**; encoder + penetration loss wired but never trained with real scans | no terrain scans in the data yet; marked experimental |
+| Terrain scan | used, resolution unknown | **289-dim** (17×17 @0.1 m), x∈[-0.3,1.3], y∈[-0.8,0.8], heading-aligned absolute height; trained on 150 OmniRetarget terrain clips (Phase B) | resolution/range are implementation choices; closed-loop simulator still supplies zeros through stage 5 |
 | Architecture | "MDM [26,30]" | MDM defaults 512/8/4/1024 | official MDM implementation |
 | Diffusion | unspecified | DDPM T=1000 cosine, x0-prediction (eps available) | MDM convention |
-| Few-step inference | 2 steps (deployment) | DDIM, any step count; 2-step exposed as experimental | validated path is 50-step DDIM / full DDPM |
+| Few-step inference | 2 steps (deployment) | DDIM, any step count; **2-step validated** at 0.0475 m val body MPJPE and used by the closed-loop tracker | 50-step remains the offline evaluation protocol |
 | Losses | recon + velocity + joint consistency + terrain penetration | recon split (root pos/quat/joint/body) + quat-norm + velocity + **bone-length consistency** (surrogate for FK consistency; no differentiable FK) + foot-slide (contact proxy) + flat-ground penetration | weights are choices; contact labels do not exist → contact-consistency loss disabled |
-| Data | ~1 h augmented | ~6.8 min, 11 clips | user-set first-stage scope (~10 clips, 3–10 min) |
-| Fine-tuning w/ tracker | closed loop | **not implemented** (stage 2) | out of scope |
+| Data | ~1 h augmented | **165.3 min, 195 clips** (paperscale); the original 6.8 min/11-clip profile remains available | implementation scale-up for a single RTX 4090 |
+| Fine-tuning w/ tracker | closed loop | **implemented**: frozen generator, measured two-frame state, 0.5 s replanning, 2-step DDIM | stage 5; terrain input remains zero until stage 6 |
 
 ## Data pipeline
 
@@ -245,23 +245,55 @@ under a random per-episode heading command — effectively a heading-steerable
 locomotion controller. Checkpoint:
 `logs/WholeBodyTracking/20260711_122501-*/model_12000.pt`.
 
+A second run trained the same `exp:g1-29dof-wbt-gen` preset **from scratch**
+(`training.checkpoint: null`, PPO `resume: null`) for all 30,000 iterations.
+It completed without logged errors in about 18 h 40 min with 4096 environments,
+producing 61 PT checkpoints and 61 ONNX exports; final checkpoint:
+`logs/WholeBodyTracking/20260711_144420-*/model_29999.pt`. TensorBoard final
+scalars at iteration 29,999 versus the offline-9k + closed-loop-3k run endpoint
+at iteration 12,048 (latest persisted checkpoint: 12,000) were: average episode length **489.2 vs 492.7** (max 500),
+relative body position **0.918 vs 0.972**, global reference position **0.465
+vs 0.466**, global reference orientation **0.464 vs 0.477**, and body linear
+velocity **0.844 vs 0.848**. Thus the offline-pretrained route used 12k total
+PPO iterations (only 3k closed-loop adaptation) yet matched or exceeded the
+30k closed-loop-only run, suggesting better sample efficiency in this
+implementation. These are rolling training scalars rather than a common
+independent evaluation; both runs use seed 42, but their reset seed motions
+differ (walk4 vs largebox). It is therefore not a statistical superiority
+claim; matched multi-seed ablation remains necessary.
+
+During `eval_agent.py`, generated motion does not advance through a clip list:
+the command stochastically replans a 25-frame window every 0.5 s. A uniform
+random world heading (`heading_mode="random"`) is sampled only on reset.
+Although training episodes last 10 s, `get_eval_config()` overrides the eval
+episode length to 100,000 s, so the heading does not automatically change
+every 10 s; a fall/termination resets it. Pass
+`--simulator.config.sim.max-episode-length-s 10` to deliberately cycle random
+headings every 10 s, or select `heading_mode="current"` to preserve the
+reset-facing direction. Stage 5 has no fixed-vector selector or manual
+immediate-reset key, and Isaac Sim's W/S/Q/E command keys do not feed
+`GeneratedMotionCommand`.
+
 ## Known limitations / not yet verified
 
-- Terrain conditioning is interface-only (zero scans): **not validated**; no
-  terrain-aware claims are made.
-- 2-step DDIM inference runs but quality is unvalidated (experimental).
-- Generation quality at this data scale is limited: best val body MPJPE
-  ≈ 0.166 m over a 0.5 s horizon (11 clips ≈ 6.8 min vs the paper's ~1 h);
-  the pipeline is validated, quality needs more data.
+- The generator is terrain-conditioned and validated offline, but the stage-5
+  simulator integration still feeds a flat zero scan; terrain-aware closed-loop
+  tracking is not yet validated.
+- 2-step DDIM quality is validated offline and used in closed-loop training;
+  deployment latency/export remains unverified.
+- Paperscale generation reaches 0.0546 m full-val MPJPE (terrain checkpoint
+  0.0393 on its fixed validation batch); unseen simulator terrain robustness
+  remains the next test.
 - The 50k-step baseline default was not itself re-run end-to-end after being
   reduced from the measured 200k run (same code path, shorter schedule).
 - Generated `*_gen_qpos.npz` → full WBT npz conversion re-runs MuJoCo FK; body
   orientations/velocities of the generated motion come from FK + finite
   differences, not from the model.
-- ONNX export not attempted; model uses only standard ops
+- Generator ONNX export not attempted; the tracker is exported to ONNX at every
+  checkpoint. The generator uses only standard ops
   (Linear/LayerNorm/TransformerEncoder/sinusoidal embeddings), no known
   blockers, but unverified.
-- Closed-loop tracker fine-tuning, MuJoCo sim-to-sim, sim-to-real: stage 2+.
+- Terrain closed-loop tracking, MuJoCo sim-to-sim, and sim-to-real remain.
 
 ## Technical risks for the next stage
 

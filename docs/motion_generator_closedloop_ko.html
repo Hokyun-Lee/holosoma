@@ -178,10 +178,42 @@ $PY src/holosoma/holosoma/eval_agent.py --checkpoint logs/WholeBodyTracking/&lt;
     <li><b>Generator 호출 오버헤드 무시 가능</b>: ~20.9 iter/분 (4차 offline 21 iter/분과 동일) — 4096-env batch 2-step DDIM 재계획이 학습 속도에 영향 없음. GPU 9.3 GB.</li>
     <li>정책은 이제 임의의 랜덤 heading 명령에 대해 generator가 만드는 모션을 추종 — 사실상 <b>heading 조종 가능한 locomotion 컨트롤러</b>의 원형.</li>
   </ul>
+  <h3>From-scratch 30k 완주와 비교 <span class="tag measured">measured 2026-07-12</span></h3>
+  <p><code>exp:g1-29dof-wbt-gen</code>을 4차 tracker 없이 처음부터 30,000 iteration 학습한 별도 run도 오류 없이 완주했다. 저장 config의 <code>training.checkpoint: null</code>과 PPO <code>resume: null</code>로 from-scratch임을 확인했으며, 4096 env에서 약 18시간 40분 동안 500 iteration 간격 checkpoint 60개와 최종 <code>model_29999.pt</code> (총 61개), 대응 ONNX 61개가 생성되었다.</p>
+  <div class="table-wrap"><table>
+    <tr><th>지표 (TensorBoard run endpoint)</th><th><b>Offline 9k → 폐루프 +3k<br>@12,048 (latest ckpt 12,000)</b></th><th>폐루프 from-scratch 30k<br>@29,999 (<code>model_29999.pt</code>)</th></tr>
+    <tr><td>평균 에피소드 길이</td><td><b>492.7 / 500</b></td><td>489.2 / 500</td></tr>
+    <tr><td>relative body position 보상</td><td><b>0.972</b></td><td>0.918</td></tr>
+    <tr><td>global ref position 보상</td><td><b>0.466</b></td><td>0.465</td></tr>
+    <tr><td>global ref orientation 보상</td><td><b>0.477</b></td><td>0.464</td></tr>
+    <tr><td>body lin vel 보상</td><td><b>0.848</b></td><td>0.844</td></tr>
+  </table></div>
+  <p><b>관찰</b>: offline tracker를 9k 선행 학습한 뒤 폐루프에서 3k만 적응한 정책이, 폐루프만 30k 학습한 정책보다 최종 relative body position 보상이 0.054 높고 다른 핵심 지표도 같거나 근소하게 높다. 총 PPO iteration도 12k 대 30k이므로 <b>offline tracker 사전학습 후 짧은 폐루프 fine-tuning이 이 구현에서 더 표본효율적일 가능성</b>을 시사한다.</p>
+  <div class="callout warn"><b>비교 한계</b>: 두 값은 공통 독립 평가가 아니라 학습 중 rolling scalar의 마지막 값이며, seed는 42로 같지만 reset seed motion은 fine-tune=walk4, from-scratch=largebox로 다르다. 따라서 통계적 우월성 주장이 아니라 후속 동일 조건·multi-seed ablation의 가설이다.</div>
+  <pre><code># from-scratch 최종 정책 재생
+~/.holosoma_deps/miniconda3/envs/hssim/bin/python src/holosoma/holosoma/eval_agent.py \
+    --checkpoint logs/WholeBodyTracking/20260711_144420-g1_29dof_wbt_gen_manager-locomotion/model_29999.pt</code></pre>
   <h3>정책 확인</h3>
 <pre><code># 폐루프 그대로 재생 (generator가 실시간 reference 생성, Isaac Sim 뷰어)
 ~/.holosoma_deps/miniconda3/envs/hssim/bin/python src/holosoma/holosoma/eval_agent.py \
     --checkpoint logs/WholeBodyTracking/20260711_122501-g1_29dof_wbt_gen_manager-locomotion/model_12000.pt</code></pre>
+
+  <h3><code>eval_agent.py</code>에서 다음 모션 보기 / 방향 선택</h3>
+  <ul>
+    <li>폐루프 preset은 저장된 모션 목록에서 “다음 클립”을 고르지 않는다. 매 0.5초 실제 로봇 상태에서 다음 25 frame을 확률적으로 새로 생성하므로, viewer에서는 하나의 생성 과정이 계속 이어진다.</li>
+    <li><code>heading_mode="random"</code>은 <b>reset할 때만</b> 새 world-frame 방향을 균등 샘플링한다. 학습 episode는 10초지만, <code>eval_agent.py</code>는 기본 eval override가 100,000초라 정상 추종 중에는 10초마다 자동 reset하거나 방향을 바꾸지 않는다. 넘어짐 등 termination이 발생하면 새 방향으로 reset한다.</li>
+    <li>의도적으로 10초마다 새 랜덤 방향을 보려면 아래 첫 명령처럼 eval episode 길이를 10초로 override한다. 현재 바라보는 방향을 유지하려면 두 번째 명령처럼 <code>current</code>를 선택한다.</li>
+    <li>임의의 고정 (x,y) heading 벡터 선택과 즉시 강제 reset을 위한 CLI/키보드 경로는 아직 없다. 기존 Isaac Sim W/S/Q/E 키는 <code>GeneratedMotionCommand</code> heading에 연결되어 있지 않다.</li>
+  </ul>
+<pre><code># 10초마다 reset → 새 random heading
+$PY src/holosoma/holosoma/eval_agent.py \
+    --checkpoint logs/WholeBodyTracking/20260711_122501-g1_29dof_wbt_gen_manager-locomotion/model_12000.pt \
+    --simulator.config.sim.max-episode-length-s 10
+
+# reset 시 현재 facing direction 유지
+$PY src/holosoma/holosoma/eval_agent.py \
+    --checkpoint logs/WholeBodyTracking/20260711_122501-g1_29dof_wbt_gen_manager-locomotion/model_12000.pt \
+    --command.setup-terms.motion-command.params.motion-config.heading-mode current</code></pre>
 </section>
 
 <section id="s6">
