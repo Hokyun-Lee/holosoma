@@ -18,7 +18,13 @@ from typing import Callable
 
 import torch
 
-from holosoma.motion_gen.configs import TrainConfig
+from holosoma.motion_gen.configs import (
+    ConditionNoiseCfg,
+    DataCfg,
+    DiffusionCfg,
+    ModelCfg,
+    TrainConfig,
+)
 from holosoma.motion_gen.diffusion import GaussianDiffusion
 from holosoma.motion_gen.features import (
     FeatureLayout,
@@ -29,8 +35,10 @@ from holosoma.motion_gen.features import (
     unpack_features,
     yaw_rotate_xy,
 )
+from holosoma.motion_gen.losses import LossWeights
 from holosoma.motion_gen.model import MotionDiffusionTransformer
 from holosoma.motion_gen.normalization import FeatureNormalizer
+from holosoma.motion_gen.terrain import ScanGrid
 from holosoma.motion_gen.training import CKPT_FORMAT_VERSION
 
 
@@ -84,7 +92,7 @@ class MotionGenerator:
         path: str,
         device: str = "auto",
         use_ema: bool = True,
-    ) -> "MotionGenerator":
+    ) -> MotionGenerator:
         dev = torch.device(("cuda" if torch.cuda.is_available() else "cpu") if device == "auto" else device)
         ckpt = torch.load(path, map_location=dev, weights_only=False)
         if ckpt.get("format_version") != CKPT_FORMAT_VERSION:
@@ -136,7 +144,7 @@ class MotionGenerator:
         """
         past_world = inp.past_motion.to(self.device)
         bsz, P, D = past_world.shape
-        if D != self.layout.dim:
+        if self.layout.dim != D:
             raise ValueError(f"past_motion feature dim {D} != layout dim {self.layout.dim}")
         H = self.cfg.data.future_frames
 
@@ -253,19 +261,22 @@ class MotionGenerator:
 
 def _config_from_dict(d: dict) -> TrainConfig:
     """Reconstruct TrainConfig from a checkpoint dict without extra deps."""
-    from holosoma.motion_gen.configs import DataCfg, DiffusionCfg, ModelCfg
-    from holosoma.motion_gen.losses import LossWeights
-    from holosoma.motion_gen.terrain import ScanGrid
-
     data = dict(d["data"])
     if isinstance(data.get("scan_grid"), dict):
         data["scan_grid"] = ScanGrid(**data["scan_grid"])
     return TrainConfig(
         **{
-            **{k: v for k, v in d.items() if k not in ("data", "model", "diffusion", "loss")},
+            **{
+                k: v
+                for k, v in d.items()
+                if k not in ("data", "model", "diffusion", "loss", "condition_noise")
+            },
             "data": DataCfg(**data),
             "model": ModelCfg(**d["model"]),
             "diffusion": DiffusionCfg(**d["diffusion"]),
             "loss": LossWeights(**d["loss"]),
+            # Stage 1--7 checkpoints predate condition noise and therefore
+            # intentionally reconstruct with the all-zero defaults.
+            "condition_noise": ConditionNoiseCfg(**d.get("condition_noise", {})),
         }
     )

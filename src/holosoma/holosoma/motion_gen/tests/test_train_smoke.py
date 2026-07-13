@@ -75,6 +75,11 @@ def test_metrics_history_has_val_entries(trained):
     assert "val_sample_metrics" in entry
     for key in ("root_pos_err_m", "root_quat_err_rad", "joint_pos_err_rad", "body_mpjpe_m"):
         assert np.isfinite(entry["val_sample_metrics"][key])
+    assert entry["val_condition_noise"]["shared_ddim_initial_noise"]
+    assert not entry["val_condition_noise"]["enabled"]
+    assert entry["val_loss_clean"] == entry["val_loss_noisy"]
+    assert entry["val_sample_metrics_clean"] == entry["val_sample_metrics_noisy"]
+    assert all(value == 0.0 for value in entry["val_condition_noise_delta"].values())
 
 
 def test_checkpoint_reload_matches(trained, smoke_cfg):
@@ -84,6 +89,23 @@ def test_checkpoint_reload_matches(trained, smoke_cfg):
     assert trainer2.step == trained.step
     for p1, p2 in zip(trained.model.parameters(), trainer2.model.parameters()):
         assert torch.allclose(p1, p2)
+
+
+def test_checkpoint_weights_only_restarts_optimizer_and_step(trained, smoke_cfg):
+    ckpt_path = trained.out_dir / "checkpoints" / "final.pt"
+    cfg2 = dataclasses.replace(
+        smoke_cfg,
+        run_name="pytest_weights_only",
+        resume=str(ckpt_path),
+        resume_weights_only=True,
+    )
+    trainer2 = Trainer(cfg2)
+    assert trainer2.step == 0
+    assert not trainer2.optimizer.state
+    for p1, p2 in zip(trained.model.parameters(), trainer2.model.parameters()):
+        assert torch.allclose(p1, p2)
+    torch.testing.assert_close(trained.normalizer.mean, trainer2.normalizer.mean)
+    torch.testing.assert_close(trained.normalizer.std, trainer2.normalizer.std)
 
 
 def test_generator_inference_and_determinism(trained):

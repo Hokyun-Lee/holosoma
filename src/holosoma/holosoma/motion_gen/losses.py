@@ -15,8 +15,9 @@ Implemented:
     quat_norm      -- unit-norm regularizer on the predicted quaternion
     velocity       -- MSE of temporal finite differences (all feature dims)
     bone_length    -- distances between kinematically adjacent tracked bodies
-                      must match GT (surrogate for FK joint-consistency; no
-                      differentiable FK is used in this stage)
+                      must match GT (lightweight geometric regularizer)
+    fk_consistency -- predicted body positions must match differentiable FK
+                      of predicted root pose and joint positions (optional)
     foot_slide     -- xy displacement of feet during GT contact frames
     terrain_penetration -- relu(-z) of predicted body positions; applied only
                       to flat-terrain clips (ground plane z=0); zero otherwise
@@ -44,6 +45,8 @@ class LossWeights:
     bone_length: float = 0.5
     foot_slide: float = 0.3
     terrain_penetration: float = 0.5
+    fk_consistency: float = 0.0
+    """Differentiable-FK consistency weight (zero preserves Stage 1--7)."""
 
 
 def compute_losses(
@@ -57,6 +60,7 @@ def compute_losses(
     terrain_scan: torch.Tensor | None = None,
     has_scan: torch.Tensor | None = None,
     scan_grid: ScanGrid | None = None,
+    fk_model: torch.nn.Module | None = None,
 ) -> dict[str, torch.Tensor]:
     """Compute all loss terms.
 
@@ -71,6 +75,9 @@ def compute_losses(
             (B,) bool and ``scan_grid``, enables the scan-based penetration
             loss (bodies below the interpolated terrain surface). Bodies
             outside the scan grid are excluded.
+        fk_model: Optional differentiable module mapping predicted root pose
+            and joints to tracked body positions. Required when the FK weight
+            is non-zero.
     Returns:
         dict with each unweighted term and the weighted "total".
     """
@@ -116,6 +123,25 @@ def compute_losses(
     gt_len = (gt["body_pos"][:, :, ia] - gt["body_pos"][:, :, ib]).norm(dim=-1)
     losses["bone_length"] = (((pred_len - gt_len) ** 2).mean(dim=-1, keepdim=True) * m).sum() / denom
 
+    # Couple the independently predicted joint/root and body-position heads.
+    # This remains opt-in so all Stage 1--7 presets retain their exact loss.
+    if fk_model is not None:
+        fk_body_pos = fk_model(pred["root_pos"], pred["root_quat"], pred["joint_pos"])
+        if fk_body_pos.shape != pred["body_pos"].shape:
+            raise ValueError(
+                "FK body output shape "
+                f"{tuple(fk_body_pos.shape)} != predicted body shape {tuple(pred['body_pos'].shape)}"
+            )
+        fk_delta = pred["body_pos"] - fk_body_pos
+        losses["fk_consistency"] = (
+            fk_delta.square().mean(dim=(-1, -2)).unsqueeze(-1) * m
+        ).sum() / denom
+        losses["fk_body_error_m"] = (
+            fk_delta.norm(dim=-1).mean(dim=-1, keepdim=True) * m
+        ).sum() / denom
+    elif weights.fk_consistency != 0.0:
+        raise ValueError("A differentiable fk_model is required when fk_consistency weight is non-zero")
+
     # Foot sliding during GT contact.
     foot_idx = layout.foot_body_indices()
     if contact is not None and foot_idx:
@@ -141,7 +167,12 @@ def compute_losses(
     losses["terrain_penetration"] = pen_total
 
     total = pred_x0.new_zeros(())
-    for name, value in losses.items():
-        total = total + getattr(weights, name) * value
+    for name in weights.__dataclass_fields__:
+        weight = getattr(weights, name)
+        if name not in losses:
+            if weight != 0.0:
+                raise ValueError(f"Loss term {name!r} has weight {weight} but was not computed")
+            continue
+        total = total + weight * losses[name]
     losses["total"] = total
     return losses

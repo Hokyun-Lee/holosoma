@@ -26,12 +26,17 @@ from loguru import logger
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
+from holosoma.motion_gen.condition_noise import (
+    apply_condition_noise,
+    validate_condition_noise_config,
+)
 from holosoma.motion_gen.configs import TrainConfig
 from holosoma.motion_gen.dataset import MotionWindowDataset, load_split_clips
 from holosoma.motion_gen.diffusion import GaussianDiffusion
 from holosoma.motion_gen.evaluation import compute_metrics, load_joint_limits
 from holosoma.motion_gen.export import export_generated_raw_npz
-from holosoma.motion_gen.features import FeatureLayout
+from holosoma.motion_gen.features import FeatureLayout, unpack_features
+from holosoma.motion_gen.kinematics import G1ForwardKinematics
 from holosoma.motion_gen.losses import compute_losses
 from holosoma.motion_gen.model import MotionDiffusionTransformer
 from holosoma.motion_gen.normalization import FeatureNormalizer, compute_normalizer
@@ -129,6 +134,12 @@ class Trainer:
                 f"terrain_dim ({d.terrain_dim}) != scan_grid.dim ({d.scan_grid.dim}); "
                 "set data.terrain_dim to match the scan grid."
             )
+        validate_condition_noise_config(
+            cfg.condition_noise,
+            use_terrain_scan=d.use_terrain_scan,
+            terrain_dim=d.terrain_dim,
+            scan_grid=d.scan_grid,
+        )
 
         def make_dataset(clips, stride: int) -> MotionWindowDataset:
             return MotionWindowDataset(
@@ -157,12 +168,12 @@ class Trainer:
             self.normalizer = compute_normalizer(self.train_dataset, cfg.norm_max_windows, cfg.seed)
             self.normalizer.save(norm_path)
 
-        loader_kwargs = dict(
-            batch_size=cfg.batch_size,
-            num_workers=cfg.num_workers,
-            pin_memory=self.device.type == "cuda",
-            persistent_workers=cfg.num_workers > 0,
-        )
+        loader_kwargs = {
+            "batch_size": cfg.batch_size,
+            "num_workers": cfg.num_workers,
+            "pin_memory": self.device.type == "cuda",
+            "persistent_workers": cfg.num_workers > 0,
+        }
         self.train_loader = DataLoader(self.train_dataset, shuffle=True, drop_last=True, **loader_kwargs)
         self.val_loader = DataLoader(self.val_dataset, shuffle=False, drop_last=False, **loader_kwargs)
 
@@ -193,6 +204,26 @@ class Trainer:
             schedule=cfg.diffusion.schedule,
             param=cfg.diffusion.param,
         )
+        self.fk_model: G1ForwardKinematics | None = None
+        if cfg.loss.fk_consistency != 0.0:
+            if cfg.loss.fk_consistency < 0.0:
+                raise ValueError("loss.fk_consistency must be >= 0")
+            source_mjcf = (
+                Path(__file__).resolve().parents[4]
+                / "src/holosoma_retargeting/holosoma_retargeting/models/g1/g1_29dof.xml"
+            )
+            self.fk_model = G1ForwardKinematics(
+                joint_names=self.layout.joint_names,
+                body_names=self.layout.body_names,
+                device=self.device,
+                dtype=torch.float32,
+                source_mjcf_path=source_mjcf,
+            ).eval()
+            logger.info(
+                "Differentiable FK consistency enabled "
+                f"(weight={cfg.loss.fk_consistency:g}, source={source_mjcf})"
+            )
+            self._validate_fk_dataset_calibration()
         self.ema_model = None
         if cfg.use_ema:
             self.ema_model = copy.deepcopy(self.model).eval()
@@ -211,6 +242,39 @@ class Trainer:
 
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
         self.scaler = torch.amp.GradScaler(enabled=cfg.amp and self.device.type == "cuda")
+
+    @torch.no_grad()
+    def _validate_fk_dataset_calibration(self, num_windows: int = 8) -> None:
+        """Fail fast if dataset body positions do not match the pinned MJCF."""
+        if self.fk_model is None:
+            return
+        tolerance = self.cfg.fk_calibration_tolerance_m
+        if tolerance is None:
+            logger.warning("FK dataset calibration check disabled by config")
+            return
+        if not math.isfinite(tolerance) or tolerance <= 0.0:
+            raise ValueError("fk_calibration_tolerance_m must be finite and > 0, or None")
+        count = min(num_windows, len(self.train_dataset))
+        indices = torch.linspace(0, len(self.train_dataset) - 1, count).round().long().tolist()
+        gt = torch.stack([self.train_dataset[index]["x"] for index in indices]).to(self.device)
+        parts = unpack_features(gt, self.layout)
+        fk_body = self.fk_model(
+            parts["root_pos"],
+            parts["root_quat"],
+            parts["joint_pos"],
+        )
+        error = (fk_body - parts["body_pos"]).norm(dim=-1)
+        max_error = float(error.max())
+        mean_error = float(error.mean())
+        if max_error > tolerance:
+            raise ValueError(
+                "Motion dataset is inconsistent with the pinned G1 FK model: "
+                f"max body error {max_error:.6g} m exceeds {tolerance:.6g} m"
+            )
+        logger.info(
+            "FK dataset calibration passed "
+            f"({count} windows, mean={mean_error:.3e} m, max={max_error:.3e} m)"
+        )
 
     # -- EMA -------------------------------------------------------------------
 
@@ -249,25 +313,65 @@ class Trainer:
         self.model.load_state_dict(ckpt["model"])
         if self.ema_model is not None and ckpt.get("ema") is not None:
             self.ema_model.load_state_dict(ckpt["ema"])
-        self.optimizer.load_state_dict(ckpt["optimizer"])
-        self.scaler.load_state_dict(ckpt["scaler"])
         self.normalizer = FeatureNormalizer.from_state_dict(ckpt["normalizer"])
-        self.step = int(ckpt["step"])
-        for _ in range(self.step):
-            self.scheduler.step()
-        logger.info(f"Resumed from {path} at step {self.step}")
+        if self.cfg.resume_weights_only:
+            self.step = 0
+            logger.info(
+                f"Loaded weights/EMA/normalizer from {path}; "
+                "optimizer, scheduler, and step restart at zero"
+            )
+        else:
+            self.optimizer.load_state_dict(ckpt["optimizer"])
+            self.scaler.load_state_dict(ckpt["scaler"])
+            self.step = int(ckpt["step"])
+            for _ in range(self.step):
+                self.scheduler.step()
+            logger.info(f"Resumed from {path} at step {self.step}")
 
     # -- core steps ---------------------------------------------------------------
 
     def _batch_to_device(self, batch: dict) -> dict:
         return {k: v.to(self.device, non_blocking=True) for k, v in batch.items()}
 
-    def _forward_losses(self, batch: dict, generator: torch.Generator | None = None) -> dict:
+    def _prepare_conditions(
+        self,
+        batch: dict,
+        *,
+        apply_noise: bool,
+        generator: torch.Generator | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Prepare physical conditions, optionally noisy, before normalization."""
+        if not apply_noise:
+            return batch["past"], batch["terrain"]
+        return apply_condition_noise(
+            batch["past"],
+            batch["terrain"],
+            self.layout,
+            self.cfg.condition_noise,
+            self.cfg.data.scan_grid,
+            generator=generator,
+        )
+
+    def _forward_losses(
+        self,
+        batch: dict,
+        generator: torch.Generator | None = None,
+        *,
+        apply_condition_noise_input: bool | None = None,
+        condition_generator: torch.Generator | None = None,
+    ) -> dict:
         cfg = self.cfg
         assert self.normalizer is not None
         gt_phys = batch["x"]  # (B, H, D), physical canonical units
         x0 = self.normalizer.normalize(gt_phys)
-        past = self.normalizer.normalize(batch["past"])
+        if apply_condition_noise_input is None:
+            apply_condition_noise_input = self.model.training and cfg.condition_noise.is_enabled()
+        past_phys, terrain_condition = self._prepare_conditions(
+            batch,
+            apply_noise=apply_condition_noise_input,
+            generator=condition_generator if condition_generator is not None else generator,
+        )
+        past = self.normalizer.normalize(past_phys)
         bsz = x0.shape[0]
 
         t = self.diffusion.sample_timesteps(bsz, self.device, generator)
@@ -280,7 +384,7 @@ class Trainer:
             # unconditional branch used by classifier-free guidance is trained.
             drop = torch.rand(bsz, device=self.device, generator=generator) < cfg.cond_dropout
         pred = self.model(
-            x_t, t, past, batch["heading"], batch["terrain"],
+            x_t, t, past, batch["heading"], terrain_condition,
             drop_past=drop, drop_heading=drop, drop_terrain=drop,
         )
         x0_hat = self.diffusion.pred_to_x0(pred, x_t, t)
@@ -291,6 +395,7 @@ class Trainer:
             terrain_scan=batch["terrain"] if cfg.data.use_terrain_scan else None,
             has_scan=batch.get("has_scan"),
             scan_grid=cfg.data.scan_grid if cfg.data.use_terrain_scan else None,
+            fk_model=getattr(self, "fk_model", None),
         )
 
     def train(self) -> None:
@@ -369,57 +474,186 @@ class Trainer:
     def validate(self) -> dict:
         cfg = self.cfg
         self.model.eval()
-        gen = torch.Generator(device=self.device.type).manual_seed(cfg.val_seed)
+        clean_diffusion_gen = torch.Generator(device=self.device.type).manual_seed(cfg.val_seed)
+        noise_enabled = cfg.condition_noise.is_enabled()
+        noisy_diffusion_gen = torch.Generator(device=self.device.type).manual_seed(cfg.val_seed)
+        condition_gen = torch.Generator(device=self.device.type).manual_seed(cfg.val_seed + 1)
 
         # 1) Deterministic diffusion-loss evaluation on the val split.
-        agg: dict[str, float] = {}
+        clean_agg: dict[str, float] = {}
+        noisy_agg: dict[str, float] = {}
         n = 0
-        for i, batch in enumerate(self.val_loader):
+        for i, cpu_batch in enumerate(self.val_loader):
             if i >= cfg.val_batches:
                 break
-            batch = self._batch_to_device(batch)
-            losses = self._forward_losses(batch, generator=gen)
-            for k, v in losses.items():
-                agg[k] = agg.get(k, 0.0) + v.item()
+            batch = self._batch_to_device(cpu_batch)
+            clean_losses = self._forward_losses(
+                batch,
+                generator=clean_diffusion_gen,
+                apply_condition_noise_input=False,
+            )
+            for k, v in clean_losses.items():
+                clean_agg[k] = clean_agg.get(k, 0.0) + v.item()
+            if noise_enabled:
+                noisy_losses = self._forward_losses(
+                    batch,
+                    generator=noisy_diffusion_gen,
+                    apply_condition_noise_input=True,
+                    condition_generator=condition_gen,
+                )
+                for k, v in noisy_losses.items():
+                    noisy_agg[k] = noisy_agg.get(k, 0.0) + v.item()
             n += 1
-        val_losses = {k: v / max(n, 1) for k, v in agg.items()}
-
-        # 2) Sampling metrics on one fixed val batch (DDIM, fixed seed).
-        batch = self._batch_to_device(next(iter(self.val_loader)))
-        sample_phys = self._generate_for_batch(batch, gen)
-        metrics = compute_metrics(
-            sample_phys, batch["x"], self.layout, cfg.data.fps,
-            joint_limits=self.joint_limits, contact=batch["contact"], flat=batch["flat"],
-            terrain_scan=batch["terrain"] if cfg.data.use_terrain_scan else None,
-            has_scan=batch.get("has_scan"),
-            scan_grid=cfg.data.scan_grid if cfg.data.use_terrain_scan else None,
+        val_losses = {k: v / max(n, 1) for k, v in clean_agg.items()}
+        val_losses_noisy = (
+            {k: v / max(n, 1) for k, v in noisy_agg.items()}
+            if noise_enabled
+            else dict(val_losses)
         )
+
+        # 2) Sampling metrics on one fixed val batch. Clean and noisy
+        # conditions share the exact same initial DDIM noise tensor.
+        batch = self._batch_to_device(next(iter(self.val_loader)))
+        if noise_enabled:
+            sample_phys, noisy_sample_phys = self._generate_validation_pair(
+                batch,
+                clean_diffusion_gen,
+                condition_gen,
+            )
+        else:
+            sample_phys = self._generate_for_batch(batch, clean_diffusion_gen)
+            noisy_sample_phys = sample_phys
+
+        metric_kwargs = {
+            "joint_limits": self.joint_limits,
+            "contact": batch["contact"],
+            "flat": batch["flat"],
+            "terrain_scan": batch["terrain"] if cfg.data.use_terrain_scan else None,
+            "has_scan": batch.get("has_scan"),
+            "scan_grid": cfg.data.scan_grid if cfg.data.use_terrain_scan else None,
+        }
+        metrics = compute_metrics(
+            sample_phys,
+            batch["x"],
+            self.layout,
+            cfg.data.fps,
+            **metric_kwargs,
+        )
+        noisy_metrics = compute_metrics(
+            noisy_sample_phys,
+            batch["x"],
+            self.layout,
+            cfg.data.fps,
+            **metric_kwargs,
+        )
+        robustness = {
+            f"{key}_delta": noisy_metrics[key] - metrics[key]
+            for key in sorted(metrics.keys() & noisy_metrics.keys())
+        }
+        robustness["sample_condition_response_mean_abs_mixed_units"] = (
+            noisy_sample_phys - sample_phys
+        ).abs().mean().item()
 
         for k, v in val_losses.items():
             self.writer.add_scalar(f"val/loss_{k}", v, self.step)
         for k, v in metrics.items():
             self.writer.add_scalar(f"val/{k}", v, self.step)
-        entry = {"step": self.step, "val_loss": val_losses, "val_sample_metrics": metrics}
+        if noise_enabled:
+            for k, v in val_losses_noisy.items():
+                self.writer.add_scalar(f"val_noisy/loss_{k}", v, self.step)
+            for k, v in noisy_metrics.items():
+                self.writer.add_scalar(f"val_noisy/{k}", v, self.step)
+            for k, v in robustness.items():
+                self.writer.add_scalar(f"val_condition_noise/{k}", v, self.step)
+        entry = {
+            "step": self.step,
+            # Keep the Stage 1--7 keys as clean-metric aliases.
+            "val_loss": val_losses,
+            "val_sample_metrics": metrics,
+            "val_loss_clean": val_losses,
+            "val_loss_noisy": val_losses_noisy,
+            "val_sample_metrics_clean": metrics,
+            "val_sample_metrics_noisy": noisy_metrics,
+            "val_condition_noise_delta": robustness,
+            "val_condition_noise": {
+                "enabled": noise_enabled,
+                "diffusion_seed": cfg.val_seed,
+                "condition_seed": cfg.val_seed + 1,
+                "shared_ddim_initial_noise": True,
+            },
+        }
         self.metrics_history.append(entry)
-        (self.out_dir / "metrics.json").write_text(json.dumps({"history": self.metrics_history}, indent=2))
-        logger.info(f"[val @ {self.step}] " + " ".join(f"{k}={v:.4f}" for k, v in metrics.items()))
+        (self.out_dir / "metrics.json").write_text(
+            json.dumps({"history": self.metrics_history}, indent=2)
+        )
+        logger.info(f"[val clean @ {self.step}] " + " ".join(f"{k}={v:.4f}" for k, v in metrics.items()))
+        if noise_enabled:
+            logger.info(
+                f"[val noisy @ {self.step}] "
+                + " ".join(f"{k}={v:.4f}" for k, v in noisy_metrics.items())
+            )
         return entry
 
     @torch.no_grad()
-    def _generate_for_batch(self, batch: dict, generator: torch.Generator) -> torch.Tensor:
+    def _generate_validation_pair(
+        self,
+        batch: dict,
+        diffusion_generator: torch.Generator,
+        condition_generator: torch.Generator,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Generate clean/noisy validation samples from identical DDIM noise."""
+        init_noise = torch.randn(
+            batch["x"].shape,
+            device=self.device,
+            generator=diffusion_generator,
+        )
+        clean = self._generate_for_batch(
+            batch,
+            diffusion_generator,
+            apply_condition_noise_input=False,
+            init_noise=init_noise,
+        )
+        noisy = self._generate_for_batch(
+            batch,
+            diffusion_generator,
+            apply_condition_noise_input=True,
+            condition_generator=condition_generator,
+            init_noise=init_noise.clone(),
+        )
+        return clean, noisy
+
+    @torch.no_grad()
+    def _generate_for_batch(
+        self,
+        batch: dict,
+        generator: torch.Generator,
+        *,
+        apply_condition_noise_input: bool = False,
+        condition_generator: torch.Generator | None = None,
+        init_noise: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """DDIM-sample futures for a batch's conditions; returns physical units."""
         assert self.normalizer is not None
         cfg = self.cfg
         model = self._sampling_model()
-        past = self.normalizer.normalize(batch["past"])
+        past_phys, terrain_condition = self._prepare_conditions(
+            batch,
+            apply_noise=apply_condition_noise_input,
+            generator=condition_generator,
+        )
+        past = self.normalizer.normalize(past_phys)
 
         def model_fn(x_t, t, **_):
-            return model(x_t, t, past, batch["heading"], batch["terrain"])
+            return model(x_t, t, past, batch["heading"], terrain_condition)
 
         shape = batch["x"].shape
         x0_norm = self.diffusion.ddim_sample(
-            model_fn, tuple(shape), self.device,
-            num_steps=cfg.val_sample_steps, generator=generator,
+            model_fn,
+            tuple(shape),
+            self.device,
+            num_steps=cfg.val_sample_steps,
+            generator=generator,
+            init_noise=init_noise,
         )
         return self.normalizer.denormalize(x0_norm)
 
