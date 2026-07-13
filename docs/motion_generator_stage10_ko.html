@@ -58,7 +58,7 @@ footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted
       <li><code>[ ]</code> 실제 RTX 4090 inference latency 측정</li>
     </ul>
   </div>
-  <div class="callout warn"><b>결과 없음</b>: 이 단계에서 실증된 것은 config, evaluator, serializer, benchmark code와 unit test까지다. A/E/F 학습, A–F 공통 simulator 평가, obstacle/rough 평가, GPU latency benchmark는 아직 실행하지 않았다. 따라서 성능 수치와 완료 체크를 만들지 않는다.</div>
+  <div class="callout warn"><b>성능 결과 보류</b>: 수정 전 A/E/F 501-iteration 학습은 자연 종료하고 finite checkpoint를 남겨 integrity 기록으로는 유효하다. 다만 후속 audit에서 8 m terrain tile와 motion reset XY 불일치를 발견해 기존 Stage-9/D, A, E, F checkpoint는 terrain 성능 비교용으로 superseded되었다. 정렬 후 D run <code>20260713_124451-...</code>은 진행 중이다. Corrected A–F 공통 simulator 평가, obstacle/rough 평가, GPU latency benchmark는 아직 완료되지 않았으므로 성능 체크박스를 갱신하지 않는다.</div>
 </section>
 
 <section>
@@ -82,14 +82,34 @@ footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted
     <tr><td><b>F</b><br><code>...f_no_heading_reward</code></td><td>online frozen generator</td><td>O</td><td>O / O</td><td><b>X</b></td><td>BASE에서 terrain fine-tune</td></tr>
   </table></div>
   <p>B에서도 balanced physical terrain은 simulator에 존재한다. 다만 generator와 tracker가 scan을 보지 않고 terrain curriculum adaptation과 heading reward, PPO update를 끈다. C와 D는 architecture가 같고 run metadata와 update 유무만 다르다. E는 generator만 scan을 소비하며 tracker actor/critic에서는 <code>terrain_height_scan</code> term만 제거한다. F는 D에서 heading reward weight만 0이다.</p>
-  <p>D preset은 canonical Stage-9 full preset과 training run 이름만 다르다. 따라서 아래 Stage-9 snapshot은 architecture 관점의 D 후보로 사용할 수 있지만, 저장 metadata의 run 이름은 ablation D가 아니라 canonical Stage-9 이름이다.</p>
+  <p>D preset은 canonical Stage-9 full preset과 training run 이름만 다르다. 수정 전 Stage-9 snapshot은 저장 metadata의 run 이름이 ablation D가 아니라 canonical Stage-9 이름이며, architecture/integrity provenance로만 사용한다. Terrain 성능용 D는 reset-aligned rerun으로 교체한다.</p>
 
   <h3>A fixed-reference의 비교 한계</h3>
   <p>A는 다음 약 20초 단일 WBT-schema NPZ를 기본 reference로 사용한다.</p>
 <pre><code>logs/motion_gen/terrain_4090/samples/manual/
 lafan1_walk4_subject1_s500_rollout83x12_gen_mj.npz</code></pre>
   <p>이 파일은 Stage-4 fixed generated-reference 검증에 사용한 motion이다. Heading은 reference root XY velocity를 우선하고 0.5초 lookahead displacement를 차선으로 사용하며, 둘 다 정지 판정이면 root yaw로 fallback한다. A는 source clip의 원래 world heading을 유지하고 random whole-trajectory yaw augmentation을 하지 않는다.</p>
-  <div class="callout warn"><b>A의 limitation</b>: Heading 벡터만 회전하면 root/body position, orientation, velocity와 불일치하므로 그런 근사를 넣지 않았다. 올바른 yaw augmentation은 trajectory 전체 tensor를 함께 회전해야 한다. 따라서 단일 fixed clip의 heading/reference 분포를 쓰는 A와 episode마다 random heading을 조건으로 생성하는 B–F는 완전히 동일한 command 분포가 아니며, 특히 heading 지표 비교에 제한이 있다. A의 NPZ는 BASE policy와도 별개의 artifact다.</div>
+  <div class="callout warn"><b>A의 limitation</b>: Heading 벡터만 회전하면 root/body position, orientation, velocity와 불일치하므로 그런 근사를 넣지 않았다. 올바른 yaw augmentation은 trajectory 전체 tensor를 함께 회전해야 한다. 따라서 단일 fixed clip의 heading/reference 분포를 쓰는 A와 episode마다 random heading을 조건으로 생성하는 B–F는 완전히 동일한 command 분포가 아니며, 특히 heading 지표 비교에 제한이 있다. A의 NPZ는 BASE policy와도 별개의 artifact다. 또한 XY를 reset origin으로 재정렬하고 clip-end wrap을 막은 497개의 유효 500-step start window 중 51개(<code>10.26%</code>)는 trajectory 자체가 4 m tile half-width를 넘는다. 이 natural tile-crossing은 reanchor 버그와 다른 A 단일 clip의 구조적 제한이다.</div>
+</section>
+
+<section>
+  <h2>Terrain reset alignment audit</h2>
+  <p>Curriculum tile은 8 m × 8 m로, 중심에서 각 축 half-width는 4 m이다. 수정 전 command는 random phase의 누적 world-space root XY를 env origin에 그대로 더했다. 그 결과 simulator root, reference, scan은 수치적으로 같은 world frame을 쓰지만, robot이 배정된 tile가 아닌 인접 tile에서 시작할 수 있었다.</p>
+  <div class="table"><table>
+    <tr><th>raw motion audit</th><th>반경 1 m 밖</th><th>±4 m tile 밖</th><th>XY 범위</th></tr>
+    <tr><td>Generated seed, 8,095 frame</td><td>6,933 (<code>85.645%</code>)</td><td>4,793 (<code>59.209%</code>)</td><td>x <code>[-6.530, 0.616]</code>, y <code>[-0.639, 4.688]</code> m</td></tr>
+    <tr><td>A fixed reference, 997 frame</td><td>847 (<code>84.955%</code>)</td><td>119 (<code>11.936%</code>)</td><td>x <code>[-5.267, 0.175]</code>, y <code>[-0.144, 2.501]</code> m</td></tr>
+  </table></div>
+  <div class="table"><table>
+    <tr><th>1,024-env checkpoint episode-start audit</th><th>반경 1 m 밖</th><th>±4 m tile 밖</th><th>해석</th></tr>
+    <tr><td>legacy Stage-9 <code>model_12000.pt</code></td><td>883</td><td>575</td><td>pre-fix</td></tr>
+    <tr><td>legacy Stage-9 <code>model_14999.pt</code></td><td>865</td><td>610</td><td>pre-fix final, terrain 성능 superseded</td></tr>
+    <tr><td>old A <code>model_12500.pt</code></td><td>873</td><td>108</td><td>integrity-valid, terrain 성능 superseded</td></tr>
+    <tr><td>old E <code>model_12500.pt</code></td><td>859</td><td>613</td><td>integrity-valid, terrain 성능 superseded</td></tr>
+    <tr><td>old F <code>model_12500.pt</code></td><td>870</td><td>620</td><td>integrity-valid, terrain 성능 superseded</td></tr>
+  </table></div>
+  <p>Checkpoint start와 가장 가까운 raw phase의 residual 최댓값은 <code>0.0663 m</code>로 설정된 reset noise와 일치했다. 따라서 위 분포는 학습 중 피치 오류가 아니라 raw translation이 reset에 남아 있었음을 실제 checkpoint state로 확인한 결과다. A는 추가로, horizon이 없던 기존 996개 start 중 499개(<code>50.10%</code>)가 500-step episode 전 clip end reset/wrap 위험을 가졌다.</p>
+  <div class="callout warn"><b>Artifact 판정</b>: 기존 Stage-9/D <code>20260713_100222-...</code>, A <code>20260713_114424-...</code>, E <code>20260713_115808-...</code>, F <code>20260713_121418-...</code>는 실행 종료·checkpoint integrity·architecture 검증용으로는 유효하다. 그러나 terrain별 success/fall/contact 비교에는 사용하지 않고 corrected rerun으로 교체한다. 진행 중인 corrected D <code>20260713_124451-...</code>의 startup <code>model_12000.pt</code> 1,024 starts는 중심 offset max |x|/|y|/radial <code>0.049998/0.049995/0.069307 m</code>, 반경 1 m 밖 0/1,024, tile 밖 0/1,024로 reset noise만 남았다. 이는 actual checkpoint reanchor 증거지만 최종 성능 결과는 아니다.</div>
 </section>
 
 <section>
@@ -97,15 +117,15 @@ lafan1_walk4_subject1_s500_rollout83x12_gen_mj.npz</code></pre>
   <p>Single RTX 4090에서 먼저 비교 가능한 최소 예산으로 <b>501 logged iterations</b>를 사용한다. PPO loop가 BASE iteration 12,000부터 12,500까지 inclusive하게 기록하는 예산이며, 논문값이 아닌 이 재현의 축소 선택이다.</p>
   <div class="table"><table>
     <tr><th>실험</th><th>학습 checkpoint 계획</th><th>현재 상태</th></tr>
-    <tr><td>A</td><td>BASE → 501 logged updates → expected <code>model_12500.pt</code></td><td>미실행</td></tr>
+    <tr><td>A</td><td>BASE → 501 logged updates → <code>model_12500.pt</code></td><td><code>20260713_114424-...</code> 완료; pre-fix terrain 성능 superseded</td></tr>
     <tr><td>B</td><td>BASE 그대로, update 0</td><td>preset만 구현; evaluator 미실행</td></tr>
     <tr><td>C</td><td>BASE를 evaluator에서 full input으로 확장, update 0</td><td>preset만 구현; 별도 training checkpoint를 만들지 않음</td></tr>
-    <tr><td>D</td><td><code>20260713_100222-.../model_12500.pt</code></td><td>snapshot 존재: iter 12,500, actor 702 / critic 834; 공통 평가 미실행</td></tr>
-    <tr><td>E</td><td>BASE → 501 logged updates → expected <code>model_12500.pt</code></td><td>미실행</td></tr>
-    <tr><td>F</td><td>BASE → 501 logged updates → expected <code>model_12500.pt</code></td><td>미실행</td></tr>
+    <tr><td>D</td><td>BASE → corrected full terrain fine-tune</td><td>old <code>20260713_100222-...</code> superseded; corrected <code>20260713_124451-...</code> 진행 중</td></tr>
+    <tr><td>E</td><td>BASE → 501 logged updates → <code>model_12500.pt</code></td><td><code>20260713_115808-...</code> 완료; pre-fix terrain 성능 superseded</td></tr>
+    <tr><td>F</td><td>BASE → 501 logged updates → <code>model_12500.pt</code></td><td><code>20260713_121418-...</code> 완료; pre-fix terrain 성능 superseded</td></tr>
   </table></div>
-  <p>D snapshot은 3,000-iteration production run 도중 저장된 첫 500 간격 checkpoint다. Production은 계속 진행 중이지만 reduced comparison에서는 D를 이 snapshot에 고정한다. A/E/F도 같은 BASE, env 수, seed, PPO 설정과 501 logged iterations를 사용한 뒤 비교할 계획이다.</p>
-<pre><code># 실행 계획 — 아직 실행하지 않음
+  <p>A/E/F의 old run은 같은 BASE, env 수, seed, PPO 설정과 501 logged iterations을 사용해 완주했다. 다만 reset alignment 수정 전에 생성된 artifact이므로 예산 일치의 실행 증거로만 보존하고 terrain 성능 비교에서는 제외한다. Corrected D를 먼저 완주·audit한 뒤 A/E/F를 같은 수정 semantics로 다시 생성해야 한다.</p>
+<pre><code># pre-fix A/E/F에 사용한 historical command shape
 PY=~/.holosoma_deps/miniconda3/envs/hssim/bin/python
 BASE=logs/WholeBodyTracking/20260711_122501-g1_29dof_wbt_gen_manager-locomotion/model_12000.pt
 GEN=logs/motion_gen/terrain_robust_fk_4090/checkpoints/final.pt
@@ -134,7 +154,7 @@ $PY src/holosoma/holosoma/train_agent.py \
   --algo.config.load-optimizer True \
   --command.setup-terms.motion-command.params.motion-config.generator-checkpoint $GEN \
   --command.setup-terms.motion-command.params.motion-config.motion-file $SEED</code></pre>
-  <div class="callout warn"><b>아직 fair result가 아님</b>: D checkpoint가 존재한다는 사실은 D가 A/E/F보다 우수하다는 결과가 아니다. A/E/F checkpoint와 공통 evaluator output이 모두 생겨야 비교가 시작된다. 또한 A의 reference 분포 차이는 update 수를 맞춰도 남는다.</div>
+  <div class="callout warn"><b>아직 fair result가 아님</b>: Old A/D/E/F checkpoint가 존재한다는 사실은 어느 variant가 우수하다는 결과가 아니다. Corrected checkpoint와 공통 evaluator output이 모두 생겨야 비교가 시작된다. 또한 A의 reference 분포 차이와 10.26% natural tile-crossing 한계는 update 수를 맞춰도 남는다.</div>
 </section>
 
 <section>
@@ -144,6 +164,9 @@ $PY src/holosoma/holosoma/train_agent.py \
     <tr><th>항목</th><th>구현된 판정</th></tr>
     <tr><td>Exact type quota</td><td>총 episode 수가 active type 수로 나누어져야 하며 각 type에 정확히 같은 quota를 배정한다. 기본 100 episode와 4 type이면 25개씩이다. 같은 vectorized step에서 quota를 넘긴 extra episode는 모든 denominator에서 제외한다.</td></tr>
     <tr><td>Fixed difficulty</td><td>평가 동안 curriculum initial/min/max level을 같은 값으로 clamp하고 checkpoint env-state는 restore하지 않는다. Adaptive level 변화 없이 지정 row만 비교한다.</td></tr>
+    <tr><td>Phase / clip horizon</td><td>매 episode 유효 phase를 uniform sampling하고, 실효 episode 길이를 fps/control decimation에서 계산해 기본 10 s에 <code>phase_horizon_steps=500</code>을 강제한다. HoloSoma timeout은 <code>episode_length_buf &gt; max_episode_length</code>이므로 accumulator에는 timeout episode가 501 step으로 기록되지만, command는 reset 전 정확히 500회 advance하므로 horizon 500이 맞다. Fixed reference가 episode 전 clip end에 도달해 wrap/reset하지 않는다.</td></tr>
+    <tr><td>Reset XY alignment</td><td>A–F 모두 선택 phase의 root XY를 배정된 8 m tile 중심으로 재정렬하고, 같은 상수 translation을 모든 body/root/object reference에 적용해 relative trajectory를 보존한다.</td></tr>
+    <tr><td>Deterministic generator identity</td><td>Generated variant는 base seed에 env id, episode ordinal, replan ordinal을 독립적으로 합성한다. Batch 순서·subset·async reset이 바뀌어도 같은 identity의 DDIM condition noise를 보존한다.</td></tr>
     <tr><td>Pre-reset capture</td><td>termination/reward 계산 뒤, simulator reset 전에 WBT log hook에서 terminal root pose, termination/timeout mask와 step metric을 취득한다.</td></tr>
     <tr><td>Signed success</td><td>episode-start target heading으로 투영한 최대 forward progress가 threshold 이상이고, episode 중 fall이 없으며 bad-tracking termination도 없어야 한다.</td></tr>
     <tr><td>Fall</td><td>terrain 기준 root height &lt; 0.45 m 또는 upright cosine &lt; 0.5가 한 step이라도 발생</td></tr>
@@ -154,18 +177,25 @@ $PY src/holosoma/holosoma/train_agent.py \
   </table></div>
   <p>Success threshold 기본값은 signed progress 1.5 m다. Episode record는 timeout 또는 bad-tracking termination 때 닫히며, survival은 timeout이면서 fall/bad-tracking이 없는 경우다. Body-origin penetration은 terrain query 높이와 rigid-body origin Z의 차이일 뿐 collision-shape/mesh intersection이 아니다. Undesired contact는 active reward term의 contact-force 판정을 그대로 재사용한다.</p>
   <p>Correction exemplar의 기본 gate는 reference max body-origin proxy ≥ 0.02 m이면서 <code>reference_max - robot_max ≥ 0.01 m</code>다. 처음 조건을 만족한 timestep에서 동시에 여러 env가 맞으면 가장 낮은 env id 하나를 고른다. NPZ에는 raw policy action, root state, target heading, terrain type/level, evaluation/episode step, body name, reference/robot body position, 각 body의 queried terrain height와 penetration proxy, max와 signed improvement를 넣는다. Local scan이 구성된 variant는 scan height, anchor XY/yaw, local/world XY, grid, flatten order와 unit도 함께 저장하고, 미구성 variant는 명시적 false flag와 빈 배열을 저장한다.</p>
-  <div class="callout warn"><b>Exemplar의 의미 제한</b>: 저장 조건은 rigid-body <em>origin</em> 높이 proxy가 reference보다 robot에서 작아진 첫 상관 사례일 뿐이다. Collision shape penetration이 해소됐다는 증거도, policy가 잘못된 reference를 의도적으로 수정했다는 인과 증거도 아니다. 조건을 만족한 frame이 없으면 NPZ를 만들지 않고 JSON에 <code>found=false</code>, <code>path=null</code>을 남긴다. 실제 evaluation이 아직 실행되지 않았으므로 현재 exemplar NPZ도 없다.</div>
-  <p>Generator는 기본적으로 fixed sampling seed를 쓰는 deterministic mode로 바꾸고 evaluation seed와 fixed terrain level을 metadata에 남긴다. 다만 <code>torch_deterministic</code> 기본값은 false이므로 “모든 Isaac Sim 실행이 bitwise 동일하다”는 보장은 아니다. 불완전한 episode quota는 기본적으로 오류 처리한다.</p>
-  <div class="callout"><b>결과 확인 전 고정한 primary row: level 1</b>. D의 공정-budget snapshot <code>model_12500.pt</code>를 사전 점검했을 때 obstacle current-level 분포는 box L0/L1=175/81, stair=200/56, hurdle=191/65였고 current L2 env는 없었다. 누적 L2 episode도 각각 20/10/2개뿐이었다. 따라서 A–F 공통 primary는 네 terrain type을 모두 <code>fixed-terrain-level 1</code>에서 평가하고, L2 이상은 별도 extrapolation stress로만 해석한다. Flat은 level에 따라 geometry가 변하지 않으므로 높은 flat level을 obstacle 숙련도로 세지 않는다. 이 level 선택과 해석은 A–F simulator 결과를 실행하기 전에 기록했다.</div>
-  <div class="callout warn"><b>Implementation-only</b>: accumulator, output writer, callback stop signal과 config invariant는 unit test를 통과했지만 Isaac Sim에서 A–F 중 어느 checkpoint도 이 evaluator로 아직 실행하지 않았다. 따라서 JSON/CSV 성능 산출물은 아직 없다.</div>
+  <div class="callout warn"><b>Exemplar의 의미 제한</b>: 저장 조건은 rigid-body <em>origin</em> 높이 proxy가 reference보다 robot에서 작아진 첫 상관 사례일 뿐이다. Collision shape penetration이 해소됐다는 증거도, policy가 잘못된 reference를 의도적으로 수정했다는 인과 증거도 아니다. 조건을 만족한 frame이 없으면 NPZ를 만들지 않고 JSON에 <code>found=false</code>, <code>path=null</code>을 남긴다. Corrected-protocol 4-episode smoke에서 exemplar NPZ/PNG가 생성됐지만, legacy-misaligned-trained tracker의 단일 proxy frame이므로 최종 사례 체크를 충족하지 않는다.</div>
+  <p>Generator는 fixed base seed와 env/episode/replan identity를 쓰는 deterministic per-env mode로 바꾸고 evaluation seed와 fixed terrain level을 metadata에 남긴다. 다만 <code>torch_deterministic</code> 기본값은 false이므로 “모든 Isaac Sim 실행이 bitwise 동일하다”는 보장은 아니다. 불완전한 episode quota는 기본적으로 오류 처리한다.</p>
+  <div class="table"><table>
+    <tr><th>구성</th><th>Training/preset <code>reanchor / horizon</code></th><th>Stage-10 evaluation</th></tr>
+    <tr><td>Stage-5 flat</td><td><code>false / 0</code></td><td>평가 preset이 아님</td></tr>
+    <tr><td>A fixed reference</td><td><code>true / 500</code></td><td><code>true / effective 500</code></td></tr>
+    <tr><td>B terrain-blind generated</td><td><code>false / 0</code></td><td><code>true / effective 500</code> 강제</td></tr>
+    <tr><td>C/D/E/F generated terrain</td><td><code>true / 0</code></td><td><code>true / effective 500</code> 강제</td></tr>
+  </table></div>
+  <div class="callout"><b>결과 확인 전 고정한 primary row: level 1</b>. 수정 전 D의 공정-budget snapshot <code>model_12500.pt</code>를 사전 점검했을 때 obstacle current-level 분포는 box L0/L1=175/81, stair=200/56, hurdle=191/65였고 current L2 env는 없었다. 누적 L2 episode도 각각 20/10/2개뿐이었다. 이 snapshot은 terrain 성능용으로는 superseded되었지만, 어느 difficulty를 primary로 사전 등록할지 정한 시점의 학습 노출 근거는 이대로 보존한다. A–F 공통 primary는 네 terrain type을 모두 <code>fixed-terrain-level 1</code>에서 평가하고, L2 이상은 별도 extrapolation stress로만 해석한다. Flat은 level에 따라 geometry가 변하지 않으므로 높은 flat level을 obstacle 숙련도로 세지 않는다. 이 level 선택과 해석은 A–F simulator 결과를 실행하기 전에 기록했다.</div>
+  <div class="callout warn"><b>Protocol smoke만 완료</b>: <code>logs/terrain_evaluations/stage10/smoke/D_legacy_tracker_l1_corrected_protocol*</code>은 fixed level 1의 flat/box/stair/hurdle 각 1 episode, exact quota, <code>complete=true</code>로 종료했고 success 3/4를 기록했다. 그러나 이것은 수정 전 <code>model_14999.pt</code>를 재생한 4-episode protocol smoke이다. Legacy-misaligned-trained tracker와 극소 sample이므로 final D 성능, ablation 결과, 통계적 개선으로 보고하지 않는다.</div>
 </section>
 
 <section>
   <h2>Obstacle height와 unseen rough 실행 template</h2>
-  <p>아래는 D snapshot을 예로 든 <b>실행 예정 명령</b>이다. Tyro list literal과 evaluator config parsing까지만 확인했으며 Isaac Sim 평가를 실행하지 않았다. A–F의 해당 checkpoint/preset으로 반복해야 실제 ablation 표가 된다.</p>
+  <p>아래는 corrected D checkpoint가 완성된 뒤 사용할 <b>실행 예정 template</b>이다. Tyro list literal과 evaluator config parsing까지 확인했지만 30/60 cm·rough 평가는 실행하지 않았다. 수정 전 D checkpoint를 대입하지 않고, corrected A–F의 해당 checkpoint/preset으로 반복해야 실제 ablation 표가 된다.</p>
 <pre><code>PY=~/.holosoma_deps/miniconda3/envs/hssim/bin/python
 EVAL=src/holosoma/holosoma/evaluate_wbt_terrain.py
-DCKPT=logs/WholeBodyTracking/20260713_100222-g1_29dof_wbt_gen_terrain_manager-locomotion/model_12500.pt
+DCKPT=logs/WholeBodyTracking/20260713_124451-g1_29dof_wbt_ablation_d_full_terrain_ft-locomotion/&lt;final_model_after_completion&gt;.pt
 GEN=logs/motion_gen/terrain_robust_fk_4090/checkpoints/final.pt
 SEED=data/motion_gen/processed_paperscale/lafan1_walk4_subject1.npz
 PRESET=g1_29dof_wbt_ablation_d_full_finetune
@@ -225,32 +255,41 @@ $PY -m holosoma.motion_gen.scripts.benchmark_inference_latency \
     <tr><td><code>4d0a9ed</code></td><td>첫 threshold 충족 correction-proxy frame의 action/body/terrain/local-scan NPZ와 JSON found/path metadata</td></tr>
     <tr><td><code>315892e</code></td><td>curriculum layout에서 rough type을 명시적 opt-in으로 허용</td></tr>
     <tr><td><code>a42beed</code></td><td>2-step generator와 tracker의 PyTorch CUDA module-only latency benchmark</td></tr>
+    <tr><td><code>32546da</code></td><td>uniform evaluation phase와 env/episode/replan identity별 deterministic DDIM noise</td></tr>
+    <tr><td><code>7edf0e1</code></td><td>phase, reset, batch-order/subset-independent sampling identity 회귀 고정</td></tr>
+    <tr><td><code>884a26b</code></td><td>terrain motion reset XY 재정렬과 effective evaluation horizon, protocol provenance</td></tr>
+    <tr><td><code>d748e46</code></td><td>generated terrain training에서 짧은 reset seed를 보존하도록 horizon 0 고정</td></tr>
+    <tr><td><code>523b197</code></td><td>501-step timeout record와 500 command advance를 분리해 1-env evaluator upper bound만 episode당 501로 정정</td></tr>
   </table></div>
 <pre><code>PY=~/.holosoma_deps/miniconda3/envs/hssim/bin/python
 
 $PY -m pytest -q \
-  src/holosoma/holosoma/config_types/tests/test_ablation_presets.py \
-  src/holosoma/holosoma/utils/tests/test_terrain_evaluation.py \
   src/holosoma/holosoma/config_types/tests/test_terrain_evaluator_config.py \
-  src/holosoma/holosoma/agents/ppo/tests/test_eval_callback_stop.py \
-  src/holosoma/holosoma/managers/command/tests/test_wbt_heading.py \
+  src/holosoma/holosoma/managers/command/tests/test_wbt_evaluation_phase.py \
   src/holosoma/holosoma/managers/command/tests/test_wbt_gen.py \
-  src/holosoma/holosoma/managers/terrain/tests/test_curriculum_terrain.py \
-  src/holosoma/holosoma/motion_gen/tests/test_inference_latency.py
-# 54 passed in 8.43s
+  src/holosoma/holosoma/motion_gen/tests/test_train_smoke.py \
+  src/holosoma/holosoma/utils/tests/test_terrain_ablation_report.py \
+  src/holosoma/holosoma/utils/tests/test_terrain_evaluation.py
+# 88 passed
+
+# timeout upper-bound focused regression
+$PY -m pytest -q \
+  src/holosoma/holosoma/config_types/tests/test_terrain_evaluator_config.py
+# 15 passed
 
 # 별도 read-only 확인
 # BASE: iter 12000, actor (512,154), critic (512,286)
-# D snapshot: iter 12500, actor (512,702), critic (512,834)
+# pre-fix D snapshot (integrity-only): iter 12500, actor (512,702), critic (512,834)
 # 30 cm list override와 rough single-type template config parse 성공</code></pre>
-  <p>위 test는 pure accumulator/serializer, preset semantics, heading selection, callback stop, rough opt-in과 latency helper를 검증한다. Isaac Sim 공통 평가나 CUDA timing을 대신하지 않는다.</p>
+  <p>위 관련 suite는 총 <code>88 passed</code>였고 수정 Python 파일 Ruff도 통과했다. Timeout upper-bound 후속 수정은 별도로 <code>15 passed</code>와 Ruff 통과를 확인했다. Pure accumulator/serializer, preset semantics, phase/horizon/reanchor, per-env sampling identity, heading selection, callback stop, rough opt-in과 latency helper를 검증하지만, corrected checkpoint의 공통 Isaac Sim 성능 평가나 CUDA timing을 대신하지 않는다.</p>
 </section>
 
 <section>
   <h2>남은 실행 순서</h2>
   <ol>
-    <li>A/E/F를 BASE에서 같은 501 logged iteration 예산으로 학습하고 checkpoint integrity를 확인한다.</li>
-    <li>BASE를 쓰는 B/C와 네 fine-tuned snapshot A/D/E/F를 같은 seed, 사전 고정한 primary level 1, exact type quota로 평가한다.</li>
+    <li>진행 중인 corrected D <code>20260713_124451-...</code>를 자연 종료시키고 reset/start·finite checkpoint integrity를 audit한다.</li>
+    <li>A/E/F를 BASE에서 같은 501 logged iteration 예산과 corrected reset semantics로 재학습한다. A의 natural tile-crossing 한계는 별도로 보고한다.</li>
+    <li>BASE를 쓰는 B/C와 corrected A/D/E/F를 같은 seed, uniform phase, per-env deterministic sampling, reanchor, effective horizon, 사전 고정한 primary level 1, exact type quota로 평가한다.</li>
     <li>30 cm, 60 cm, unseen rough를 같은 evaluator contract로 반복한다.</li>
     <li>각 JSON/CSV의 checkpoint hash, 완료 quota, raw numerator/denominator를 대조한 뒤 ablation 표를 작성한다.</li>
     <li>Production이 GPU를 사용하지 않을 때 module-only latency를 측정하고, 이후 ONNX/TensorRT 및 simulator end-to-end 측정과 분리해 보고한다.</li>

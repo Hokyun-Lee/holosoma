@@ -95,10 +95,11 @@ $PY src/holosoma/holosoma/train_agent.py exp:g1-29dof-wbt-gen-terrain logger:dis
 
   <h3>좌표와 현재 한계</h3>
   <ul>
-    <li>Procedural terrain은 하나의 world-frame global mesh다. 각 env의 reset root와 generator seed body 위치는 같은 terrain tile world origin을 사용하도록 동기화했다.</li>
+    <li>Procedural terrain은 하나의 world-frame global mesh다. 각 env의 scene/reset origin은 terrain tile world origin으로 동기화했다. 다만 이 동기화 자체만으로 motion 파일의 누적 root XY가 해당 tile 안에 있음을 보장하지는 않는다.</li>
     <li><code>terrain_locomotion_mix</code> 선택은 Task 6.1의 실행 분리용 구현 선택이다. 현재 구성(flat/rough/low-obstacles)은 최종 box/stair/hurdle curriculum이 아니며 Task 7.3에서 교체한다.</li>
     <li>Task 6.1에서는 observation shape(Actor 154, Critic 286)을 유지해 Stage-5 tracker를 strict-load했다. Generator 입력은 아직 zero scan이며 Task 6.2–6.3에서 실제 scan으로 교체한다.</li>
   </ul>
+  <div class="callout warn"><b>2026-07-13 정정 — “같은 tile”의 범위</b>: 초판의 “reset root와 seed body가 같은 terrain tile을 사용한다”는 표현은 너무 넓었다. Tile은 8 m × 8 m(중심에서 각 축 half-width 4 m)인데, 기존 경로는 env origin에 motion의 world-space root XY를 그대로 더했다. 따라서 scene origin과 scan tile origin은 일치했지만, random seed phase의 robot/reference가 인접 tile에서 시작할 수 있었다. 이 정정은 scan 좌표·flatten·cache 계약의 유효성을 바꾸지 않지만, 기존 terrain 학습을 장애물 성능 근거로 사용하지 못하게 한다.</div>
 </section>
 
 <section>
@@ -179,6 +180,24 @@ $PY -m pytest src/holosoma/holosoma/motion_gen/tests \
 
   <div class="callout ok"><b>Task 6 완료</b>: 실제 simulator terrain scan이 frozen 2-step generator와 PPO tracker 양쪽에 같은 좌표·flatten·단위로 들어가고, legacy tracker warm-start와 flat regression까지 실제 실행으로 확인했다.</div>
   <div class="callout warn"><b>남은 범위</b>: 현재 학습 mesh는 기존 flat/rough/depression mix다. 30 cm synthetic sensitivity는 조건 경로가 살아 있음을 보일 뿐 장애물 극복 품질을 뜻하지 않는다. Positive box/stair/hurdle, 난이도 증가, terrain별 success logging은 Task 7.3에서 구현한다.</div>
+</section>
+
+<section>
+  <h2>Reset XY 정렬 후속 수정 <small>(2026-07-13)</small></h2>
+  <p>문제를 수치로 다시 확인했다. Generated seed clip 8,095 frame의 pelvis XY는 tile 중심 반경 1 m 밖이 6,933 frame(<code>85.645%</code>), 어느 축이든 half-width 4 m 밖이 4,793 frame(<code>59.209%</code>)이었다. 범위는 x <code>[-6.530, 0.616] m</code>, y <code>[-0.639, 4.688] m</code>이다. 실제 1,024-env checkpoint의 episode-start XY도 legacy Stage-9 <code>model_12000.pt</code>에서 반경 1 m 밖 883/1,024, tile 밖 575/1,024였고, <code>model_14999.pt</code>에서 각각 865/1,024, 610/1,024였다. 각 start를 가장 가까운 raw phase와 맞춘 residual 최댓값 <code>0.0663 m</code>는 설정된 reset noise와 일치해, tile 이탈이 단순 audit 근사 오류가 아님을 확인했다.</p>
+  <div class="table"><table>
+    <tr><th>구성</th><th><code>reanchor_motion_xy_on_reset</code></th><th><code>phase_horizon_steps</code></th></tr>
+    <tr><td>Stage-5 flat</td><td><code>false</code></td><td><code>0</code></td></tr>
+    <tr><td>Generated terrain 학습</td><td><code>true</code></td><td><code>0</code> — reset 후 seed clip을 진행시키지 않음</td></tr>
+    <tr><td>Stage-10 evaluator</td><td>모든 variant에 <code>true</code> 강제</td><td>실효 10 s 해상도에서 <code>500</code></td></tr>
+  </table></div>
+  <p>Commit <code>884a26b</code>는 선택 phase의 root XY를 env origin에 재정렬하고 relative trajectory는 보존하며, evaluator에서 clip이 10 s 안에 wrap되지 않도록 실효 horizon을 적용한다. Commit <code>d748e46</code>는 generated command가 reset 뒤 seed clip을 진행시키지 않는 점을 반영해 terrain 학습 horizon을 0으로 두어 짧은 legacy seed도 보존했다.</p>
+  <ul>
+    <li>Flat regression <code>20260713_124232-g1_29dof_wbt_gen_manager-locomotion</code>: 64 env, <code>reanchor=false</code>/<code>horizon=0</code>, strict tracker·optimizer load, frozen generator, 1 PPO iteration 후 exit 0.</li>
+    <li>Terrain smoke <code>20260713_124259-g1_29dof_wbt_ablation_d_full_terrain_ft-locomotion</code>: 64 env, <code>reanchor=true</code>/<code>horizon=0</code>, sim scan, expanded tracker·optimizer load, frozen generator, 2 PPO iteration 후 <code>model_12001.pt</code> 저장·exit 0.</li>
+    <li>관련 회귀 검사 <code>88 passed</code>, 수정 Python 파일 Ruff 통과.</li>
+  </ul>
+  <div class="callout warn"><b>기존 run 해석</b>: 수정 전 Stage-9 학습은 checkpoint load·frozen generator·scan dataflow·PPO 종료와 finite artifact를 검증한 integrity 기록으로는 유효하다. 다만 reset phase와 terrain tile이 엇갈렸으므로 terrain 성능 checkpoint로는 superseded되었다. 정렬 후 D 재학습 <code>20260713_124451-g1_29dof_wbt_ablation_d_full_terrain_ft-locomotion</code>은 현재 진행 중이다. 이 run의 startup <code>model_12000.pt</code> 1,024 starts는 중심 max |x|/|y|/radial offset <code>0.049998/0.049995/0.069307 m</code>, 반경 1 m 밖 0/1,024, tile 밖 0/1,024로 reset noise만 남았음을 확인했다. 그러나 이 문서에 최종 성능이나 완료 판정을 추가하지 않는다.</div>
 </section>
 
 <footer>HoloSoma motion_gen · Stage 6 진행 문서 · 이전: <a href="motion_generator_closedloop_ko.html">Stage 5 폐루프</a></footer>
