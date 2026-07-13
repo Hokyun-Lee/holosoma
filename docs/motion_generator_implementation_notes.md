@@ -940,6 +940,37 @@ records seeds `[42,43,44]`, 30 sources, and 3,000 episodes, and its `combined/`
 directory contains the pooled JSON/CSV/Markdown. Latency is neither pooled nor
 rerun; the seed-42 RTX 4090 module benchmark remains the latency result.
 
+### Preregistered closed-loop fine-tune seed replication
+
+This protocol was written on 2026-07-14 **before inspecting simulator
+evaluation results** for the training-seed-43/44 policies. At preregistration
+time, only the D seed-43 fine-tune W&B run
+[`8ubs42lg`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/8ubs42lg)
+was in progress. No replication result or completion checkbox is changed yet.
+
+D/E fine-tune seeds 42–44 all restart from the same Stage-5 `BASE` checkpoint
+and its optimizer state. They are therefore closed-loop PPO fine-tune seed
+replications, not independent end-to-end pipeline seeds that repeat generator
+training, offline tracker pretraining, and data generation. For each fine-tune
+seed, D fair and E fair are the paired 501-logged-update tracker-terrain-
+observation contrast. D final is the 3,000-update duration diagnostic and is
+not substituted into the fair-budget D/E contrast.
+
+Each of D fair, E fair, and D final is evaluated at evaluation seeds 42, 43,
+and 44 on common L1 for exactly 100 episodes: flat/box/stair/hurdle have exact
+25/25/25/25 quotas. The common contract is deterministic generator/per-env
+sampling, uniform valid phase, reset XY reanchor, and phase horizon 500.
+`torch_deterministic=false`, so bitwise simulator determinism is not claimed.
+The expected grid is 27 sources: the existing nine common-L1 sources for
+training seed 42 are reused, and 18 sources are newly produced for training
+seeds 43 and 44.
+
+Aggregation first sums raw numerators and denominators rather than averaging
+per-source rates. Interpretation first reports the paired E-fair-minus-D-fair
+success delta within each training seed, then its sign and range across the
+three fine-tune seeds. With `n=3`, this is descriptive replication only, not a
+confidence interval or significance test.
+
 ## Known limitations / not yet verified
 
 - Corrected terrain-aware closed-loop training and all Stage-10 rows completed.
