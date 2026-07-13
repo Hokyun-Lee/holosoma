@@ -30,6 +30,19 @@ def test_generated_motion_terrain_experiment_is_separate_from_flat():
     assert g1_29dof_wbt_gen_terrain.algo.config.checkpoint_load_mode == "expand_input"
     assert "motion_heading_alignment" not in g1_29dof_wbt_gen.reward.terms
     assert parsed.reward.terms["motion_heading_alignment"].weight == 1.0
+    layout_cfg = parsed.terrain.terrain_term.curriculum_layout
+    assert layout_cfg.enabled
+    assert layout_cfg.terrain_types == ["flat", "box", "stair", "hurdle"]
+    assert parsed.terrain.terrain_term.num_rows == 10
+    assert parsed.terrain.terrain_term.num_cols == 20
+    assert not g1_29dof_wbt_gen.terrain.terrain_term.curriculum_layout.enabled
+
+    curriculum_term = parsed.curriculum.setup_terms["terrain_curriculum"]
+    assert curriculum_term.params["enabled"] is True
+    assert curriculum_term.params["initial_level"] == 0
+    assert curriculum_term.params["success_min_episode_fraction"] == 0.9
+    assert curriculum_term.params["skip_first_episode"] is True
+    assert "terrain_curriculum" not in g1_29dof_wbt_gen.curriculum.setup_terms
 
     for group_name in ("actor_obs", "critic_obs"):
         flat_terms = sorted(g1_29dof_wbt_gen.observation.groups[group_name].terms)

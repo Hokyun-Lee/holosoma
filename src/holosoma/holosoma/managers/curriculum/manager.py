@@ -149,6 +149,15 @@ class CurriculumManager:
                 func = self._reset_funcs[term_name]
                 func(self.env, env_ids, **term_cfg.params)
 
+    def before_reset(self, env_ids) -> None:
+        """Run pre-reset hooks for stateful curriculum terms.
+
+        This hook is intentionally class-only: existing stateless reset terms
+        keep running from :meth:`reset` at their original lifecycle position.
+        """
+        for instance in self._class_instances:
+            instance.before_reset(env_ids)
+
     def step(self) -> None:
         """Run step hooks.
 

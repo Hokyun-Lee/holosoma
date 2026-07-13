@@ -78,6 +78,32 @@ class WholeBodyTrackingManager(BaseTask):
             raise RuntimeError("AverageEpisodeLengthTracker is not registered with the curriculum manager.")
         return tracker
 
+    def get_checkpoint_state(self) -> dict[str, object]:
+        """Persist stateful WBT curricula alongside PPO checkpoints."""
+        state: dict[str, object] = {
+            "average_episode_tracker": self._get_average_episode_tracker().state_dict(),
+        }
+        terrain_curriculum = self.curriculum_manager.get_term("terrain_curriculum")
+        if terrain_curriculum is not None:
+            state["terrain_curriculum"] = terrain_curriculum.state_dict()
+        return state
+
+    def load_checkpoint_state(self, state: dict[str, object] | None) -> None:
+        """Restore optional curriculum state; legacy WBT checkpoints have none."""
+        if not state:
+            return
+
+        tracker_state = state.get("average_episode_tracker")
+        if tracker_state is not None:
+            tracker = self._get_average_episode_tracker()
+            tracker.load_state_dict(tracker_state)
+            tracker.suppress_next_update()
+
+        terrain_state = state.get("terrain_curriculum")
+        terrain_curriculum = self.curriculum_manager.get_term("terrain_curriculum")
+        if terrain_state is not None and terrain_curriculum is not None:
+            terrain_curriculum.load_state_dict(terrain_state)
+
     # -------------------------------- terms same with locomotion_manager.py [end]--------------------------------
 
     def _update_log_dict(self):

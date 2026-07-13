@@ -9,7 +9,7 @@ Korean user manual: `docs/motion_generator_ko.html`.
 
 | Source | What was used | License |
 |---|---|---|
-| arXiv:2604.17335 (main paper) | Generator design facts (below). Project page https://wholebodylocomotion.github.io/ has **no public code** (checked 2026-07-10). | — |
+| arXiv:2604.17335 (main paper) | Generator design facts (below). The official project page exposes Paper/Video/Poster only and **no public code** (rechecked 2026-07-13). | — |
 | MDM, Tevet et al. ICLR 2023 (arXiv:2209.14916) | Architecture family + defaults (8 layers, 4 heads, d=512, ff=1024, dropout 0.1, GELU; x0-prediction; cosine schedule, T=1000). Ideas only, no code copied. | MIT |
 | PARC, Xu et al. SIGGRAPH 2025 | Cited by the paper for geometric losses; used as conceptual reference for velocity/consistency losses. | — |
 | OmniRetarget (arXiv:2509.26633; this repo is its codebase) | Data conversion pipeline (`convert_data_format_mj.py` logic), climb/chair motions from the HF dataset. | Code Apache-2.0 (repo LICENSE), dataset MIT |
@@ -371,13 +371,69 @@ A real 64-env Isaac terrain run resumed Stage-5 `model_12000.pt`, expanded to
 normalizer, and optimizer tensors (`20260713_081949-*`). A separate Stage-5
 flat regression strict-loaded the original 154/286 policy and completed one
 iteration unchanged (`20260713_082014-*`). CPU regression: 62 passed; Ruff and
-diff checks clean. Terrain curriculum (7.3) remains.
+diff checks clean.
+
+## Stage 7.3: balanced terrain curriculum (2026-07-13, docs/motion_generator_stage7_ko.html)
+
+The terrain generated-motion preset now uses an opt-in deterministic 10-row by
+20-column layout. Columns cycle flat/box/stair/hurdle, giving each type exactly
+25% of environments, and rows linearly increase difficulty from 0 to 1. Each
+environment keeps its type and column for the whole run; only its row changes.
+Obstacle geometry is positive-only and a central 1 m half-width square is
+forced to exactly zero height for safe reset. Box height spans 0.05-0.30 m;
+stair maximum elevation and hurdle height span 0.05-0.35 m. Their dimensions,
+10 levels, and the concentric Chebyshev-square geometry are implementation
+choices exposed in config because the paper does not publish them. The old
+random-mix and Stage-5 flat terrain paths remain unchanged.
+
+Per-environment progression evaluates only comparable completed episodes: a
+timeout after at least 90% of the configured episode length is a curriculum
+success proxy, a fall termination is a failure, and the first randomized
+rollout fragment is ignored. This metric is a per-terrain survival-timeout
+rate, **not obstacle-crossing success**: it has no progress or goal predicate.
+Five consecutive proxy successes promote one row and two consecutive failures
+demote one row, clamped to levels 0-9. These thresholds are implementation
+choices/config values. A new pre-reset curriculum lifecycle applies the
+terrain origin and invalidates its scan before the command resets, so generator
+history and terrain scan agree with the new tile.
+
+Logs include mean level, every level fraction, per-type cumulative success and
+episode counts/rates/fractions, and type-fraction min/max/range. Curriculum
+checkpoint state version 1 contains levels, fixed type IDs, streaks, actual
+step guards, initial-fragment eligibility and per-type counts; tensor schema
+validation precedes mutation and restore reapplies every terrain origin. PPO
+resume starts a fresh physical episode via `reset_all()`, so durable levels,
+streaks and cumulative counts continue while the in-progress episode guard is
+reset on the first reset. Legacy tracker checkpoints have no such state and
+correctly initialize at level 0. The state does not yet contain a terrain
+geometry fingerprint; resuming after changing geometry under the same type
+names is unsupported.
+
+The complete 200-tile mesh generated successfully (3,821,135 vertices,
+7,672,002 faces), with column modulo four assigning type, difficulty spanning
+0 to 1, and all origin Z values at zero. A 64-env shortened 0.2 s diagnostic
+completed four PPO iterations (`20260713_084509-*`) and reached 63 environments
+at level 1; exact type fractions stayed [0.25, 0.25, 0.25, 0.25]. Resuming its
+`model_12003.pt` (`20260713_084603-*`) continued levels and cumulative counts
+rather than resetting them. A separate standard-10-second run completed two
+iterations and crossed the 25-policy-step / 0.5 s generator replan boundary
+(`20260713_084654-*`). Generator parameters remained frozen and the actual
+state, five-frame proprioception and simulator scan paths stayed active. A
+post-lifecycle Stage-5 flat regression again strict-loaded 154/286 inputs and
+completed one PPO iteration with `stage5_flat_zeros` (`20260713_084859-*`).
+CPU regression: 80 passed; Ruff and diff checks clean. The shortened curriculum
+run validates progression mechanics, not obstacle performance or convergence.
+Flat environments also carry a row index although their geometry is unchanged,
+so global mean level is a sampling-state diagnostic rather than average
+physical obstacle difficulty. Terrain-by-level rolling success and explicit
+crossing/goal metrics remain Stage 9/10 evaluation work.
 
 ## Known limitations / not yet verified
 
 - Terrain-aware closed-loop dataflow and PPO startup are validated, but no
-  terrain policy has been trained to convergence and positive obstacle success
-  is not yet measured.
+  terrain policy has been trained to convergence. The balanced curriculum and
+  its metrics are active, but positive obstacle success improvement is not yet
+  measured.
 - 2-step DDIM quality is validated offline and used in closed-loop training;
   deployment latency/export remains unverified.
 - Paperscale generation reaches 0.0546 m full-val MPJPE (terrain checkpoint

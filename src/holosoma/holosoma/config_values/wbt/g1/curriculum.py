@@ -16,4 +16,31 @@ g1_29dof_wbt_curriculum = CurriculumManagerCfg(
     step_terms={},
 )
 
-__all__ = ["g1_29dof_wbt_curriculum"]
+g1_29dof_wbt_gen_terrain_curriculum = CurriculumManagerCfg(
+    params={
+        "num_compute_average_epl": 1000,
+    },
+    setup_terms={
+        "average_episode_tracker": CurriculumTermCfg(
+            func="holosoma.managers.curriculum.terms.locomotion:AverageEpisodeLengthTracker",
+            params={},
+        ),
+        "terrain_curriculum": CurriculumTermCfg(
+            func="holosoma.managers.curriculum.terms.terrain:TerrainCurriculum",
+            params={
+                "enabled": True,
+                "initial_level": 0,
+                "min_level": 0,
+                "max_level": None,
+                "success_min_episode_fraction": 0.9,
+                "promote_success_streak": 5,
+                "demote_failure_streak": 2,
+                "skip_first_episode": True,
+            },
+        ),
+    },
+    reset_terms={},
+    step_terms={},
+)
+
+__all__ = ["g1_29dof_wbt_curriculum", "g1_29dof_wbt_gen_terrain_curriculum"]

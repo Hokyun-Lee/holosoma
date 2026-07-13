@@ -57,6 +57,20 @@ class CurriculumTermBase(ABC):
             Environment IDs being reset
         """
 
+    def before_reset(self, env_ids) -> None:
+        """Inspect the completed episode before other managers reset.
+
+        Stateful terms that need termination outcomes or need to update reset
+        state before command resampling can override this hook.  It is a
+        default no-op so existing curriculum terms retain their lifecycle.
+
+        Parameters
+        ----------
+        env_ids : torch.Tensor or array-like
+            Environment IDs selected for reset.
+        """
+        del env_ids
+
     @abstractmethod
     def step(self) -> None:
         """Step hook called every simulation step.

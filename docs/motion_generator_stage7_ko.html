@@ -50,8 +50,8 @@ footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted
     </ul>
     <h3>Task 7.3 — Terrain curriculum</h3>
     <ul>
-      <li>☐ terrain별 difficulty level</li><li>☐ curriculum level 자동 증가</li>
-      <li>☐ terrain별 success rate logging</li><li>☐ 편향 없는 terrain sampling</li>
+      <li>☑ terrain별 difficulty level</li><li>☑ curriculum level 자동 증가</li>
+      <li>☑ terrain별 success rate logging</li><li>☑ 편향 없는 terrain sampling</li>
     </ul>
   </div>
 </section>
@@ -160,8 +160,72 @@ $PY src/holosoma/holosoma/train_agent.py exp:g1-29dof-wbt-gen logger:disabled \
 </section>
 
 <section>
-  <h2>남은 작업</h2>
-  <p>Stage 7에서 남은 것은 Task 7.3이다. Positive box/stair/hurdle terrain, 자동 difficulty 상승, terrain-balanced sampling과 terrain별 success logging을 연결한다. ONNX tracker export/runtime에는 같은 history state machine이 별도로 필요하며 Stage 10 latency/export 검증 때 함께 다룬다.</p>
+  <h2>Task 7.3 결과 <small>(2026-07-13)</small></h2>
+  <p><code>exp:g1-29dof-wbt-gen-terrain</code>에만 deterministic 10×20 curriculum terrain을 연결했다. 열은 <code>flat → box → stair → hurdle</code>를 반복하므로 각 type이 정확히 25%이고, 행 0–9는 difficulty 0–1을 선형 보간한다. 각 env의 type/column은 학습 내내 고정하고 episode 성과에 따라 row만 바꾼다. 기존 random terrain preset과 Stage-5 flat preset은 그대로다.</p>
+
+  <div class="table"><table>
+    <tr><th>terrain</th><th>level 0 → 9</th><th>구성</th></tr>
+    <tr><td>flat</td><td>항상 0 m</td><td>baseline surface</td></tr>
+    <tr><td>box</td><td>0.05 → 0.30 m</td><td>0.6 m square, 1.4 m 간격</td></tr>
+    <tr><td>stair</td><td>최대 0.05 → 0.35 m</td><td>0.4 m tread의 동심 square stair</td></tr>
+    <tr><td>hurdle</td><td>0.05 → 0.35 m</td><td>폭 0.2 m, 1.0 m 간격의 동심 square ring</td></tr>
+  </table></div>
+  <p>모든 obstacle은 양의 높이만 가지며 tile 중심의 ±1.0 m square를 정확히 0으로 비워 안전하게 spawn한다. 전체 mesh 200 tile을 실제 생성했을 때 3,821,135 vertices / 7,672,002 faces였고, type은 <code>column % 4</code>, difficulty는 0→1, 모든 spawn origin Z는 0임을 확인했다.</p>
+
+  <div class="table"><table>
+    <tr><th>파일</th><th>변경</th></tr>
+    <tr><td><code>config_types/terrain.py</code>, <code>config_values/terrain.py</code></td><td>geometry와 difficulty가 노출된 curriculum layout/preset</td></tr>
+    <tr><td><code>simulator/shared/terrain.py</code></td><td>flat/positive box/concentric stair/hurdle heightfield와 10×20 layout 생성</td></tr>
+    <tr><td><code>managers/terrain/terms/locomotion.py</code></td><td>env별 고정 type/column/level, origin 적용과 scan cache 무효화</td></tr>
+    <tr><td><code>managers/curriculum/terms/terrain.py</code></td><td>episode 판정, level 전이, logging, checkpoint state</td></tr>
+    <tr><td><code>envs/base_task/base_task.py</code>, <code>managers/curriculum/*</code></td><td>command reset 이전 <code>before_reset</code> lifecycle</td></tr>
+    <tr><td><code>config_values/wbt/g1/{curriculum,experiment_gen_terrain}.py</code></td><td>terrain experiment만 curriculum opt-in</td></tr>
+    <tr><td><code>envs/wbt/wbt_manager.py</code></td><td>curriculum state 저장/복구와 legacy checkpoint fallback</td></tr>
+    <tr><td><code>test_curriculum_terrain.py</code>, <code>test_terrain.py</code>, <code>test_tyro_cli.py</code></td><td>geometry, lifecycle, state, config 회귀 테스트</td></tr>
+  </table></div>
+
+  <div class="callout warn"><b>구현 선택</b>: 논문은 terrain geometry, level 수, 승급/강등 기준을 공개하지 않는다. 위 치수와 10단계, 성공 기준 0.9 episode, 5연속 성공 승급, 2연속 실패 강등은 모두 config/CLI로 노출한 구현 선택이다. Stair와 hurdle을 heading에 종속시키지 않기 위해 Chebyshev-distance square ring으로 만들었다.</div>
+
+  <h3>Episode 판정과 lifecycle</h3>
+  <p>Curriculum의 학습용 성공 proxy는 fall termination 없이 episode 최대 길이의 90% 이상을 실제 진행한 timeout으로 정의한다. PPO 시작 시 <code>episode_length_buf</code>가 무작위화되어 첫 reset은 잘린 fragment일 수 있으므로 각 env의 첫 outcome을 제외한다. 이후 성공 5회가 연속되면 level을 +1, 실패 2회가 연속되면 −1하고 [0, 9]로 clamp한다. Terrain origin은 command reset보다 먼저 바꿔 새 generator history/scan이 새 tile 좌표를 사용하게 했으며, scan cache도 즉시 무효화한다.</p>
+
+  <div class="callout warn"><b>성공률의 의미</b>: 현재 <code>success_rate</code>는 terrain type별 <em>생존 timeout 비율</em>이다. 진행 거리나 obstacle 반대편 도달을 판정하지 않으므로 “장애물 통과 성공률”이 아니다. 실제 obstacle success는 Stage 9/10에서 진행 방향별 crossing/goal 조건으로 별도 측정한다. 또한 flat도 같은 level index를 가지므로 전체 mean level은 sampling 상태이지 물리적 평균 장애물 높이가 아니다.</div>
+
+  <p>Checkpoint에는 terrain level, fixed type ID, 두 streak, 실제 episode step, 첫-fragment guard, type별 누적 성공/episode count를 state version 1로 저장한다. Tensor schema의 shape/type/type-name을 엄격히 검사한 뒤 모든 env origin을 복구한다. PPO resume가 <code>reset_all()</code>로 새 물리 episode를 시작하므로 level/streak/누적 count는 이어지지만 진행 중이던 episode의 step/eligibility는 첫 reset에서 의도적으로 새 fragment 상태가 된다. 예전 checkpoint에 curriculum state가 없으면 level 0의 새 state로 시작하므로 Stage-5 warm-start와 호환된다. Geometry fingerprint는 아직 checkpoint에 없으므로 같은 type 이름 아래 geometry config를 바꾼 checkpoint resume는 금지한다.</p>
+
+  <h3>Logging과 균형 검증</h3>
+  <p><code>terrain_curriculum/mean_level</code>, level별 env fraction, type별 <code>success_count</code>/<code>episode_count</code>/<code>success_rate</code>/<code>env_fraction</code>, type fraction min/max/range를 별도 기록한다. 64 env 실행에서 flat/box/stair/hurdle env fraction이 각각 0.25이고 range가 정확히 0이었다.</p>
+
+<pre><code># CPU regression
+$PY -m pytest src/holosoma/holosoma/motion_gen/tests \
+  src/holosoma/holosoma/config_types/tests \
+  src/holosoma/holosoma/agents/ppo/tests/test_checkpoint_expansion.py \
+  src/holosoma/holosoma/managers/reward/tests/test_heading.py \
+  src/holosoma/holosoma/managers/observation/tests/test_term_history.py \
+  src/holosoma/holosoma/managers/terrain/tests/test_curriculum_terrain.py \
+  src/holosoma/holosoma/managers/curriculum/tests/test_terrain.py -q
+# 80 passed, 1 pre-existing scheduler warning
+
+# 짧은 curriculum 전이 진단: 앞 terrain PPO 명령에 추가
+--training.num-envs 64 --algo.config.num-learning-iterations 4 \
+--simulator.config.sim.max-episode-length-s 0.2
+
+# 표준 10 s episode 및 2 Hz replan 경로
+--training.num-envs 64 --algo.config.num-learning-iterations 2</code></pre>
+
+  <ul>
+    <li>짧은 전이 진단 <code>20260713_084509-g1_29dof_wbt_gen_terrain_manager-locomotion</code>은 iteration 12,000–12,003을 완료했다. 최종 exact checkpoint state는 level 0 env 1개 / level 1 env 63개였고 type별 누적 success count는 [126, 127, 128, 126], episode count는 모두 144였다.</li>
+    <li><code>model_12003.pt</code> resume run <code>20260713_084603-*</code>은 iteration 하나를 더 완료했다. Level은 [2, 62], 누적 success count [145, 149, 149, 151], episode count [181, 183, 181, 185]로 이어져 state와 origin이 reset되지 않음을 확인했다.</li>
+    <li>표준 10초 설정 run <code>20260713_084654-*</code>은 2 PPO iterations를 완료해 25 policy step마다 수행되는 0.5초/2 Hz generator replan 경계를 통과했다. Frozen generator, actual state/history/terrain scan, actor 702 / critic 834가 모두 유지됐다. 이 짧은 run에서 level이 아직 0인 것은 기본 5연속 성공 조건상 정상이다.</li>
+    <li>Curriculum lifecycle 변경 뒤 flat 회귀 <code>20260713_084859-g1_29dof_wbt_gen_manager-locomotion</code>도 strict 154/286 checkpoint와 optimizer를 로드해 iteration 12,000을 완료했다. Generator는 frozen이고 terrain은 기존 <code>stage5_flat_zeros</code>였다.</li>
+    <li>Unit tests는 geometry/central clearance/type balance, 승급·강등·clamp, subset/env 격리, 첫 fragment와 짧은 timeout guard, per-type survival proxy, state schema round-trip 및 reset ordering을 검사했다. Ruff와 <code>git diff --check</code>도 통과했다.</li>
+  </ul>
+  <div class="callout ok"><b>Task 7.3 완료</b>: terrain 난이도, 자동 level 전이, terrain별 성공률, 균형 고정 sampling, checkpoint resume를 실제 Isaac Sim PPO와 단위 테스트로 확인했다. 짧은 0.2초 run은 전이 검증용이지 obstacle 성능 결과가 아니다.</div>
+</section>
+
+<section>
+  <h2>다음 작업</h2>
+  <p>Stage 7의 구현 체크리스트는 모두 완료됐다. 다음은 Stage 8 condition noise, differentiable FK consistency loss, terrain sensitivity 평가다. 아직 curriculum policy를 수렴시킨 것이 아니므로 obstacle 성공률 향상은 Stage 9 장기 PPO와 Stage 10 공통 평가에서 별도로 판단한다. 그 평가에는 terrain×level rolling metric과 명시적 crossing/goal 판정을 추가해야 한다. ONNX tracker runtime에는 동일한 history state machine이 필요하다.</p>
 </section>
 
 <footer>HoloSoma motion_gen · Stage 7 진행 문서 · 이전: <a href="motion_generator_stage6_ko.html">Stage 6 terrain 연결</a></footer>

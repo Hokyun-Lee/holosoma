@@ -1,9 +1,9 @@
 """Terrain variant of the closed-loop generated-motion WBT experiment.
 
 This preset intentionally stays separate from ``g1_29dof_wbt_gen`` so the
-Stage-5 flat baseline remains unchanged.  Stage 6 starts from HoloSoma's
-existing procedural terrain mix; the generator height scan is connected in
-the following tasks.
+Stage-5 flat baseline remains unchanged. Stage 6 introduced simulator height
+scans; Stage 7 opts this preset into the balanced flat/box/stair/hurdle
+curriculum while keeping the preset name and checkpoint migration path stable.
 """
 
 from dataclasses import replace
@@ -11,6 +11,7 @@ from dataclasses import replace
 from holosoma.config_types.reward import RewardTermCfg
 from holosoma.config_values import terrain
 from holosoma.config_values.wbt.g1.command_gen_terrain import g1_29dof_wbt_gen_terrain_command
+from holosoma.config_values.wbt.g1.curriculum import g1_29dof_wbt_gen_terrain_curriculum
 from holosoma.config_values.wbt.g1.experiment_gen import g1_29dof_wbt_gen
 from holosoma.config_values.wbt.g1.observation_gen_terrain import g1_29dof_wbt_gen_terrain_observation
 
@@ -28,8 +29,9 @@ g1_29dof_wbt_gen_terrain = replace(
         g1_29dof_wbt_gen.training,
         name="g1_29dof_wbt_gen_terrain_manager",
     ),
-    terrain=terrain.terrain_locomotion_mix,
+    terrain=terrain.terrain_locomotion_curriculum,
     command=g1_29dof_wbt_gen_terrain_command,
+    curriculum=g1_29dof_wbt_gen_terrain_curriculum,
     observation=g1_29dof_wbt_gen_terrain_observation,
     reward=_terrain_reward,
     algo=replace(

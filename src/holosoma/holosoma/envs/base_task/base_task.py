@@ -246,6 +246,13 @@ class BaseTask:
         # Call the actual reset implementation (to be overridden by subclasses)
         self._reset_envs_idx_impl(env_ids, target_states, target_buf)
 
+        # Curriculum terms may need the previous termination outcome and may
+        # update reset state (for example, a terrain origin) before commands
+        # are resampled.  The regular curriculum reset hook remains below in
+        # its original position.
+        if self.curriculum_manager is not None:
+            self.curriculum_manager.before_reset(env_ids)
+
         # Reset all managers AFTER state changes
         if self.randomization_manager is not None:
             self.randomization_manager.reset(env_ids)
