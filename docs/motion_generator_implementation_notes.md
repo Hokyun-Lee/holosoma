@@ -30,7 +30,8 @@ Jetson Thor.
 
 **Not published (all values below are implementation choices):** hidden
 dims/layers/heads, beta schedule, T, epsilon-vs-x0, optimizer, batch size,
-LR, EMA, loss weights, normalization frame, terrain scan resolution, CFG.
+LR, EMA, loss weights, normalization frame, terrain scan resolution, CFG,
+condition-noise magnitudes/distributions, and FK loss reduction/weight.
 
 | Item | Paper | This implementation | Basis |
 |---|---|---|---|
@@ -39,13 +40,13 @@ LR, EMA, loss weights, normalization frame, terrain scan resolution, CFG.
 | Feature dim / frame | 99 | **78** = 3+4+29+42 | consequence of the above |
 | Canonical frame | unspecified | anchor = last past frame; xy→0, yaw→0, z absolute; quats wxyz sign-continuous | common practice (MDM/PARC-style) |
 | Heading | "from base pose difference" | unit xy vector anchor→last future frame, fallback (1,0) below 5 cm displacement | paper gives no encoding details |
-| Terrain scan | used, resolution unknown | **289-dim** (17×17 @0.1 m), x∈[-0.3,1.3], y∈[-0.8,0.8], heading-aligned absolute height; trained on 150 OmniRetarget terrain clips (Phase B) | resolution/range are implementation choices; closed-loop simulator still supplies zeros through stage 5 |
+| Terrain scan | used, resolution unknown | **289-dim** (17×17 @0.1 m), x∈[-0.3,1.3], y∈[-0.8,0.8], heading-aligned absolute height; trained on 150 OmniRetarget terrain clips (Phase B); real simulator scans connected in Stage 6 | resolution/range are implementation choices; Stage 5 remains the zero-scan flat baseline, while Stage 7 adds the balanced obstacle curriculum |
 | Architecture | "MDM [26,30]" | MDM defaults 512/8/4/1024 | official MDM implementation |
 | Diffusion | unspecified | DDPM T=1000 cosine, x0-prediction (eps available) | MDM convention |
 | Few-step inference | 2 steps (deployment) | DDIM, any step count; **2-step validated** at 0.0475 m val body MPJPE and used by the closed-loop tracker | 50-step remains the offline evaluation protocol |
-| Losses | recon + velocity + joint consistency + terrain penetration | recon split (root pos/quat/joint/body) + quat-norm + velocity + **bone-length consistency** (surrogate for FK consistency; no differentiable FK) + foot-slide (contact proxy) + flat-ground penetration | weights are choices; contact labels do not exist → contact-consistency loss disabled |
+| Losses | recon + velocity + joint consistency + terrain penetration | recon split (root pos/quat/joint/body) + quat-norm + velocity + bone-length consistency + **true differentiable G1 FK consistency (Stage 8, opt-in)** + foot-slide (contact proxy) + scan/flat terrain penetration | weights and FK model/subset are choices; contact labels do not exist → contact-consistency loss disabled |
 | Data | ~1 h augmented | **165.3 min, 195 clips** (paperscale); the original 6.8 min/11-clip profile remains available | implementation scale-up for a single RTX 4090 |
-| Fine-tuning w/ tracker | closed loop | **implemented**: frozen generator, measured two-frame state, 0.5 s replanning, 2-step DDIM | stage 5; terrain input remains zero until stage 6 |
+| Fine-tuning w/ tracker | closed loop | **implemented**: frozen generator, measured two-frame state, real simulator terrain scan, 0.5 s replanning, 2-step DDIM | Stage 5 flat baseline; Stage 6 terrain dataflow; Stage 7 history/reward/curriculum; robust Stage-8 generator still awaits converged terrain PPO |
 
 ## Data pipeline
 
@@ -428,6 +429,165 @@ so global mean level is a sampling-state diagnostic rather than average
 physical obstacle difficulty. Terrain-by-level rolling success and explicit
 crossing/goal metrics remain Stage 9/10 evaluation work.
 
+## Stage 8: generator robustness (2026-07-13, docs/motion_generator_stage8_ko.html)
+
+### Task 8.1: structured condition noise — completed
+
+- [x] noise magnitudes are configurable
+- [x] root quaternions remain normalized and sign-continuous
+- [x] clean/noisy validation uses matched diffusion randomness
+- [x] noisy-condition samples remain finite and do not collapse
+
+`ConditionNoiseCfg` applies perturbations in physical units to the two past
+frames and terrain condition only, before normalization. It never corrupts the
+future target or the clean scan used by geometric losses, and inference does
+not add it implicitly. `terrain_robust_4090` uses root-position 0.01 m,
+root-orientation 0.02 rad, joint-position 0.01 rad, body-position 0.01 m,
+terrain point-height 0.01 m, scan bias 0.01 m, local-xy 0.02 m and yaw 0.02 rad
+Gaussian standard deviations, plus 5% point dropout. Quaternion noise is
+axis-angle left-composed in internal wxyz order, normalized, and sign-aligned
+across time. Terrain xy/yaw error is a bilinear warp of the existing
+x-major/y-fastest 17x17 scan. All these values and distributions are
+**implementation choices**: the paper does not publish them. Every default is
+zero, preserving Stage 1-7 presets.
+
+Validation computes clean and noisy loss/sample metrics from the same batch,
+diffusion timestep/noise, and exact same initial DDIM noise (condition RNG has
+a separate fixed seed). The old checkpoint parser maps the missing nested
+noise config to all-zero defaults. Because the Stage-3 checkpoint ended its
+200k-step cosine schedule at zero LR, the robustness preset has an explicit
+`resume_weights_only=True`: it loads model/EMA/normalizer but restarts optimizer,
+scheduler, and step. Full-resume behavior remains the default elsewhere.
+
+At batch size 256, eight fixed validation batches, seed 123, and 2-step DDIM,
+the old `terrain_4090/final.pt` scored clean/noisy total loss
+0.009626818/0.012202425 and clean/noisy body MPJPE
+0.0345846/0.0601754 m. After 10,000 robustness+FK steps the corresponding
+values were 0.009751713/0.010175588 and 0.0385989/0.0499975 m. The noisy-clean
+MPJPE gap therefore narrowed from 0.0255908 to 0.0113986 m without non-finite
+or collapsed motion, while clean MPJPE worsened by about 4 mm. This is a
+measured robustness/clean-accuracy trade-off from one seed, not a general
+superiority claim.
+
+Changed files: `motion_gen/condition_noise.py`, `configs.py`, `training.py`,
+`sampling.py`, `tests/test_condition_noise.py`, and
+`tests/test_train_smoke.py` (implementation commit `cbae008`).
+
+### Task 8.2: differentiable FK consistency — completed
+
+- [x] differentiable 29-DoF G1 FK is implemented
+- [x] FK coordinate loss and body-error metric are logged
+- [x] clean and noisy FK errors decreased after fine-tuning
+- [x] the measured joint/root-head versus body-head conflict decreased
+
+`G1ForwardKinematics` is a parameter-free torch implementation of the exact
+29-hinge tree in
+`src/holosoma_retargeting/holosoma_retargeting/models/g1/g1_29dof.xml`.
+Constants are pinned to source SHA-256
+`8c586e4747da85804180fe44d8692e0fd8231356728b6327e256dca498087a78`;
+joint/body names and source hash fail fast. Inputs accept arbitrary batch
+dimensions, root wxyz quaternion, root position, and 29 joint angles; output is
+the 14 tracked body origins in generator order. Across 256 random poses,
+MuJoCo parity maximum L2 error was 1.095e-15 m in float64 and 6.35e-7 m in
+float32. A pre-training calibration on eight real dataset windows measured
+mean 6.324e-8 m and max 3.806e-7 m, below the configurable 1 mm tolerance.
+
+`LossWeights.fk_consistency` defaults to zero for Stage 1-7 compatibility.
+The separate `terrain_robust_fk_4090` preset sets it to 0.1 and minimizes
+coordinate MSE between the independently predicted body positions and FK of
+the predicted root/joints; `fk_body_error_m` logs mean body-origin L2 distance.
+The MJCF, 14-body subset, coordinate-MSE reduction, weight 0.1, and 1 mm
+tolerance are **implementation choices** because the paper does not publish
+them. The fixed comparison above reduced clean FK error
+0.00698697 -> 0.00690262 m (1.2%) and noisy FK error
+0.00717166 -> 0.00694394 m (3.2%). The change is small but in the intended
+direction under both conditions; it does not by itself establish better
+contacts or obstacle traversal.
+
+Changed files: `motion_gen/kinematics.py`, `tests/test_kinematics.py`
+(foundation commit `dc5c952`), plus `losses.py`, `configs.py`, `training.py`,
+and `tests/test_losses.py` (integration commit `cbae008`).
+
+### Task 8.3: fixed-condition terrain sensitivity — evaluation completed
+
+- [x] foot height, root height, knee flexion, and penetration proxy compared
+- [x] obstacle height causes a threshold-level physical response
+- [ ] desired obstacle-clearing response is **not** demonstrated
+
+`evaluate_terrain_sensitivity.py` fixes the same walk4 history at frame 5750,
+anchor heading `[0.976827, -0.214030]`, seed 123, and 2-step DDIM, then changes
+only the height scan among flat, 0.30 m, and 0.60 m rectangular obstacles. The
+obstacle occupies anchor-local x `[0.30, 0.90]`, y `[-0.40, 0.40]` (63 grid
+points). Each condition is generated in a separate size-one call so batch RNG
+semantics cannot produce a false difference. JSON and NPZ artifacts are under
+`logs/motion_gen/terrain_sensitivity/{stage8_3_corrected_baseline,stage8_3_robust_fk}`.
+The evaluator and its tests are commit `c69e557`.
+
+For the robust+FK checkpoint, flat/0.30/0.60 m values were: forward travel
+0.39762/0.29656/0.25834 m; final root z
+0.76797/0.77176/0.77946 m; left-foot max z
+0.15133/0.13856/0.12956 m; right-foot max z
+0.12808/0.12185/0.10174 m; left-knee max flexion
+1.40717/1.36853/1.35608 rad; right-knee
+1.24641/1.15923/0.96134 rad. The link-origin penetration proxy max was
+0/0.25264/0.36192 m and its body rate 0/3.714/9.714%. The configured physical
+response classifier is true and root final height is monotonic, but feet and
+knees change in the wrong direction and the proxy rises. Robust fine-tuning
+does reduce the old checkpoint's 0.60 m max proxy from 0.43775 to 0.36192 m,
+which is still poor. This proxy compares the 14 generated body origins with
+scan height; it is **not** collision-shape, contact, or mesh penetration.
+Thus Task 8.3 confirms terrain sensitivity, not successful obstacle clearing.
+The rectangle, 0.30/0.60 m heights, thresholds (root/foot 0.01 m, knee 0.05
+rad, travel 0.02 m), start frame, and seed are all **implementation choices**.
+
+Commands actually executed:
+
+```bash
+PY=~/.holosoma_deps/miniconda3/envs/hssim/bin/python
+
+$PY - <<'PY'
+from holosoma.motion_gen.configs import terrain_robust_fk_4090
+from holosoma.motion_gen.training import Trainer
+cfg = terrain_robust_fk_4090()
+cfg.run_name = "terrain_robust_fk_baseline_eval"
+cfg.resume = "logs/motion_gen/terrain_4090/checkpoints/final.pt"
+cfg.max_steps, cfg.batch_size, cfg.num_workers = 10000, 256, 4
+cfg.val_batches, cfg.val_sample_steps = 8, 2
+Trainer(cfg).validate()
+PY
+
+$PY -m holosoma.motion_gen.scripts.train terrain_robust_fk_4090 \
+  --resume logs/motion_gen/terrain_4090/checkpoints/final.pt \
+  --max-steps 10000 --val-sample-steps 2 --val-batches 8
+
+$PY -m holosoma.motion_gen.scripts.evaluate_terrain_sensitivity \
+  --checkpoint logs/motion_gen/terrain_4090/checkpoints/final.pt \
+  --output-dir logs/motion_gen/terrain_sensitivity/stage8_3_corrected_baseline
+$PY -m holosoma.motion_gen.scripts.evaluate_terrain_sensitivity \
+  --checkpoint logs/motion_gen/terrain_robust_fk_4090/checkpoints/final.pt \
+  --output-dir logs/motion_gen/terrain_sensitivity/stage8_3_robust_fk
+
+$PY -m pytest src/holosoma/holosoma/motion_gen/tests -q
+# 77 passed, 1 skipped
+~/.holosoma_deps/miniconda3/envs/hsmujoco/bin/python -m pytest \
+  src/holosoma/holosoma/motion_gen/tests/test_kinematics.py -q
+# 7 passed
+R=~/.holosoma_deps/miniconda3/envs/hsmujoco/bin/ruff
+$R check src/holosoma/holosoma/motion_gen/{configs.py,condition_noise.py,kinematics.py,losses.py,sampling.py,training.py} \
+  src/holosoma/holosoma/motion_gen/scripts/evaluate_terrain_sensitivity.py \
+  src/holosoma/holosoma/motion_gen/tests/{test_condition_noise.py,test_kinematics.py,test_losses.py,test_terrain_sensitivity.py,test_train_smoke.py}
+# All checks passed
+```
+
+The final checkpoint is
+`logs/motion_gen/terrain_robust_fk_4090/checkpoints/final.pt` (290,483,143
+bytes), SHA-256
+`7c63764b771ec43fb5d463d77b6860eee8e46f1db5c0b196554f98cc527ed5fa`.
+Remaining work is to tune the clean/robustness trade-off and train the Stage-9
+tracker closed-loop against this frozen generator. Real collision/contact and
+obstacle crossing must be measured in simulation rather than inferred from
+the Stage-8 body-origin proxy.
+
 ## Known limitations / not yet verified
 
 - Terrain-aware closed-loop dataflow and PPO startup are validated, but no
@@ -437,8 +597,9 @@ crossing/goal metrics remain Stage 9/10 evaluation work.
 - 2-step DDIM quality is validated offline and used in closed-loop training;
   deployment latency/export remains unverified.
 - Paperscale generation reaches 0.0546 m full-val MPJPE (terrain checkpoint
-  0.0393 on its fixed validation batch); unseen simulator terrain robustness
-  remains the next test.
+  0.0393 on its earlier fixed validation batch). Stage-8 fixed-history stress
+  tests show a real terrain-conditioned response, but foot/knee direction and
+  tall-obstacle body-origin penetration proxy remain poor.
 - The 50k-step baseline default was not itself re-run end-to-end after being
   reduced from the measured 200k run (same code path, shorter schedule).
 - Generated `*_gen_qpos.npz` → full WBT npz conversion re-runs MuJoCo FK; body
@@ -457,8 +618,9 @@ crossing/goal metrics remain Stage 9/10 evaluation work.
    references would need a remap; keeping 29-DoF end-to-end avoids this.
 2. Contact proxy (height+speed thresholds) is crude; real contact labels from
    physics replay would improve foot-slide supervision.
-3. Receding-horizon distribution shift: generator conditioned on its own
-   outputs drifts; the paper addresses this with noise injection during
-   training and closed-loop fine-tuning (not yet implemented).
+3. Receding-horizon distribution shift: structured condition noise is now
+   implemented and narrows the matched noisy-validation gap, but the robust
+   checkpoint has not yet undergone converged terrain closed-loop tracker
+   fine-tuning or multi-seed evaluation.
 4. LAFAN1 license (CC BY-NC-ND) forbids redistribution of retargeted
    derivatives — generated models trained on it inherit non-commercial terms.

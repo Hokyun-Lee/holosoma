@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Motion Generator 8차: Generator robustness</title>
+<style>
+:root { --bg:#fbfbfd; --card:#fff; --text:#1d1d1f; --muted:#6e6e73; --accent:#0071e3; --border:#e5e5ea; --code:#f5f5f7; --ok:#e9f7ef; --warn:#fff8e6; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:16px/1.7 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR",sans-serif; }
+.container { max-width:860px; margin:auto; padding:0 24px 100px; }
+header { padding:80px 0 42px; text-align:center; }
+h1 { margin:0; font-size:40px; line-height:1.2; }
+header p { color:var(--muted); font-size:19px; }
+section { margin:0 0 58px; }
+h2 { margin:0 0 12px; padding-top:18px; font-size:28px; }
+h3 { margin:28px 0 10px; }
+p, ul { margin:10px 0; }
+code { background:var(--code); border-radius:6px; padding:2px 6px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.88em; }
+pre { overflow-x:auto; padding:18px 20px; border-radius:14px; background:#1d1d1f; color:#f5f5f7; font-size:13px; line-height:1.6; }
+pre code { padding:0; background:none; }
+.card,.callout { padding:18px 22px; border:1px solid var(--border); border-radius:14px; background:var(--card); }
+.ok { background:var(--ok); }
+.warn { background:var(--warn); }
+table { width:100%; border-collapse:collapse; background:var(--card); font-size:14px; }
+th,td { padding:10px 12px; border-bottom:1px solid var(--border); text-align:left; vertical-align:top; }
+th { background:var(--code); }
+.table { overflow-x:auto; border:1px solid var(--border); border-radius:14px; }
+footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted); text-align:center; font-size:13px; }
+</style>
+</head>
+<body>
+<header class="container">
+  <h1>8차: Generator robustness</h1>
+  <p>물리 단위 condition noise, differentiable G1 FK loss,<br>고정 조건 terrain sensitivity 평가 기록</p>
+</header>
+<main class="container">
+<section>
+  <h2>진행 체크리스트</h2>
+  <div class="card">
+    <h3>Task 8.1 — Condition noise</h3>
+    <ul>
+      <li>☑ noise 크기 config화</li><li>☑ quaternion 정상화</li>
+      <li>☑ clean/noisy validation 비교</li><li>☑ noisy condition에서 motion 붕괴 없음</li>
+    </ul>
+    <h3>Task 8.2 — FK consistency loss</h3>
+    <ul>
+      <li>☑ differentiable FK 구현</li><li>☑ FK loss logging</li>
+      <li>☑ FK error 감소 확인</li><li>☑ joint/body reference 충돌 감소 확인</li>
+    </ul>
+    <h3>Task 8.3 — Terrain sensitivity test</h3>
+    <ul>
+      <li>☑ foot height 비교</li><li>☑ root height 비교</li>
+      <li>☑ knee flexion 비교</li><li>☑ penetration proxy 비교</li>
+      <li>☑ obstacle 높이에 따라 물리 metric이 의미 있게 변화함<br><small>단, 원하는 방향의 회피·통과는 아직 달성하지 못했다.</small></li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <h2>Task 8.1 결과 <small>(2026-07-13)</small></h2>
+  <p>Noise는 정규화된 tensor가 아니라 <b>물리 단위의 condition</b>에만 적용한다. 과거 2 frame의 root position/orientation, joint position, tracked body position과 현재 terrain scan을 perturb하며, 미래 ground truth와 loss용 terrain은 clean 상태를 유지한다. 기존 preset의 모든 기본값은 0이어서 Stage 1–7 동작과 checkpoint를 보존한다.</p>
+
+  <div class="table"><table>
+    <tr><th>항목</th><th><code>terrain_robust_4090</code> 값</th><th>단위/방식</th></tr>
+    <tr><td>root position</td><td>0.01</td><td>m, Gaussian std</td></tr>
+    <tr><td>root orientation</td><td>0.02</td><td>rad, axis-angle left composition</td></tr>
+    <tr><td>joint position</td><td>0.01</td><td>rad, Gaussian std</td></tr>
+    <tr><td>body position</td><td>0.01</td><td>m, Gaussian std</td></tr>
+    <tr><td>terrain point height</td><td>0.01</td><td>m, independent Gaussian std</td></tr>
+    <tr><td>terrain point dropout</td><td>0.05</td><td>확률, dropped point는 0 m</td></tr>
+    <tr><td>terrain height bias</td><td>0.01</td><td>m, scan별 Gaussian std</td></tr>
+    <tr><td>terrain local xy / yaw</td><td>0.02 / 0.02</td><td>m / rad, bilinear scan warp</td></tr>
+  </table></div>
+
+  <p>Quaternion은 내부 convention인 <code>wxyz</code>로 axis-angle noise를 합성한 뒤 매번 unit norm으로 정규화하고, 시간축 sign branch도 연속되게 유지한다. Terrain warp는 Stage 3/6과 같은 17×17, x-major/y-fastest layout을 사용한다. 학습 때만 자동 적용되며 inference에는 암묵적으로 noise를 넣지 않는다.</p>
+
+  <div class="table"><table>
+    <tr><th>파일</th><th>변경</th></tr>
+    <tr><td><code>motion_gen/condition_noise.py</code></td><td>past-state perturbation, wxyz quaternion 보정, terrain height/dropout/bias/xy/yaw warp</td></tr>
+    <tr><td><code>motion_gen/configs.py</code></td><td><code>ConditionNoiseCfg</code>, <code>terrain_robust_4090</code>, weights-only resume 옵션</td></tr>
+    <tr><td><code>motion_gen/training.py</code></td><td>train-only noise와 동일 random seed/동일 DDIM initial noise의 clean/noisy validation</td></tr>
+    <tr><td><code>motion_gen/sampling.py</code></td><td>이전 checkpoint의 missing nested config를 0-default로 복원</td></tr>
+    <tr><td><code>test_condition_noise.py</code>, <code>test_train_smoke.py</code></td><td>shape/device, quaternion, warp, clean/noisy pairing, resume 회귀 테스트</td></tr>
+  </table></div>
+
+  <div class="callout warn"><b>구현 선택</b>: 논문은 condition-noise의 분포와 크기, terrain dropout 처리, misalignment 방식, clean/noisy 평가 protocol을 공개하지 않는다. 위 값과 Gaussian/point-zero/bilinear-warp 방식은 모두 config로 노출한 구현 선택이다.</div>
+
+  <h3>동일 protocol 전후 비교</h3>
+  <p>기존 <code>terrain_4090/final.pt</code>와 그 checkpoint에서 10,000 step fine-tune한 robust+FK 모델을 같은 validation batch 256, 8 batches, seed 123, 2-step DDIM으로 평가했다. Clean/noisy sampling은 exact same initial diffusion noise를 공유한다.</p>
+  <div class="table"><table>
+    <tr><th>checkpoint</th><th>clean / noisy total loss</th><th>clean / noisy MPJPE</th><th>noisy-clean MPJPE gap</th></tr>
+    <tr><td>기존 terrain</td><td>0.009627 / 0.012202</td><td>0.03458 / 0.06018 m</td><td>0.02559 m</td></tr>
+    <tr><td>robust+FK 10k</td><td>0.009752 / 0.010176</td><td>0.03860 / 0.05000 m</td><td><b>0.01140 m</b></td></tr>
+  </table></div>
+  <p>Noisy MPJPE는 0.06018→0.05000 m, noise gap은 0.02559→0.01140 m로 감소했고 모든 sample/loss가 finite였다. 따라서 configured noisy condition에서 붕괴하지 않았다. 반면 clean MPJPE는 0.03458→0.03860 m로 나빠졌다. 이것은 robustness와 clean accuracy 사이의 측정된 trade-off이며, 단일 seed 결과다.</p>
+  <div class="callout ok"><b>Task 8.1 완료</b>: 모든 perturbation 크기를 config화하고 quaternion/terrain contract를 테스트했으며, 같은 random draw를 쓰는 clean/noisy validation에서 noise gap 감소와 finite motion을 확인했다.</div>
+</section>
+
+<section>
+  <h2>Task 8.2 결과 <small>(2026-07-13)</small></h2>
+  <p><code>G1ForwardKinematics</code>는 HoloSoma의 29-DoF MuJoCo tree를 torch tensor 연산만으로 전개해 predicted root pose와 29 joint angle에서 14 tracked body origin을 계산한다. 임의 batch 차원을 지원하고 root quaternion은 <code>wxyz</code>다. 상수는 <code>g1_29dof.xml</code>에서 추출했으며 source SHA-256 <code>8c586e4747da85804180fe44d8692e0fd8231356728b6327e256dca498087a78</code>와 joint/body name을 fail-fast로 검사한다.</p>
+<pre><code>L_FK = mean || predicted_body - FK(predicted_root, predicted_joint)||²
+loss.fk_consistency = 0.1  # terrain_robust_fk_4090 only</code></pre>
+  <p>기존 Stage 1–7 preset은 FK weight 0을 유지한다. Robust+FK preset만 weight 0.1로 별도 제공하며 <code>fk_consistency</code>와 해석 가능한 <code>fk_body_error_m</code>를 train/validation/TensorBoard에 기록한다.</p>
+
+  <div class="table"><table>
+    <tr><th>파일</th><th>변경</th></tr>
+    <tr><td><code>motion_gen/kinematics.py</code></td><td>29 hinge tree, local transforms, quaternion composition, 14 body selection의 differentiable FK</td></tr>
+    <tr><td><code>motion_gen/losses.py</code></td><td>mask-aware FK coordinate MSE와 mean body-origin L2 error</td></tr>
+    <tr><td><code>motion_gen/training.py</code></td><td>FK model 생성, dataset/MJCF calibration, loss logging</td></tr>
+    <tr><td><code>motion_gen/configs.py</code></td><td><code>fk_calibration_tolerance_m</code>와 <code>terrain_robust_fk_4090</code></td></tr>
+    <tr><td><code>test_kinematics.py</code>, <code>test_losses.py</code></td><td>MuJoCo parity, exact/mismatch loss, mask, root/quat/joint/body gradient 검사</td></tr>
+  </table></div>
+
+  <p>256 random pose의 MuJoCo parity는 float64 최대 L2 error 1.095e-15 m, float32 최대 6.35e-7 m였다. 실제 train dataset 8 window를 학습 전에 검사한 calibration error는 mean 6.324e-8 m, max 3.806e-7 m로 1 mm fail-fast tolerance를 통과했다.</p>
+  <div class="table"><table>
+    <tr><th>metric</th><th>기존 terrain checkpoint</th><th>robust+FK 10k</th><th>변화</th></tr>
+    <tr><td>clean FK body error</td><td>0.00698697 m</td><td>0.00690262 m</td><td>−0.00008435 m (−1.2%)</td></tr>
+    <tr><td>noisy FK body error</td><td>0.00717166 m</td><td>0.00694394 m</td><td>−0.00022772 m (−3.2%)</td></tr>
+  </table></div>
+  <p>FK error는 두 조건 모두 작지만 일관되게 감소했다. 즉 joint/root head와 independently predicted body-position head 사이의 측정된 충돌은 줄었다. 이 수치만으로 접촉 안정성이나 obstacle 통과가 개선됐다고 주장하지 않는다.</p>
+
+  <div class="callout warn"><b>구현 선택</b>: 논문은 정확한 robot FK model, tracked-link subset, FK loss reduction, weight, calibration tolerance를 공개하지 않는다. 29-DoF HoloSoma MJCF, 14 body origins, coordinate MSE, weight 0.1, tolerance 1 mm는 모두 이 재현의 구현 선택이다.</div>
+  <div class="callout ok"><b>Task 8.2 완료</b>: torch FK의 MuJoCo parity와 end-to-end gradient를 검증했고, 10k fine-tune 뒤 clean/noisy FK conflict metric이 모두 감소했다.</div>
+</section>
+
+<section>
+  <h2>Task 8.3 결과 <small>(2026-07-13)</small></h2>
+  <p>같은 walk4 history(start 5750), 같은 anchor heading <code>[0.976827, -0.214030]</code>, seed 123, 2-step DDIM을 고정하고 scan만 flat / 0.30 m / 0.60 m로 바꿨다. 장애물은 anchor-local x=[0.30, 0.90], y=[−0.40, 0.40]의 63 grid point다. 각 condition은 batch-size 1의 독립 sampler call로 실행해 condition 순서가 RNG batch semantics를 바꾸지 않게 했다.</p>
+
+  <div class="table"><table>
+    <tr><th>robust+FK metric</th><th>flat</th><th>0.30 m</th><th>0.60 m</th></tr>
+    <tr><td>forward displacement</td><td>0.39762 m</td><td>0.29656 m</td><td>0.25834 m</td></tr>
+    <tr><td>root z, final</td><td>0.76797 m</td><td>0.77176 m</td><td>0.77946 m</td></tr>
+    <tr><td>left / right foot z max</td><td>0.15133 / 0.12808 m</td><td>0.13856 / 0.12185 m</td><td>0.12956 / 0.10174 m</td></tr>
+    <tr><td>left / right knee flexion max</td><td>1.40717 / 1.24641 rad</td><td>1.36853 / 1.15923 rad</td><td>1.35608 / 0.96134 rad</td></tr>
+    <tr><td>body-origin penetration proxy max</td><td>0</td><td>0.25264 m</td><td>0.36192 m</td></tr>
+    <tr><td>body-origin penetration proxy rate</td><td>0</td><td>3.714%</td><td>9.714%</td></tr>
+  </table></div>
+
+  <p>Configured threshold 기준으로 foot height, root height, knee flexion, forward displacement 중 하나 이상이 충분히 변해 <code>meaningful_physical_response=true</code>다. Root final height는 obstacle 높이에 따라 단조 증가했고 진행 거리는 감소했다. 그러나 foot max height와 knee max flexion은 기대와 반대로 감소했고 penetration proxy는 증가했다. 기존 terrain checkpoint의 0.60 m max proxy 0.43775 m보다 robust+FK의 0.36192 m는 낮지만, 안전한 obstacle motion이라고 볼 수준은 아니다.</p>
+
+  <div class="callout warn"><b>Proxy의 한계</b>: 이 수치는 generated 14 body <em>origin</em>과 rectangular scan height의 차이다. Collision shape, mesh intersection, contact force를 계산하지 않으므로 실제 simulator penetration이 아니다. 현재 결론은 “terrain condition에 민감하게 반응한다”까지이며, “장애물을 제대로 넘는다”는 체크하지 않는다. 0.60 m는 학습 분포 밖 stress test다.</div>
+
+  <div class="table"><table>
+    <tr><th>파일/산출물</th><th>내용</th></tr>
+    <tr><td><code>scripts/evaluate_terrain_sensitivity.py</code></td><td>동일 history/heading/noise의 3-scan 비교, physical metrics, monotonic/meaningful 판정, JSON+NPZ 저장</td></tr>
+    <tr><td><code>test_terrain_sensitivity.py</code></td><td>scan rectangle, heading frame, bilinear height, physical metric와 판정 회귀 테스트</td></tr>
+    <tr><td><code>logs/motion_gen/terrain_sensitivity/stage8_3_corrected_baseline/</code></td><td>기존 terrain checkpoint 결과</td></tr>
+    <tr><td><code>logs/motion_gen/terrain_sensitivity/stage8_3_robust_fk/</code></td><td>robust+FK checkpoint 결과</td></tr>
+  </table></div>
+  <div class="callout ok"><b>Task 8.3 평가 완료</b>: 요청한 네 metric 군과 height-conditioned response를 같은 조건에서 계측했다. Generator의 민감도는 확인됐지만 발/무릎 반응 방향과 penetration proxy 때문에 obstacle robustness 자체는 미해결이다.</div>
+</section>
+
+<section>
+  <h2>실행 명령과 검증</h2>
+<pre><code>PY=~/.holosoma_deps/miniconda3/envs/hssim/bin/python
+
+# 기존 terrain checkpoint를 robust preset의 동일 clean/noisy protocol로 평가
+$PY - &lt;&lt;'PY'
+from holosoma.motion_gen.configs import terrain_robust_fk_4090
+from holosoma.motion_gen.training import Trainer
+cfg = terrain_robust_fk_4090()
+cfg.run_name = "terrain_robust_fk_baseline_eval"
+cfg.resume = "logs/motion_gen/terrain_4090/checkpoints/final.pt"
+cfg.max_steps, cfg.batch_size, cfg.num_workers = 10000, 256, 4
+cfg.val_batches, cfg.val_sample_steps = 8, 2
+Trainer(cfg).validate()
+PY
+
+# weights/EMA/normalizer만 로드하고 optimizer/scheduler/step은 새로 시작
+$PY -m holosoma.motion_gen.scripts.train terrain_robust_fk_4090 \
+  --resume logs/motion_gen/terrain_4090/checkpoints/final.pt \
+  --max-steps 10000 --val-sample-steps 2 --val-batches 8
+
+# old / robust sensitivity
+$PY -m holosoma.motion_gen.scripts.evaluate_terrain_sensitivity \
+  --checkpoint logs/motion_gen/terrain_4090/checkpoints/final.pt \
+  --output-dir logs/motion_gen/terrain_sensitivity/stage8_3_corrected_baseline
+$PY -m holosoma.motion_gen.scripts.evaluate_terrain_sensitivity \
+  --checkpoint logs/motion_gen/terrain_robust_fk_4090/checkpoints/final.pt \
+  --output-dir logs/motion_gen/terrain_sensitivity/stage8_3_robust_fk
+
+# regression / MuJoCo parity
+$PY -m pytest src/holosoma/holosoma/motion_gen/tests -q
+# 77 passed, 1 skipped
+~/.holosoma_deps/miniconda3/envs/hsmujoco/bin/python -m pytest \
+  src/holosoma/holosoma/motion_gen/tests/test_kinematics.py -q
+# 7 passed
+R=~/.holosoma_deps/miniconda3/envs/hsmujoco/bin/ruff
+$R check src/holosoma/holosoma/motion_gen/{configs.py,condition_noise.py,kinematics.py,losses.py,sampling.py,training.py} \
+  src/holosoma/holosoma/motion_gen/scripts/evaluate_terrain_sensitivity.py \
+  src/holosoma/holosoma/motion_gen/tests/{test_condition_noise.py,test_kinematics.py,test_losses.py,test_terrain_sensitivity.py,test_train_smoke.py}
+# All checks passed</code></pre>
+
+  <p>최종 checkpoint는 <code>logs/motion_gen/terrain_robust_fk_4090/checkpoints/final.pt</code> (290,483,143 bytes), SHA-256 <code>7c63764b771ec43fb5d463d77b6860eee8e46f1db5c0b196554f98cc527ed5fa</code>다. 구현 commit은 FK foundation <code>dc5c952</code>, robust conditioning/FK loss <code>cbae008</code>, sensitivity evaluator <code>c69e557</code>로 나뉜다.</p>
+</section>
+
+<section>
+  <h2>남은 문제와 다음 단계</h2>
+  <ul>
+    <li>Clean accuracy가 약 4 mm 나빠졌으므로 condition-noise 크기와 FK weight는 multi-seed ablation이 필요하다.</li>
+    <li>0.30/0.60 m obstacle에서 발 높이·무릎 굴곡이 증가하지 않고 body-origin penetration proxy가 커진다. Height scan conditioning만으로는 원하는 climbing policy가 형성되지 않았다.</li>
+    <li>현재 검증은 generator 단일 0.5초 window다. 실제 contact/collision과 obstacle crossing은 Stage 9 terrain closed-loop PPO와 Stage 10 공통 simulator 평가에서 측정해야 한다.</li>
+    <li>Stage 9에서는 이 robust+FK generator를 frozen으로 두고 tracker만 업데이트하되, 실측 state/history/terrain scan과 2-step replanning 경로가 유지되는지 다시 확인한다.</li>
+  </ul>
+</section>
+
+<footer>HoloSoma motion_gen · Stage 8 진행 문서 · 이전: <a href="motion_generator_stage7_ko.html">Stage 7 tracker 개선</a></footer>
+</main>
+</body>
+</html>
