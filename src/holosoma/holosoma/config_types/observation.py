@@ -13,7 +13,10 @@ class ObsTermCfg:
     """Configuration for a single observation term."""
 
     func: str
-    """Import path to the observation function (e.g. ``holosoma.managers.observation.terms.locomotion:base_lin_vel``)."""
+    """Import path to the observation function.
+
+    For example, ``holosoma.managers.observation.terms.locomotion:base_lin_vel``.
+    """
 
     params: dict[str, Any] = field(default_factory=dict)
     """Additional keyword arguments forwarded to ``func``."""
@@ -26,6 +29,14 @@ class ObsTermCfg:
 
     clip: tuple[float, float] | None = None
     """Optional min/max clip bounds applied after scaling."""
+
+    history_length: int | None = None
+    """Optional per-term history length.
+
+    ``None`` inherits the group-level history setting.  An explicit value
+    lets selected proprioceptive terms use history while references and
+    terrain remain current-frame observations.
+    """
 
 
 @dataclass(frozen=True)

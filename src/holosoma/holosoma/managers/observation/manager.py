@@ -67,9 +67,26 @@ class ObservationManager:
                     # Stateless function
                     self._term_funcs[group_name][term_name] = func
 
-                # Initialize history buffer if needed (using group-level history_length)
-                if group_cfg.history_length > 1:
-                    self._history_buffers[group_name][term_name] = deque(maxlen=group_cfg.history_length)
+                history_length = self._get_term_history_length(group_cfg, term_cfg)
+                if history_length > 1:
+                    self._history_buffers[group_name][term_name] = deque(maxlen=history_length)
+
+    @staticmethod
+    def _get_term_history_length(group_cfg: ObsGroupCfg, term_cfg: ObsTermCfg) -> int:
+        history_length = group_cfg.history_length if term_cfg.history_length is None else term_cfg.history_length
+        if history_length < 1:
+            raise ValueError(f"Observation history_length must be >= 1, got {history_length}")
+        return history_length
+
+    @staticmethod
+    def _uses_history_suffix_layout(group_cfg: ObsGroupCfg) -> bool:
+        """Whether current terms precede opt-in per-term history suffixes.
+
+        Groups with no term override retain the legacy per-term flattened
+        history layout exactly.  The suffix layout keeps a legacy checkpoint's
+        current observation vector as an unchanged prefix.
+        """
+        return group_cfg.concatenate and any(term.history_length is not None for term in group_cfg.terms.values())
 
     def compute(self, *, modify_history: bool = True) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
         """Compute all observation groups.
@@ -112,6 +129,8 @@ class ObservationManager:
         """
         group_cfg = self.cfg.groups[group_name]
         obs_tensors = {}
+        history_suffix_tensors = {}
+        use_history_suffix = self._uses_history_suffix_layout(group_cfg)
 
         for term_name, term_cfg in group_cfg.terms.items():
             # 1. Compute base observation
@@ -128,9 +147,24 @@ class ObservationManager:
             if term_cfg.clip is not None:
                 obs = obs.clip(term_cfg.clip[0], term_cfg.clip[1])
 
-            # 5. Handle history buffering
-            if group_cfg.history_length > 1:
-                obs = self._apply_history(group_name, term_name, obs, group_cfg, modify_buffer=modify_history)
+            # 5. Handle history buffering. Explicit term histories keep the
+            # current observation in its legacy position and append only the
+            # preceding frames after the complete current-frame vector.
+            history_length = self._get_term_history_length(group_cfg, term_cfg)
+            if history_length > 1:
+                history = self._apply_history(
+                    group_name,
+                    term_name,
+                    obs,
+                    history_length,
+                    modify_buffer=modify_history,
+                )
+                if use_history_suffix:
+                    history_suffix_tensors[term_name] = history.reshape(
+                        self.env.num_envs, history_length, -1
+                    )[:, :-1].reshape(self.env.num_envs, -1)
+                else:
+                    obs = history
 
             obs_tensors[term_name] = obs
 
@@ -139,7 +173,9 @@ class ObservationManager:
             # Concatenate in alphabetically sorted order (to match direct system behavior)
             # Direct system does: sorted(obs_config) before concatenation
             sorted_keys = sorted(obs_tensors.keys())
-            return torch.cat([obs_tensors[key] for key in sorted_keys], dim=-1)
+            tensors = [obs_tensors[key] for key in sorted_keys]
+            tensors.extend(history_suffix_tensors[key] for key in sorted(history_suffix_tensors))
+            return torch.cat(tensors, dim=-1)
         return obs_tensors
 
     def _compute_term(self, group_name: str, term_name: str, term_cfg: ObsTermCfg) -> torch.Tensor:
@@ -211,7 +247,13 @@ class ObservationManager:
         return obs * scale
 
     def _apply_history(
-        self, group_name: str, term_name: str, obs: torch.Tensor, group_cfg: ObsGroupCfg, *, modify_buffer: bool = True
+        self,
+        group_name: str,
+        term_name: str,
+        obs: torch.Tensor,
+        history_length: int,
+        *,
+        modify_buffer: bool = True,
     ) -> torch.Tensor:
         """Apply history buffering to an observation term.
 
@@ -226,8 +268,8 @@ class ObservationManager:
             Name of the observation term.
         obs : torch.Tensor
             Current observation tensor with shape ``[num_envs, obs_dim]``.
-        group_cfg : ObsGroupCfg
-            Configuration for the observation group (contains ``history_length``).
+        history_length : int
+            Number of frames to return, including the current observation.
         modify_buffer : bool, optional
             If ``True``, append to the history buffer; if ``False``, preserve the
             buffer contents. Defaults to ``True``.
@@ -247,14 +289,13 @@ class ObservationManager:
             # Don't modify buffer - create temporary history with current obs
             history = list(buffer) + [obs]
             # Trim to history_length if needed
-            if len(history) > group_cfg.history_length:
-                history = history[-group_cfg.history_length :]
+            if len(history) > history_length:
+                history = history[-history_length:]
 
         # If buffer not full yet, pad with zeros (same as direct behavior)
-        if len(history) < group_cfg.history_length:
-            num_missing = group_cfg.history_length - len(history)
-            obs_dim = obs.shape[1]
-            padding = [torch.zeros(self.env.num_envs, obs_dim, device=self.device) for _ in range(num_missing)]
+        if len(history) < history_length:
+            num_missing = history_length - len(history)
+            padding = [torch.zeros_like(obs) for _ in range(num_missing)]
             history = padding + history
 
         # Stack along time dimension: [num_envs, history_length, obs_dim]
@@ -316,9 +357,7 @@ class ObservationManager:
                     obs = self._compute_term(group_name, term_name, term_cfg)
                     term_dim = obs.shape[1]
 
-                    # Account for history at group level
-                    if group_cfg.history_length > 1:
-                        term_dim *= group_cfg.history_length
+                    term_dim *= self._get_term_history_length(group_cfg, term_cfg)
 
                     total_dim += term_dim
                 dims[group_name] = total_dim
@@ -326,7 +365,45 @@ class ObservationManager:
                 # Return dict of individual dimensions
                 term_dims: dict[str, int] = {
                     term_name: self._compute_term(group_name, term_name, term_cfg).shape[1]
+                    * self._get_term_history_length(group_cfg, term_cfg)
                     for term_name, term_cfg in group_cfg.terms.items()
                 }
                 dims[group_name] = term_dims
         return dims
+
+    def get_normalizer_expansion_source_indices(self, group_name: str) -> list[int]:
+        """Map every output column to its corresponding current-frame column.
+
+        This metadata lets an append-only checkpoint migration initialize lag
+        feature normalizer statistics from the matching current feature. New
+        current terms map to themselves and therefore remain identity-initialized
+        when that index did not exist in the source checkpoint.
+        """
+        group_cfg = self.cfg.groups[group_name]
+        if not group_cfg.concatenate:
+            raise ValueError("Normalizer expansion mapping requires a concatenated observation group")
+
+        sorted_terms = sorted(group_cfg.terms)
+        current_slices: dict[str, range] = {}
+        source_indices: list[int] = []
+        offset = 0
+        for term_name in sorted_terms:
+            term_cfg = group_cfg.terms[term_name]
+            term_dim = self._compute_term(group_name, term_name, term_cfg).shape[1]
+            current_slices[term_name] = range(offset, offset + term_dim)
+            source_indices.extend(current_slices[term_name])
+            offset += term_dim
+
+        if self._uses_history_suffix_layout(group_cfg):
+            for term_name in sorted_terms:
+                history_length = self._get_term_history_length(group_cfg, group_cfg.terms[term_name])
+                for _ in range(history_length - 1):
+                    source_indices.extend(current_slices[term_name])
+
+        expected_dim = self.get_obs_dims()[group_name]
+        if not isinstance(expected_dim, int) or len(source_indices) != expected_dim:
+            raise RuntimeError(
+                f"Normalizer expansion map for {group_name} has {len(source_indices)} columns, "
+                f"expected {expected_dim}"
+            )
+        return source_indices

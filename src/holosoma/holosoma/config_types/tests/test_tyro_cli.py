@@ -34,7 +34,17 @@ def test_generated_motion_terrain_experiment_is_separate_from_flat():
     for group_name in ("actor_obs", "critic_obs"):
         flat_terms = sorted(g1_29dof_wbt_gen.observation.groups[group_name].terms)
         terrain_terms = sorted(g1_29dof_wbt_gen_terrain.observation.groups[group_name].terms)
-        assert terrain_terms == flat_terms + ["terrain_height_scan"]
+        assert terrain_terms == flat_terms + ["terrain_height_scan", "tracker_projected_gravity"]
+        terrain_cfgs = g1_29dof_wbt_gen_terrain.observation.groups[group_name].terms
+        for term_name in ("base_ang_vel", "dof_pos", "dof_vel", "tracker_projected_gravity"):
+            assert terrain_cfgs[term_name].history_length == 5
+        for term_name in set(terrain_cfgs) - {
+            "base_ang_vel",
+            "dof_pos",
+            "dof_vel",
+            "tracker_projected_gravity",
+        }:
+            assert terrain_cfgs[term_name].history_length == 1
 
 
 def test_generated_motion_heading_reward_cli_off_switch():

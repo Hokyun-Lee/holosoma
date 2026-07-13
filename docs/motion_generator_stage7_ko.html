@@ -45,8 +45,8 @@ footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted
     </ul>
     <h3>Task 7.1 — 5-frame proprioceptive history</h3>
     <ul>
-      <li>☐ history buffer 구현</li><li>☐ reset 시 buffer 초기화</li>
-      <li>☐ env 간 history 혼합 없음</li><li>☐ observation shape test</li>
+      <li>☑ history buffer 구현</li><li>☑ reset 시 buffer 초기화</li>
+      <li>☑ env 간 history 혼합 없음</li><li>☑ observation shape test</li>
     </ul>
     <h3>Task 7.3 — Terrain curriculum</h3>
     <ul>
@@ -106,8 +106,62 @@ $PY -m pytest src/holosoma/holosoma/managers/reward/tests/test_heading.py \
 </section>
 
 <section>
+  <h2>Task 7.1 결과 <small>(2026-07-13)</small></h2>
+  <p>Terrain tracker의 네 proprioceptive signal만 현재 frame을 포함해 5 frame으로 확장했다. 정책 주기 50 Hz 기준 순서는 <code>[t-4, t-3, t-2, t-1, t]</code>이며 가장 오래된 frame과 현재 frame의 간격은 0.08 s다. Generated reference와 289차원 terrain scan은 현재 frame 하나만 유지한다.</p>
+
+  <div class="table"><table>
+    <tr><th>항목</th><th>frame 수</th><th>차원 / 배치</th></tr>
+    <tr><td>base angular velocity</td><td>5</td><td>3 × 5</td></tr>
+    <tr><td>projected gravity</td><td>5</td><td>3 × 5</td></tr>
+    <tr><td>joint position</td><td>5</td><td>29 × 5</td></tr>
+    <tr><td>joint velocity</td><td>5</td><td>29 × 5</td></tr>
+    <tr><td>generated reference, action, terrain</td><td>1</td><td>기존 current-frame 차원 유지</td></tr>
+  </table></div>
+
+  <h3>Checkpoint 호환 layout</h3>
+  <p><code>ObsTermCfg.history_length</code>를 추가하되, override가 없는 모든 기존 group은 종전 group-level layout을 그대로 사용한다. Selective-history group은 기존 current-frame vector를 변형하지 않은 prefix로 두고 선택된 term의 과거 4 frame만 suffix로 붙인다. 따라서 Stage-6 input weight를 순열 없이 보존할 수 있다.</p>
+<pre><code>actor : old Stage-6 prefix [0:443]
+        projected-gravity current [443:446]
+        past proprio suffix [446:702]  -&gt; total 702
+
+critic: old Stage-6 prefix [0:575]
+        projected-gravity current [575:578]
+        past proprio suffix [578:834]  -&gt; total 834</code></pre>
+  <p>처음 관측하는 과거 slot은 0으로 padding한다. 일부 env만 reset되면 deque 전체를 지우지 않고 해당 env row만 0으로 초기화해 다른 env의 history를 보존한다. Bootstrap용 <code>modify_history=False</code> 계산은 deque를 전진시키지 않는다.</p>
+
+  <div class="callout warn"><b>구현 선택</b>: 논문은 tracker history의 정확한 flatten 순서, 초기 padding, observation noise를 공개하지 않는다. 이 구현은 current prefix 뒤에 term-name 순서의 oldest-to-newest 과거 suffix를 사용하고, projected gravity의 추가 noise는 0으로 둔다. Selective suffix는 현재 symmetry augmentation의 직사각형 frame layout과 호환되지 않으므로 <code>use_symmetry=True</code>이면 명시적으로 중단한다. 현재 WBT preset은 symmetry를 사용하지 않는다.</div>
+
+  <h3>Warm-start와 검증</h3>
+  <p>첫 Linear와 Adam moment는 기존 append-only 규칙으로 0 suffix를 붙인다. Empirical normalizer는 새 terrain/gravity current 채널에는 identity 통계를 쓰되, base angular velocity·joint position·joint velocity의 과거 244개 열에는 대응 current-feature의 mean/variance/std를 복사한다. 기존 scalar sample count도 보존하므로 신규 terrain/gravity 통계의 적응은 느리며, bounded raw 입력으로 exact resume를 우선한 선택이다.</p>
+<pre><code># CPU regression
+$PY -m pytest src/holosoma/holosoma/motion_gen/tests \
+  src/holosoma/holosoma/config_types/tests \
+  src/holosoma/holosoma/agents/ppo/tests/test_checkpoint_expansion.py \
+  src/holosoma/holosoma/managers/reward/tests/test_heading.py \
+  src/holosoma/holosoma/managers/observation/tests/test_term_history.py -q
+# 62 passed, 1 pre-existing scheduler warning
+
+# 실제 terrain/history PPO: 앞 Task 7.2 명령과 같고 iteration 수만 2
+--algo.config.num-learning-iterations 2
+
+# 기존 Stage-5 flat 회귀: terrain이 없는 원래 preset
+$PY src/holosoma/holosoma/train_agent.py exp:g1-29dof-wbt-gen logger:disabled \
+  --training.num-envs 64 --training.checkpoint=$TRACKER \
+  --algo.config.num-learning-iterations 1 --algo.config.save-interval 999999 \
+  --command.setup-terms.motion-command.params.motion-config.generator-checkpoint=$GEN \
+  --command.setup-terms.motion-command.params.motion-config.motion-file=$SEED</code></pre>
+  <ul>
+    <li>Terrain run <code>20260713_081949-g1_29dof_wbt_gen_terrain_manager-locomotion</code>은 actor 154→702, critic 286→834로 warm-start하고 iteration 12,000–12,001을 완료해 <code>model_12001.pt</code>를 저장했다.</li>
+    <li>저장 파일의 첫 Linear, normalizer, Adam moment shape는 각각 actor 702 / critic 834이며 모든 tensor가 finite였다. Log에서 두 normalizer 모두 244개 lag 통계 복사를 확인했다.</li>
+    <li>Flat regression <code>20260713_082014-g1_29dof_wbt_gen_manager-locomotion</code>은 generator frozen, zero terrain, strict actor 154 / critic 286 load로 iteration 12,000을 완료했다.</li>
+    <li>Unit test가 첫 frame zero padding, 순서, subset reset, env 분리, non-mutating final observation, 기존 group-history layout, observation shape와 normalizer mapping을 확인했다. Ruff와 <code>git diff --check</code>도 통과했다.</li>
+  </ul>
+  <div class="callout ok"><b>Task 7.1 완료</b>: selective 5-frame history, reset/env 격리, checkpoint migration, 신규·기존 실제 PPO 경로를 모두 검증했다.</div>
+</section>
+
+<section>
   <h2>남은 작업</h2>
-  <p>다음 우선순위는 Task 7.1이다. Proprioceptive 네 항목만 5 frame으로 늘리고 generated reference와 terrain scan은 current frame으로 유지해야 한다. 그 다음 Task 7.3에서 positive box/stair/hurdle mesh, 자동 difficulty 상승, terrain-balanced sampling과 success logging을 연결한다.</p>
+  <p>Stage 7에서 남은 것은 Task 7.3이다. Positive box/stair/hurdle terrain, 자동 difficulty 상승, terrain-balanced sampling과 terrain별 success logging을 연결한다. ONNX tracker export/runtime에는 같은 history state machine이 별도로 필요하며 Stage 10 latency/export 검증 때 함께 다룬다.</p>
 </section>
 
 <footer>HoloSoma motion_gen · Stage 7 진행 문서 · 이전: <a href="motion_generator_stage6_ko.html">Stage 6 terrain 연결</a></footer>

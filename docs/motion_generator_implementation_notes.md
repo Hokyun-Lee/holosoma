@@ -336,8 +336,42 @@ RawEpisode heading tags; the OFF file retains diagnostic metrics but omits
 only the episodic reward tags. The measured ON values at iteration 12,000 were
 error 1.4921 rad, raw alignment 0.0440, and speed 0.4722 m/s. The terrain scan,
 443/575 checkpoint expansion, and frozen generator remained active. Unit and
-CLI tests: 8 passed. Five-frame proprioceptive history (7.1) and terrain
-curriculum (7.3) remain.
+CLI tests: 8 passed. Terrain curriculum (7.3) remains after the selective
+history work below.
+
+## Stage 7.1: selective five-frame proprioception (2026-07-13, docs/motion_generator_stage7_ko.html)
+
+`ObsTermCfg` now supports an optional per-term `history_length`. Existing
+groups with no override retain the legacy group-level flattening exactly. In
+the terrain generated-motion preset, base angular velocity, projected gravity,
+29 joint positions, and 29 joint velocities use five frames; generated
+references and the terrain scan remain current-frame only. Buffers run at the
+50 Hz policy rate in oldest-to-newest order, zero-pad unavailable initial
+frames, zero only the reset environment rows, and do not advance during the
+bootstrap `modify_history=False` observation.
+
+To preserve checkpoint columns, the Stage-6 current observation remains an
+unchanged prefix and only the four older frames are appended in a suffix.
+Projected gravity current is added after that old prefix. Actor input therefore
+grows 443->702 and critic input 575->834. First-layer weights and Adam moments
+use the existing zero-suffix migration. New terrain/gravity current normalizer
+columns start with identity statistics, while the 244 appended lag columns for
+base angular velocity and joint position/velocity copy the matching current
+feature's mean/variance/std. These ordering, zero-padding, and projected-gravity
+noise=0 choices are implementation choices because the paper does not publish
+them. Per-term suffixes are explicitly rejected when symmetry augmentation is
+enabled; this WBT preset has symmetry disabled. Deployment must reproduce the
+same stateful history outside the training environment. The inherited scalar
+normalizer count is about 1.18e9, so genuinely new terrain/gravity statistics
+adapt slowly; this keeps exact-resume behavior for bounded inputs but remains a
+normalizer warm-up ablation.
+
+A real 64-env Isaac terrain run resumed Stage-5 `model_12000.pt`, expanded to
+702/834, completed iterations 12,000-12,001, and saved finite model,
+normalizer, and optimizer tensors (`20260713_081949-*`). A separate Stage-5
+flat regression strict-loaded the original 154/286 policy and completed one
+iteration unchanged (`20260713_082014-*`). CPU regression: 62 passed; Ruff and
+diff checks clean. Terrain curriculum (7.3) remains.
 
 ## Known limitations / not yet verified
 

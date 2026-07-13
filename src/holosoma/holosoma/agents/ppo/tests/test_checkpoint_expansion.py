@@ -107,3 +107,23 @@ def test_input_expansion_rejects_hidden_width_change():
     incompatible = _Actor(5, hidden_dim=6)
     with pytest.raises(RuntimeError, match="not a suffix expansion"):
         _migrate_actor(old, incompatible)
+
+
+def test_normalizer_expansion_can_copy_current_stats_to_lag_suffix():
+    old = EmpiricalNormalization(shape=3, device="cpu")
+    old._mean.copy_(torch.tensor([[1.0, 2.0, 3.0]]))
+    old._var.copy_(torch.tensor([[4.0, 5.0, 6.0]]))
+    old._std.copy_(old._var.sqrt())
+    old.count.fill_(99)
+    new = EmpiricalNormalization(shape=7, device="cpu")
+
+    _load_normalizer_with_input_expansion(
+        new,
+        old.state_dict(),
+        label="actor",
+        expansion_source_indices=[0, 1, 2, 0, 1, 2, 6],
+    )
+
+    torch.testing.assert_close(new._mean, torch.tensor([[1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 0.0]]))
+    torch.testing.assert_close(new._var, torch.tensor([[4.0, 5.0, 6.0, 4.0, 5.0, 6.0, 1.0]]))
+    assert new.count == 99

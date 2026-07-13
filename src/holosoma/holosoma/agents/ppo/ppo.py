@@ -166,6 +166,7 @@ def _load_normalizer_with_input_expansion(
     source_state: dict[str, torch.Tensor],
     *,
     label: str,
+    expansion_source_indices: list[int] | None = None,
 ) -> bool:
     """Expand empirical-normalizer feature suffix with identity statistics."""
     target_state = normalizer.state_dict()
@@ -189,9 +190,29 @@ def _load_normalizer_with_input_expansion(
             )
     if expanded_keys and set(expanded_keys) != set(fill_values):
         raise RuntimeError(f"{label} normalizer must expand mean/var/std together, got {expanded_keys}")
+    copied_suffix_features = 0
+    if expanded_keys and expansion_source_indices is not None:
+        source_width = source_state["_mean"].shape[-1]
+        target_width = target_state["_mean"].shape[-1]
+        if len(expansion_source_indices) != target_width:
+            raise RuntimeError(
+                f"{label} normalizer expansion map has {len(expansion_source_indices)} entries, "
+                f"expected {target_width}"
+            )
+        for target_idx in range(source_width, target_width):
+            source_idx = expansion_source_indices[target_idx]
+            if source_idx >= source_width:
+                continue
+            for key in fill_values:
+                migrated[key][..., target_idx] = source_state[key][..., source_idx]
+            copied_suffix_features += 1
+
     normalizer.load_state_dict(migrated, strict=True)
     if expanded_keys:
-        logger.info(f"Expanded {label} normalizer suffix with mean=0, variance/std=1")
+        logger.info(
+            f"Expanded {label} normalizer suffix with identity defaults; "
+            f"copied current-feature statistics into {copied_suffix_features} lag columns"
+        )
     return bool(expanded_keys)
 
 
@@ -398,6 +419,17 @@ class PPO(BaseAlgo):
             self.critic_obs_normalizer = nn.Identity()
 
         if self.use_symmetry:
+            selective_history_groups = [
+                group_name
+                for group_name, group_cfg in self.env.observation_manager.cfg.groups.items()
+                if group_cfg.concatenate
+                and any(term_cfg.history_length is not None for term_cfg in group_cfg.terms.values())
+            ]
+            if selective_history_groups:
+                raise NotImplementedError(
+                    "Symmetry augmentation does not yet support per-term history suffixes in "
+                    f"groups {selective_history_groups}; keep use_symmetry=False"
+                )
             self.symmetry_utils = SymmetryUtils(self.env)
 
         # Synchronize model weights across GPUs after initialization
@@ -804,19 +836,31 @@ class PPO(BaseAlgo):
                 self.critic.load_state_dict(loaded_dict["critic_model_state_dict"])
             if self.empirical_normalization and loaded_dict.get("actor_obs_normalizer_state_dict") is not None:
                 if expand_input:
+                    actor_expansion_sources = None
+                    if len(self.actor_obs_keys) == 1:
+                        actor_expansion_sources = self.env.observation_manager.get_normalizer_expansion_source_indices(
+                            self.actor_obs_keys[0]
+                        )
                     _load_normalizer_with_input_expansion(
                         self.actor_obs_normalizer,
                         loaded_dict["actor_obs_normalizer_state_dict"],
                         label="actor",
+                        expansion_source_indices=actor_expansion_sources,
                     )
                 else:
                     self.actor_obs_normalizer.load_state_dict(loaded_dict["actor_obs_normalizer_state_dict"])
             if self.empirical_normalization and loaded_dict.get("critic_obs_normalizer_state_dict") is not None:
                 if expand_input:
+                    critic_expansion_sources = None
+                    if len(self.critic_obs_keys) == 1:
+                        critic_expansion_sources = self.env.observation_manager.get_normalizer_expansion_source_indices(
+                            self.critic_obs_keys[0]
+                        )
                     _load_normalizer_with_input_expansion(
                         self.critic_obs_normalizer,
                         loaded_dict["critic_obs_normalizer_state_dict"],
                         label="critic",
+                        expansion_source_indices=critic_expansion_sources,
                     )
                 else:
                     self.critic_obs_normalizer.load_state_dict(loaded_dict["critic_obs_normalizer_state_dict"])
