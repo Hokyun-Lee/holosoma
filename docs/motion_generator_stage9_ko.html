@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Motion Generator 9차: Terrain closed-loop PPO</title>
+<style>
+:root { --bg:#fbfbfd; --card:#fff; --text:#1d1d1f; --muted:#6e6e73; --accent:#0071e3; --border:#e5e5ea; --code:#f5f5f7; --ok:#e9f7ef; --warn:#fff8e6; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:16px/1.7 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR",sans-serif; }
+.container { max-width:860px; margin:auto; padding:0 24px 100px; }
+header { padding:80px 0 42px; text-align:center; }
+h1 { margin:0; font-size:40px; line-height:1.2; }
+header p { color:var(--muted); font-size:19px; }
+section { margin:0 0 58px; }
+h2 { margin:0 0 12px; padding-top:18px; font-size:28px; }
+h3 { margin:28px 0 10px; }
+p, ul { margin:10px 0; }
+code { background:var(--code); border-radius:6px; padding:2px 6px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.88em; }
+pre { overflow-x:auto; padding:18px 20px; border-radius:14px; background:#1d1d1f; color:#f5f5f7; font-size:13px; line-height:1.6; }
+pre code { padding:0; background:none; }
+.card,.callout { padding:18px 22px; border:1px solid var(--border); border-radius:14px; background:var(--card); }
+.ok { background:var(--ok); }
+.warn { background:var(--warn); }
+table { width:100%; border-collapse:collapse; background:var(--card); font-size:14px; }
+th,td { padding:10px 12px; border-bottom:1px solid var(--border); text-align:left; vertical-align:top; }
+th { background:var(--code); }
+.table { overflow-x:auto; border:1px solid var(--border); border-radius:14px; }
+footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted); text-align:center; font-size:13px; }
+</style>
+</head>
+<body>
+<header class="container">
+  <h1>9차: Terrain closed-loop PPO</h1>
+  <p>실측 state와 simulator terrain으로 frozen generator를 재계획하고<br>tracker만 PPO로 갱신하는 장기 학습의 구현·실행 기록</p>
+</header>
+<main class="container">
+<section>
+  <h2>진행 체크리스트 <small>(2026-07-13)</small></h2>
+  <div class="card">
+    <ul>
+      <li><code>[x]</code> actual state 2-frame history 사용</li>
+      <li><code>[x]</code> actual simulator terrain scan 사용</li>
+      <li><code>[x]</code> frozen generator 확인 (<code>trainable generator params=0</code>)</li>
+      <li><code>[x]</code> 25 control-step마다 2-step DDIM replanning 확인</li>
+      <li><code>[ ]</code> episode length 회복 — production 완료 후 공통 평가 필요</li>
+      <li><code>[ ]</code> fall/collision 감소 — 동일 protocol baseline 비교 필요</li>
+      <li><code>[ ]</code> obstacle success rate 증가 — terrain×level 공통 평가 필요</li>
+      <li><code>[ ]</code> tracker가 잘못된 reference를 수정하는 사례 — proxy가 아닌 사례 검증 필요</li>
+    </ul>
+  </div>
+  <div class="callout ok"><b>현재 상태</b>: Stage 9의 폐루프 wiring과 warm-start 경로는 64-env gate로 검증됐다. 1,024-env production run은 진행 중이므로 성능 관련 네 항목은 의도적으로 완료 처리하지 않았다.</div>
+</section>
+
+<section>
+  <h2>폐루프 데이터 경로</h2>
+  <p><code>exp:g1-29dof-wbt-gen-terrain</code>은 Stage-5 flat preset을 변경하지 않는 별도 terrain experiment다. Stage-8의 robust+FK generator와 Stage-5 fine-tuned tracker를 각각 불러와 다음 순서로 실행한다.</p>
+  <div class="table"><table>
+    <tr><th>순서</th><th>실행 내용</th><th>검증된 contract</th></tr>
+    <tr><td>1</td><td>각 policy step에 simulator의 root, joint, 14 body state를 feature로 pack</td><td>50 Hz, generator 내부 quaternion은 <code>wxyz</code>; Isaac state <code>xyzw</code>는 경계에서 변환</td></tr>
+    <tr><td>2</td><td>직전 2 frame의 <b>실측</b> state history 갱신</td><td>non-bootstrap replan 전에 valid count가 2인지 runtime assertion</td></tr>
+    <tr><td>3</td><td>실측 base XY와 yaw에서 local terrain scan 갱신</td><td><code>(N,289)</code>, 17×17, absolute world-Z metre, normalization 없음</td></tr>
+    <tr><td>4</td><td>episode target heading과 함께 frozen generator 입력 구성</td><td>generator model의 <code>requires_grad</code> parameter 수가 0이 아니면 즉시 실패</td></tr>
+    <tr><td>5</td><td>25 control step마다 다음 25 frame reference 생성</td><td>0.5 s = 2 Hz, DDIM denoise 2 step</td></tr>
+    <tr><td>6</td><td>5-frame proprioception, current reference, current scan으로 tracker action 실행</td><td>actor 702 / critic 834 input; PPO actor·critic만 optimizer에 포함</td></tr>
+    <tr><td>7</td><td>reference가 아니라 다음 simulator measurement로 history를 다시 갱신</td><td>reference drift가 condition history로 되먹임되지 않음</td></tr>
+  </table></div>
+
+  <p>Scan grid는 generator checkpoint의 단일 정의를 사용한다. 범위는 local x <code>[-0.3, 1.3]</code>, y <code>[-0.8, 0.8]</code>, spacing <code>0.1 m</code>이며 <code>meshgrid(indexing="ij")</code>의 x-major/y-fastest 순서다. Tracker도 같은 current-frame cache를 사용하고 PPO empirical normalizer가 관측을 처리한다.</p>
+
+  <div class="callout warn"><b>Bootstrap 예외</b>: reset 직후에는 robot 초기화에 사용한 seed clip의 2 frame으로 즉시 첫 reference를 한 번 생성한다. 그 뒤 history에는 매 policy step의 simulator measurement만 들어가며, 모든 non-bootstrap replan은 2개 slot이 모두 실측값일 때만 허용된다. 따라서 “모든 replan이 실측 2 frame”이 아니라 “bootstrap 이후의 모든 폐루프 replan이 실측 2 frame”이 정확한 표현이다.</div>
+
+  <div class="callout warn"><b>논문값과 구현 선택 구분</b>: 0.5초 query와 2-step denoising은 논문에 맞춘 값이다. 17×17 scan 범위·resolution, 25-frame HoloSoma control discretization, strict measured-history assertion, seed clip, 1,024 env, PPO 3,000 iteration은 이 재현의 구현 선택이다.</div>
+</section>
+
+<section>
+  <h2>Tracker warm-start와 checkpoint 이관</h2>
+  <p>입력은 Stage-5 tracker보다 커졌지만 기존 policy를 버리지 않았다. Base checkpoint <code>20260711_122501-.../model_12000.pt</code>를 append-only 규칙으로 확장하고 optimizer까지 복구했다.</p>
+  <div class="table"><table>
+    <tr><th>항목</th><th>Stage-5</th><th>Stage-9 terrain</th><th>이관 방식</th></tr>
+    <tr><td>actor first Linear</td><td>154</td><td>702</td><td>기존 prefix 복사, 새 suffix weight=0</td></tr>
+    <tr><td>critic first Linear</td><td>286</td><td>834</td><td>기존 prefix 복사, 새 suffix weight=0</td></tr>
+    <tr><td>current actor suffix</td><td>없음</td><td>terrain 289 + projected gravity 3</td><td>normalizer identity 통계</td></tr>
+    <tr><td>과거 proprio suffix</td><td>없음</td><td>4 lag × 64 = 256</td><td>기존 ang-vel/joint 244열은 current 통계 복사, gravity 12열은 identity</td></tr>
+    <tr><td>AdamW moments</td><td>154 / 286 input</td><td>702 / 834 input</td><td>actor 2개·critic 2개 moment tensor에 zero suffix</td></tr>
+  </table></div>
+  <p>64-env gate의 log는 actor <code>154→702</code>, critic <code>286→834</code>, 두 normalizer의 244 lag-column 복사, 네 optimizer moment 확장과 <code>Optimizer loaded from checkpoint</code>를 모두 남겼다. 저장된 <code>model_12001.pt</code>를 CPU에서 다시 읽어 첫 Linear shape가 각각 <code>(512,702)</code>, <code>(512,834)</code>이고 iteration이 12,001임을 확인했다.</p>
+  <p>Generator는 <code>logs/motion_gen/terrain_robust_fk_4090/checkpoints/final.pt</code>의 EMA를 사용한다. Runtime log는 checkpoint step 10,000, <code>terrain=sim_scan</code>, <code>measured_history_guard=True</code>, <code>trainable generator params=0</code>를 기록했다.</p>
+  <div class="callout warn"><b>구현 선택</b>: 입력 suffix의 배치 순서, 신규 weight/moment의 0 초기화, lag normalizer 통계 복사, 기존 scalar count 보존은 논문 미공개 영역이다. 이 선택은 첫 action을 기존 tracker와 같게 유지하면서 새 관측에 점진적으로 적응시키기 위한 checkpoint 호환 정책이다.</div>
+</section>
+
+<section>
+  <h2>Signed-progress terrain curriculum v3</h2>
+  <p>Flat/box/stair/hurdle은 env index에 고정 round-robin으로 배치하고 difficulty level만 episode outcome에 따라 바꾼다. 단순 생존이나 옆·뒤 이동을 obstacle 통과로 세지 않도록 episode 시작 root와 시작 시 target heading을 고정해 signed forward progress를 계산한다.</p>
+<pre><code>progress(t) = dot(root_xy(t) - root_xy(start), target_heading_xy(start))
+episode_progress = max_t max(progress(t), 0)
+
+success = non-initial complete episode
+       and no fall termination
+       and timeout after at least 90% of 500 steps
+       and episode_progress &gt;= 1.5 m</code></pre>
+  <p>성공 5회 연속이면 level을 +1, 평가된 실패 2회 연속이면 −1하고 [0,9]에서 clamp한다. 1.5 m 미만으로 timeout한 episode도 실패 denominator에 포함한다. Checkpoint state는 <code>version=3</code>, <code>progress_semantics="target_heading_signed_v1"</code>이며 episode origin, normalized heading, max progress와 terrain×level 누적 통계를 저장한다. Radial distance를 사용하던 v2 state는 방향 정보를 복원할 수 없으므로 level 등 durable state만 보존하고 crossing counter와 진행 중 progress를 0에서 다시 시작한다.</p>
+  <div class="table"><table>
+    <tr><th>64-env gate 확인값 @ iteration 12,001</th><th>값</th><th>해석 범위</th></tr>
+    <tr><td>flat/box/stair/hurdle env fraction</td><td>각 0.25, range 0</td><td>64 env가 타입별 16개로 균등 배치</td></tr>
+    <tr><td>crossing distance</td><td>1.5 m</td><td>config와 TensorBoard tag 일치</td></tr>
+    <tr><td>mean max signed progress</td><td>0.07958 m</td><td>2-iteration wiring gate의 누적 상태, 성능 평가값 아님</td></tr>
+    <tr><td>checkpoint curriculum state</td><td>v3 / 64 env / signed-v1</td><td><code>model_12001.pt</code>에서 직접 확인</td></tr>
+  </table></div>
+  <div class="callout warn"><b>구현 선택</b>: 90% timeout gate, 1.5 m crossing, 5-success/2-failure streak, 10 level과 각 level의 장애물 geometry는 논문 공개값이 아니다. 모두 config에 노출한 이 재현의 선택이다.</div>
+</section>
+
+<section>
+  <h2>Penetration proxy와 contact 계측</h2>
+  <p>Stage-9 command는 reference와 robot의 14 tracked body origin을 같은 cached scan에 bilinear sampling해 terrain보다 아래에 있는 높이를 진단한다. Reference max penetration에서 measured robot max penetration을 뺀 signed improvement와 양의 부분을 기록한다. Reference가 최소 0.02 m 아래이고 robot 쪽 개선이 최소 0.01 m일 때만 <code>tracker_body_origin_correction_case</code>를 1로 둔다.</p>
+  <div class="table"><table>
+    <tr><th>계측</th><th>의미</th><th>한계</th></tr>
+    <tr><td>reference/robot body-origin penetration mean·max</td><td>local scan 높이와 14 link origin Z의 차이</td><td>link collision shape나 mesh intersection이 아님</td></tr>
+    <tr><td>tracker penetration improvement/correction case</td><td>reference보다 robot origin이 덜 낮은 상관 기반 proxy</td><td>tracker가 의도적으로 잘못된 reference를 수정했다는 인과 증거가 아님</td></tr>
+    <tr><td>undesired contact body count/any</td><td>활성 <code>UndesiredContacts</code> reward term의 판정을 그대로 재사용</td><td>penetration 깊이가 아니라 contact-force threshold 판정</td></tr>
+  </table></div>
+  <p>Undesired contact는 simulator contact-force history에서 preset regex로 선택한 body마다 최대 force norm이 1 N을 넘는지 판정한 <b>동일 reward-term 결과</b>다. 즉 별도 근사식을 만들지 않았다는 의미에서 reward와 exact하게 일치하지만, 이것을 exact mesh penetration이라고 부르지는 않는다.</p>
+  <p>Gate 마지막 scalar에는 body-origin correction case 0, undesired-contact any 0.05599가 기록됐다. Gate는 두 PPO iteration뿐이며 비교 baseline도 없으므로 correction 사례나 collision 감소를 입증하지 않는다. 이 때문에 해당 성능 체크박스는 비워 두었다.</p>
+</section>
+
+<section>
+  <h2>64-env signed gate 결과</h2>
+  <p>Run: <code>logs/WholeBodyTracking/20260713_100144-g1_29dof_wbt_gen_terrain_manager-locomotion/</code>. Isaac Sim 초기화, PPO 2 iteration, <code>model_12000.pt</code>와 <code>model_12001.pt</code> 저장을 오류 없이 마쳤다.</p>
+  <div class="table"><table>
+    <tr><th>검증 항목</th><th>관찰 결과</th></tr>
+    <tr><td>generator</td><td>robust+FK checkpoint step 10,000, frozen parameter 0, sim scan, 2-step DDIM</td></tr>
+    <tr><td>scheduler</td><td>replan every 25 steps; bootstrap count 1, mean closed-loop replan count 0.8919</td></tr>
+    <tr><td>measured history</td><td>mean valid count 1.9961 / 2 at 마지막 scalar</td></tr>
+    <tr><td>scan anchor</td><td>XY error 0 m, yaw error 1.15e-7 rad</td></tr>
+    <tr><td>terrain sampling</td><td>네 type fraction 각 0.25</td></tr>
+    <tr><td>checkpoint migration</td><td>actor/critic/normalizer/optimizer 확장 후 optimizer resume, finite checkpoint 저장</td></tr>
+  </table></div>
+  <div class="callout warn"><b>Gate 해석</b>: PPO rollout 경계와 한 번 이상의 non-bootstrap replan을 통과해 dataflow assertion을 검증하는 run이다. 짧은 gate의 episode length, reward, success/contact scalar를 정책 품질이나 회복의 근거로 사용하지 않는다.</div>
+</section>
+
+<section>
+  <h2>Evaluation env-state 호환성</h2>
+  <p>Training checkpoint의 curriculum state는 env별 tensor를 포함하므로 64/1,024-env state를 4-env evaluation에 strict restore하면 shape가 맞지 않는다. <code>eval_agent.py</code>는 이제 기본 <code>restore_env_state=false</code>에서 curriculum과 episode-tracker state만 건너뛰고 policy와 actor/critic normalizer는 그대로 읽는다. 동일 env layout의 정확한 resume가 필요할 때만 명시적으로 state restore를 켠다.</p>
+  <p>4-env, 505-step headless smoke는 expanded actor 702 / critic 834와 frozen generator를 로드하고 500-step reset 경계를 지난 뒤 exit 0으로 종료했다. 산출물은 <code>logs/WholeBodyTracking/20260713_094315-g1_29dof_wbt_gen_terrain_manager-eval/</code>에 저장됐다.</p>
+  <div class="callout warn"><b>범위</b>: 이 smoke는 서로 다른 env 수에서 checkpoint를 재생할 수 있다는 회귀 검증이다. Deterministic common-eval 결과나 Stage-9 성능 비교가 아니다.</div>
+</section>
+
+<section>
+  <h2>Production run <small>(진행 중)</small></h2>
+  <p>Run: <code>logs/WholeBodyTracking/20260713_100222-g1_29dof_wbt_gen_terrain_manager-locomotion/</code>. 1,024 env, 3,000 PPO iteration, save interval 500으로 시작했다. Base tracker, robust+FK generator, optimizer resume, 25-step/2-step 설정은 gate와 같다.</p>
+  <p>문서 작성 시점(2026-07-13 19:09 KST)에 process가 살아 있었고 TensorBoard scalar는 iteration 12,199까지 기록됐지만 첫 500-update checkpoint는 아직 생성되지 않았다. 장기 run은 이 문서 작업에서 읽기만 했으며 중단·재시작·수정하지 않았다.</p>
+  <div class="callout warn"><b>아직 결론 내리지 않음</b>: 진행 중 rolling scalar가 좋아 보이더라도 production 완료 checkpoint와 Stage-10 동일 조건 평가가 없으면 episode recovery, fall/contact 감소, obstacle success 증가를 판정하지 않는다.</div>
+</section>
+
+<section>
+  <h2>실행 명령과 검증</h2>
+<pre><code>PY=~/.holosoma_deps/miniconda3/envs/hssim/bin/python
+BASE=logs/WholeBodyTracking/20260711_122501-g1_29dof_wbt_gen_manager-locomotion/model_12000.pt
+GEN=logs/motion_gen/terrain_robust_fk_4090/checkpoints/final.pt
+SEED=data/motion_gen/processed_paperscale/lafan1_walk4_subject1.npz
+
+# 64-env signed gate (저장 config와 동등)
+$PY src/holosoma/holosoma/train_agent.py exp:g1-29dof-wbt-gen-terrain logger:disabled \
+  --training.num-envs 64 --training.checkpoint $BASE \
+  --algo.config.num-learning-iterations 2 --algo.config.save-interval 1 \
+  --algo.config.load-optimizer True \
+  --command.setup-terms.motion-command.params.motion-config.generator-checkpoint $GEN \
+  --command.setup-terms.motion-command.params.motion-config.motion-file $SEED \
+  --command.setup-terms.motion-command.params.motion-config.past-noise-std 0.0
+
+# 1,024-env production — 현재 실행 중인 실제 command
+$PY src/holosoma/holosoma/train_agent.py exp:g1-29dof-wbt-gen-terrain logger:disabled \
+  --training.num-envs 1024 --training.checkpoint $BASE \
+  --algo.config.num-learning-iterations 3000 --algo.config.save-interval 500 \
+  --algo.config.load-optimizer True \
+  --command.setup-terms.motion-command.params.motion-config.generator-checkpoint $GEN \
+  --command.setup-terms.motion-command.params.motion-config.motion-file $SEED \
+  --command.setup-terms.motion-command.params.motion-config.past-noise-std 0.0
+
+# 서로 다른 env 수의 evaluation smoke
+$PY src/holosoma/holosoma/eval_agent.py \
+  --checkpoint logs/WholeBodyTracking/20260713_100144-g1_29dof_wbt_gen_terrain_manager-locomotion/model_12001.pt \
+  --training.num-envs 4 --training.max-eval-steps 505
+
+# Stage-9 핵심 CPU regression
+$PY -m pytest -q \
+  src/holosoma/holosoma/managers/command/tests/test_wbt_gen.py \
+  src/holosoma/holosoma/managers/curriculum/tests/test_terrain.py \
+  src/holosoma/holosoma/managers/observation/tests/test_term_history.py \
+  src/holosoma/holosoma/managers/reward/tests/test_heading.py \
+  src/holosoma/holosoma/managers/terrain/tests/test_curriculum_terrain.py \
+  src/holosoma/holosoma/agents/ppo/tests/test_checkpoint_expansion.py \
+  src/holosoma/holosoma/agents/base_algo/tests/test_checkpoint_env_state.py \
+  src/holosoma/holosoma/config_types/tests/test_terrain_eval_config.py
+# 58 passed in 5.51s</code></pre>
+
+  <div class="table"><table>
+    <tr><th>구현 commit</th><th>내용</th></tr>
+    <tr><td><code>d0488bc</code></td><td>bootstrap 이후 fully measured 2-frame history runtime guard와 replan telemetry</td></tr>
+    <tr><td><code>6243a86</code></td><td>reference/robot body-origin proxy, correction proxy, active undesired-contact 계측</td></tr>
+    <tr><td><code>321afb7</code></td><td>target-heading signed-progress curriculum state v3</td></tr>
+    <tr><td><code>6be39da</code></td><td>env 수가 다른 evaluation에서 env-state restore 분리</td></tr>
+  </table></div>
+</section>
+
+<section>
+  <h2>남은 문제와 완료 조건</h2>
+  <ul>
+    <li>Production run을 끝까지 완료하고 마지막 checkpoint, optimizer, v3 curriculum state의 integrity를 확인해야 한다.</li>
+    <li>Stage-5 flat tracker, terrain generator without fine-tuning, terrain tracker without generator 등과 동일 seed·episode·terrain에서 비교해야 한다.</li>
+    <li>Episode length는 survival 하나만 말하므로 fall rate, physics-derived undesired contact, heading/tracking error, body-origin proxy를 함께 보고해야 한다.</li>
+    <li>Obstacle success는 cumulative training scalar가 아니라 고정된 type×level 평가 episode에서 crossing과 fall을 함께 판정해야 한다.</li>
+    <li>Correction proxy가 양수인 timestep을 replay해 reference geometry, robot link collision/contact, action을 시각적으로 확인해야 “tracker가 잘못된 reference를 수정했다”를 체크할 수 있다.</li>
+    <li>Body-origin penetration은 계속 proxy다. Collision shape/mesh penetration의 정량 평가는 별도 geometry 계측이 필요하다.</li>
+  </ul>
+</section>
+
+<footer>HoloSoma motion_gen · Stage 9 진행 문서 · 이전: <a href="motion_generator_stage8_ko.html">Stage 8 generator robustness</a></footer>
+</main>
+</body>
+</html>
