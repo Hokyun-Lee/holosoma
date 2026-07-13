@@ -740,6 +740,16 @@ not constitute simulator evaluation or GPU timing.
   evaluation, terrain closed-loop convergence, MuJoCo sim-to-sim, and
   sim-to-real remain.
 
+Before running any A-F simulator result, the common primary terrain row was
+fixed at curriculum level 1. In the fair-budget D snapshot (`model_12500.pt`),
+the obstacle current-level counts were box L0/L1=175/81, stair=200/56, and
+hurdle=191/65; no obstacle env was currently at L2, and cumulative L2 episode
+counts were only 20/10/2. L2+ is therefore treated only as extrapolation
+stress. Flat geometry is level-invariant, so its high level is not evidence of
+obstacle competence. This is an implementation/evaluation choice, not a
+paper-specified value, and was recorded before inspecting A-F evaluation
+results.
+
 ## Technical risks for the next stage
 
 1. 29-DoF vs paper's 23-DoF: a future tracker trained on paper-style 23-DoF
