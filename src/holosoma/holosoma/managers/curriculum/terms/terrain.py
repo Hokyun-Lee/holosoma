@@ -19,7 +19,8 @@ class TerrainCurriculum(CurriculumTermBase):
     the terrain term to apply the corresponding origins before command reset.
     """
 
-    _STATE_VERSION = 2
+    _STATE_VERSION = 3
+    _PROGRESS_SEMANTICS = "target_heading_signed_v1"
 
     def __init__(self, cfg: Any, env: Any):
         super().__init__(cfg, env)
@@ -52,7 +53,7 @@ class TerrainCurriculum(CurriculumTermBase):
         self._is_setup = False
 
     def _robot_root_xy(self) -> Any:
-        """Return measured root XY; crossing is radial for concentric terrain."""
+        """Return measured root XY used by the crossing metric."""
         simulator = getattr(self.env, "simulator", None)
         root_states = getattr(simulator, "robot_root_states", None)
         try:
@@ -70,6 +71,32 @@ class TerrainCurriculum(CurriculumTermBase):
         if not root_xy.is_floating_point():
             raise RuntimeError("simulator.robot_root_states must be floating point")
         return root_xy
+
+    def _target_heading_w(self) -> Any:
+        """Return normalized per-environment target headings in world XY.
+
+        The heading is sampled by the command at reset and captured by this
+        curriculum for the entire episode.  This prevents lateral or backward
+        travel from satisfying the obstacle-crossing progress gate.
+        """
+        command_manager = getattr(self.env, "command_manager", None)
+        motion_command = (
+            command_manager.get_state("motion_command")
+            if command_manager is not None and hasattr(command_manager, "get_state")
+            else None
+        )
+        heading = getattr(motion_command, "target_heading_w", None)
+        if not torch.is_tensor(heading) or heading.shape != (self.env.num_envs, 2):
+            raise RuntimeError(
+                "TerrainCurriculum crossing metrics require motion_command.target_heading_w "
+                f"with shape ({self.env.num_envs}, 2)"
+            )
+        if not heading.is_floating_point() or not torch.isfinite(heading).all():
+            raise RuntimeError("motion_command.target_heading_w must be finite floating point")
+        norms = torch.linalg.vector_norm(heading, dim=-1, keepdim=True)
+        if torch.any(norms <= 1.0e-6):
+            raise RuntimeError("motion_command.target_heading_w must be non-zero")
+        return heading / norms
 
     @staticmethod
     def _bool_param(params: Mapping[str, Any], name: str, default: bool) -> bool:
@@ -188,7 +215,9 @@ class TerrainCurriculum(CurriculumTermBase):
         self.type_level_failure_counts = torch.zeros_like(self.type_level_episode_counts)
         root_xy = self._robot_root_xy()
         self.episode_start_root_xy = root_xy.detach().clone()
-        self.max_episode_progress_m = torch.zeros(num_envs, dtype=root_xy.dtype, device=device)
+        self.episode_target_heading_w = torch.zeros(num_envs, 2, dtype=root_xy.dtype, device=device)
+        self.episode_target_heading_w[:, 0] = 1.0
+        self.max_episode_forward_progress_m = torch.zeros(num_envs, dtype=root_xy.dtype, device=device)
 
         self._terrain_state = terrain_state
         self._is_setup = True
@@ -227,7 +256,10 @@ class TerrainCurriculum(CurriculumTermBase):
         evaluated_failures = failures & can_evaluate_outcome
         survival_successes = (~failures) & time_outs & eligible & can_evaluate_outcome
         if self.crossing_distance_m > 0.0:
-            crossing_achieved = self.max_episode_progress_m.index_select(0, ids) >= self.crossing_distance_m
+            crossing_achieved = (
+                self.max_episode_forward_progress_m.index_select(0, ids)
+                >= self.crossing_distance_m
+            )
             successes = survival_successes & crossing_achieved
         else:
             crossing_achieved = torch.zeros_like(survival_successes)
@@ -300,7 +332,7 @@ class TerrainCurriculum(CurriculumTermBase):
         self._write_metrics()
 
     def reset(self, env_ids) -> None:
-        """Capture the new measured episode origin after command reset."""
+        """Capture the new measured origin and command heading after reset."""
         if not self.enabled:
             return
         self._require_setup()
@@ -308,7 +340,8 @@ class TerrainCurriculum(CurriculumTermBase):
         if ids.numel() == 0:
             return
         self.episode_start_root_xy[ids] = self._robot_root_xy().index_select(0, ids)
-        self.max_episode_progress_m[ids] = 0.0
+        self.episode_target_heading_w[ids] = self._target_heading_w().index_select(0, ids)
+        self.max_episode_forward_progress_m[ids] = 0.0
 
     def step(self) -> None:
         """Advance actual-step guards and publish cumulative metrics."""
@@ -316,8 +349,12 @@ class TerrainCurriculum(CurriculumTermBase):
             return
         self._require_setup()
         root_xy = self._robot_root_xy()
-        radial_progress = torch.linalg.vector_norm(root_xy - self.episode_start_root_xy, dim=-1)
-        self.max_episode_progress_m = torch.maximum(self.max_episode_progress_m, radial_progress)
+        displacement = root_xy - self.episode_start_root_xy
+        forward_progress = torch.sum(displacement * self.episode_target_heading_w, dim=-1)
+        self.max_episode_forward_progress_m = torch.maximum(
+            self.max_episode_forward_progress_m,
+            forward_progress.clamp_min(0.0),
+        )
         increment = ~self._skip_next_step_increment
         self.actual_episode_steps[increment] += 1
         self._skip_next_step_increment.zero_()
@@ -349,8 +386,10 @@ class TerrainCurriculum(CurriculumTermBase):
             "type_level_survival_counts": self.type_level_survival_counts.detach().cpu().clone(),
             "type_level_crossing_counts": self.type_level_crossing_counts.detach().cpu().clone(),
             "type_level_failure_counts": self.type_level_failure_counts.detach().cpu().clone(),
+            "progress_semantics": self._PROGRESS_SEMANTICS,
             "episode_start_root_xy": self.episode_start_root_xy.detach().cpu().clone(),
-            "max_episode_progress_m": self.max_episode_progress_m.detach().cpu().clone(),
+            "episode_target_heading_w": self.episode_target_heading_w.detach().cpu().clone(),
+            "max_episode_forward_progress_m": self.max_episode_forward_progress_m.detach().cpu().clone(),
         }
 
     def load_state_dict(self, state: Mapping[str, Any]) -> None:
@@ -359,9 +398,9 @@ class TerrainCurriculum(CurriculumTermBase):
         if not isinstance(state, Mapping):
             raise TypeError("Terrain curriculum state must be a mapping")
         version = state.get("version")
-        if version not in (1, self._STATE_VERSION):
+        if version not in (1, 2, self._STATE_VERSION):
             raise ValueError(
-                f"Unsupported terrain curriculum state version {version!r}; expected 1 or {self._STATE_VERSION}"
+                f"Unsupported terrain curriculum state version {version!r}; expected 1, 2, or {self._STATE_VERSION}"
             )
         if state.get("num_envs") != self.env.num_envs:
             raise ValueError(f"Terrain curriculum num_envs mismatch: {state.get('num_envs')!r} != {self.env.num_envs}")
@@ -395,7 +434,8 @@ class TerrainCurriculum(CurriculumTermBase):
             type_level_crossing_counts = torch.zeros_like(type_level_episode_counts)
             type_level_failure_counts = torch.zeros_like(type_level_episode_counts)
             episode_start_root_xy = self._robot_root_xy().detach().clone()
-            max_episode_progress_m = torch.zeros(
+            episode_target_heading_w = self._target_heading_w().detach().clone()
+            max_episode_forward_progress_m = torch.zeros(
                 self.env.num_envs,
                 dtype=episode_start_root_xy.dtype,
                 device=self.env.device,
@@ -425,12 +465,37 @@ class TerrainCurriculum(CurriculumTermBase):
                 self.episode_start_root_xy.dtype,
                 (self.env.num_envs, 2),
             )
-            max_episode_progress_m = self._state_tensor(
-                state,
-                "max_episode_progress_m",
-                self.max_episode_progress_m.dtype,
-                num_envs_shape,
-            )
+            if version == 2:
+                # Version 2 used radial distance, which cannot be converted to
+                # signed forward progress.  Preserve terrain levels and the
+                # other outcome channels, but start the new per-episode gate
+                # from the command's current heading and zero progress.
+                crossing_counts = torch.zeros_like(crossing_counts)
+                type_level_crossing_counts = torch.zeros_like(type_level_crossing_counts)
+                episode_target_heading_w = self._target_heading_w().detach().clone()
+                max_episode_forward_progress_m = torch.zeros(
+                    self.env.num_envs,
+                    dtype=episode_start_root_xy.dtype,
+                    device=self.env.device,
+                )
+            else:
+                if state.get("progress_semantics") != self._PROGRESS_SEMANTICS:
+                    raise ValueError(
+                        "Terrain curriculum progress_semantics mismatch: "
+                        f"{state.get('progress_semantics')!r} != {self._PROGRESS_SEMANTICS!r}"
+                    )
+                episode_target_heading_w = self._state_tensor(
+                    state,
+                    "episode_target_heading_w",
+                    self.episode_target_heading_w.dtype,
+                    (self.env.num_envs, 2),
+                )
+                max_episode_forward_progress_m = self._state_tensor(
+                    state,
+                    "max_episode_forward_progress_m",
+                    self.max_episode_forward_progress_m.dtype,
+                    num_envs_shape,
+                )
 
         if torch.any(levels < self.min_level) or torch.any(levels > self.max_level):
             raise ValueError(f"terrain_levels must be in [{self.min_level}, {self.max_level}]")
@@ -473,8 +538,15 @@ class TerrainCurriculum(CurriculumTermBase):
                 raise ValueError(f"{name} cannot exceed type_level_episode_counts")
         if not torch.isfinite(episode_start_root_xy).all():
             raise ValueError("episode_start_root_xy must be finite")
-        if not torch.isfinite(max_episode_progress_m).all() or torch.any(max_episode_progress_m < 0):
-            raise ValueError("max_episode_progress_m must be finite and non-negative")
+        if not torch.isfinite(episode_target_heading_w).all():
+            raise ValueError("episode_target_heading_w must be finite")
+        heading_norms = torch.linalg.vector_norm(episode_target_heading_w, dim=-1)
+        if not torch.allclose(heading_norms, torch.ones_like(heading_norms), atol=1.0e-5, rtol=1.0e-5):
+            raise ValueError("episode_target_heading_w must contain unit vectors")
+        if not torch.isfinite(max_episode_forward_progress_m).all() or torch.any(
+            max_episode_forward_progress_m < 0
+        ):
+            raise ValueError("max_episode_forward_progress_m must be finite and non-negative")
         if torch.any(eligible & (actual_steps < self._success_min_steps)):
             raise ValueError("success_eligible is inconsistent with actual_episode_steps")
 
@@ -497,7 +569,8 @@ class TerrainCurriculum(CurriculumTermBase):
         self.type_level_crossing_counts.copy_(type_level_crossing_counts)
         self.type_level_failure_counts.copy_(type_level_failure_counts)
         self.episode_start_root_xy.copy_(episode_start_root_xy)
-        self.max_episode_progress_m.copy_(max_episode_progress_m)
+        self.episode_target_heading_w.copy_(episode_target_heading_w)
+        self.max_episode_forward_progress_m.copy_(max_episode_forward_progress_m)
         all_ids = torch.arange(self.env.num_envs, dtype=torch.long, device=self.env.device)
         self._set_origins(all_ids, levels)
         self._write_metrics()
@@ -555,7 +628,9 @@ class TerrainCurriculum(CurriculumTermBase):
             dtype=float_dtype,
             device=device,
         )
-        self.env.log_dict["terrain_curriculum/current_mean_max_progress_m"] = self.max_episode_progress_m.mean()
+        self.env.log_dict["terrain_curriculum/current_mean_max_forward_progress_m"] = (
+            self.max_episode_forward_progress_m.mean()
+        )
 
         for level in range(self._num_curriculum_levels):
             self.env.log_dict[f"terrain_curriculum/level/{level}/env_fraction"] = (

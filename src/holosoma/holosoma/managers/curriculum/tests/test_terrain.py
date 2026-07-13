@@ -44,6 +44,14 @@ class _FakeEnv:
             time_outs=torch.zeros(self.num_envs, dtype=torch.bool),
         )
         self.simulator = SimpleNamespace(robot_root_states=torch.zeros(self.num_envs, 13, dtype=torch.float32))
+        self.target_heading_w = torch.tensor(
+            [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]],
+            dtype=torch.float32,
+        )
+        motion_command = SimpleNamespace(target_heading_w=self.target_heading_w)
+        self.command_manager = SimpleNamespace(
+            get_state=lambda name: motion_command if name == "motion_command" else None
+        )
 
 
 def _make_term(env: _FakeEnv, **params) -> TerrainCurriculum:
@@ -257,8 +265,10 @@ def test_progress_gated_success_requires_crossing_and_logs_type_level_rates():
     assert term.type_success_counts[0].item() == 0
     assert term.type_failure_counts[0].item() == 1
 
-    # Simulate command reset at a new pose, then travel farther than 1.5 m.
+    # Simulate a new command heading and reset at a new pose, then travel
+    # farther than 1.5 m along that captured heading.
     env.simulator.robot_root_states[0, :2] = torch.tensor([4.0, -2.0])
+    env.target_heading_w[0] = torch.tensor([0.0, -1.0])
     term.reset(torch.tensor([0]))
     env.simulator.robot_root_states[0, :2] = torch.tensor([4.0, -3.6])
     term.step()
@@ -287,12 +297,28 @@ def test_progress_buffers_are_isolated_and_reset_only_for_selected_envs():
     term.reset(torch.arange(env.num_envs))
     env.simulator.robot_root_states[:, :2] = torch.tensor([[1.0, 0.0], [0.0, 2.0], [-3.0, 0.0], [0.0, -4.0]])
     term.step()
-    torch.testing.assert_close(term.max_episode_progress_m, torch.tensor([1.0, 2.0, 3.0, 4.0]))
+    torch.testing.assert_close(term.max_episode_forward_progress_m, torch.tensor([1.0, 2.0, 3.0, 4.0]))
 
     env.simulator.robot_root_states[1, :2] = torch.tensor([10.0, 10.0])
+    env.target_heading_w[1] = torch.tensor([1.0, 0.0])
     term.reset(torch.tensor([1]))
-    torch.testing.assert_close(term.max_episode_progress_m, torch.tensor([1.0, 0.0, 3.0, 4.0]))
+    torch.testing.assert_close(term.max_episode_forward_progress_m, torch.tensor([1.0, 0.0, 3.0, 4.0]))
     torch.testing.assert_close(term.episode_start_root_xy[1], torch.tensor([10.0, 10.0]))
+    torch.testing.assert_close(term.episode_target_heading_w[1], torch.tensor([1.0, 0.0]))
+
+
+def test_lateral_and_backward_motion_do_not_satisfy_forward_progress_gate():
+    env = _FakeEnv()
+    term = _make_term(env, crossing_distance_m=1.5)
+    env.target_heading_w[0] = torch.tensor([1.0, 0.0])
+    term.reset(torch.tensor([0]))
+
+    env.simulator.robot_root_states[0, :2] = torch.tensor([0.0, 3.0])
+    term.step()
+    env.simulator.robot_root_states[0, :2] = torch.tensor([-2.0, 0.0])
+    term.step()
+
+    assert term.max_episode_forward_progress_m[0].item() == 0.0
 
 
 def test_root_state_tensor_proxy_is_supported() -> None:
@@ -331,7 +357,8 @@ def test_state_roundtrip_is_strict_and_reapplies_restored_origins():
     term.type_level_crossing_counts[0, 0] = 1
     term.type_level_failure_counts[0, 0] = 1
     term.episode_start_root_xy.copy_(torch.arange(8, dtype=torch.float32).view(4, 2))
-    term.max_episode_progress_m.copy_(torch.tensor([1.0, 2.0, 3.0, 4.0]))
+    term.episode_target_heading_w.copy_(env.target_heading_w)
+    term.max_episode_forward_progress_m.copy_(torch.tensor([1.0, 2.0, 3.0, 4.0]))
     saved = term.state_dict()
 
     restored_env = _FakeEnv()
@@ -358,7 +385,8 @@ def test_state_roundtrip_is_strict_and_reapplies_restored_origins():
         "type_level_crossing_counts",
         "type_level_failure_counts",
         "episode_start_root_xy",
-        "max_episode_progress_m",
+        "episode_target_heading_w",
+        "max_episode_forward_progress_m",
     ):
         torch.testing.assert_close(getattr(restored, name), getattr(term, name))
 
@@ -387,7 +415,9 @@ def test_version_one_state_migrates_without_inventing_crossing_history():
             "type_crossing_counts",
             "type_failure_counts",
             "episode_start_root_xy",
-            "max_episode_progress_m",
+            "episode_target_heading_w",
+            "max_episode_forward_progress_m",
+            "progress_semantics",
         }:
             legacy.pop(key)
 
@@ -401,6 +431,31 @@ def test_version_one_state_migrates_without_inventing_crossing_history():
     )
     assert restored.type_crossing_counts.sum().item() == 0
     assert restored.type_level_episode_counts.sum().item() == 0
+
+
+def test_version_two_radial_progress_migrates_to_zero_signed_progress():
+    env = _FakeEnv()
+    term = _make_term(env)
+    term.type_crossing_counts.copy_(torch.tensor([2, 1, 0, 0]))
+    term.type_level_crossing_counts[0, 1] = 2
+    legacy = term.state_dict()
+    legacy["version"] = 2
+    legacy["max_episode_progress_m"] = torch.tensor([4.0, 3.0, 2.0, 1.0])
+    for key in (
+        "progress_semantics",
+        "episode_target_heading_w",
+        "max_episode_forward_progress_m",
+    ):
+        legacy.pop(key)
+
+    restored_env = _FakeEnv()
+    restored = _make_term(restored_env)
+    restored.load_state_dict(legacy)
+
+    assert restored.type_crossing_counts.sum().item() == 0
+    assert restored.type_level_crossing_counts.sum().item() == 0
+    assert restored.max_episode_forward_progress_m.sum().item() == 0.0
+    torch.testing.assert_close(restored.episode_target_heading_w, restored_env.target_heading_w)
 
 
 @pytest.mark.parametrize(
