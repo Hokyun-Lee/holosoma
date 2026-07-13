@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import sys
+import traceback
 from pathlib import Path
 
 import tyro
@@ -90,6 +92,14 @@ def run_eval_with_tyro(
         algo.evaluate_policy(
             max_eval_steps=tyro_config.training.max_eval_steps,
         )
+    except Exception as exc:
+        # Isaac Sim's ``SimulationApp.close`` may terminate the interpreter
+        # before an exception can propagate out of this function.  Log the
+        # traceback and set a failing exit status before entering shutdown so
+        # headless evaluation cannot look successful while producing no
+        # artifacts.
+        logger.error(f"Exception occurred during evaluation: {exc}\n{traceback.format_exc()}")
+        sys.exit(1)
     finally:
         if simulation_app:
             close_simulation_app(simulation_app)

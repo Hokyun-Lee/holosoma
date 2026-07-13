@@ -224,6 +224,19 @@ class _FakeRewardManager:
     active_terms: tuple[str, ...] = ()
 
 
+class _FakeRootStatesProxy:
+    """Isaac-Sim-shaped boundary: indexable, but no tensor ``dtype``."""
+
+    def __init__(self, tensor: torch.Tensor):
+        self.tensor = tensor
+
+    def __getitem__(self, index):
+        return self.tensor[index]
+
+    def __setitem__(self, index, value):
+        self.tensor[index] = value
+
+
 def _fake_callback_runtime(tmp_path: Path):
     terrain_state = _FakeTerrainState()
     curriculum = _FakeCurriculum()
@@ -255,7 +268,9 @@ def _fake_callback_runtime(tmp_path: Path):
         num_envs=1,
         device="cpu",
         simulator=SimpleNamespace(
-            robot_root_states=torch.tensor([[0.0, 0.0, 0.8, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]])
+            robot_root_states=_FakeRootStatesProxy(
+                torch.tensor([[0.0, 0.0, 0.8, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]])
+            )
         ),
         base_quat=torch.tensor([[0.0, 0.0, 0.0, 1.0]]),
         command_manager=SimpleNamespace(get_state=lambda _: command),

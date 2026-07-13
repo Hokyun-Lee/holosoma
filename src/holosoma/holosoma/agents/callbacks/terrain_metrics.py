@@ -103,7 +103,10 @@ class TerrainMetricsCallback(RLEvalCallback):
         self._fallback_start_root_xy = torch.zeros(
             self._env.num_envs,
             2,
-            dtype=self._env.simulator.robot_root_states.dtype,
+            # Isaac Sim exposes a RootStatesProxy (without tensor metadata),
+            # while Isaac Gym exposes a tensor directly.  Slicing either
+            # boundary returns the canonical xyzw tensor.
+            dtype=self._env.simulator.robot_root_states[:].dtype,
             device=self._env.device,
         )
         self._fallback_episode_heading_w = torch.zeros_like(self._fallback_start_root_xy)
