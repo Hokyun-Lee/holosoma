@@ -28,6 +28,7 @@ resolves, e.g.:
 from __future__ import annotations
 
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -51,9 +52,13 @@ class Args:
     video: str | None = None
     """Output video path (.gif recommended; .mp4 needs imageio-ffmpeg)."""
     video_fps: int = 25
-    """Playback fps of the exported video (frames are subsampled to this)."""
+    """Target sampling fps; the nearest integer source-frame stride is used."""
     width: int = 640
     height: int = 480
+    start_frame: int = 0
+    """First motion frame shown; useful for jumping to a reported collision."""
+    playback_speed: float = 1.0
+    """Interactive/video playback rate multiplier (for example 0.25 for slow motion)."""
     loop: bool = True
     """Loop the motion in the interactive viewer."""
 
@@ -74,26 +79,42 @@ def load_qpos(path: str) -> tuple[np.ndarray, float]:
     return qpos, fps
 
 
-import re
-
-
-def _add_terrain_boxes(spec: "mujoco.MjSpec", urdf_path: Path) -> None:
-    """Add the multi-box terrain as static geoms (parsed from the URDF objs)."""
-    text = urdf_path.read_text()
+def _add_terrain_boxes(spec: mujoco.MjSpec, urdf_path: Path) -> None:
+    """Add the multi-box terrain as named static geoms parsed from URDF objs."""
+    tree = ET.parse(urdf_path)  # noqa: S314 - local, generated OmniRetarget asset
+    for origin in tree.iterfind(".//origin"):
+        xyz = np.fromstring(origin.attrib.get("xyz", "0 0 0"), sep=" ")
+        rpy = np.fromstring(origin.attrib.get("rpy", "0 0 0"), sep=" ")
+        if xyz.shape != (3,) or rpy.shape != (3,) or np.any(xyz != 0.0) or np.any(rpy != 0.0):
+            raise NotImplementedError(
+                f"{urdf_path}: terrain replay supports only zero URDF origins; "
+                "OmniRetarget box vertices must be baked in world coordinates"
+            )
     seen: set[str] = set()
-    for match in re.finditer(r'<mesh filename="([^"]+)" scale="([^"]+)"', text):
-        mesh_file, scale_str = match.groups()
+    box_index = 0
+    for mesh in tree.iterfind(".//mesh"):
+        mesh_file = mesh.attrib.get("filename")
+        if not mesh_file:
+            raise ValueError(f"{urdf_path}: terrain mesh is missing a filename")
         if mesh_file in seen:
             continue
         seen.add(mesh_file)
-        scale = np.array([float(s) for s in scale_str.split()])
-        verts = []
-        for line in (urdf_path.parent / mesh_file).read_text().splitlines():
-            if line.startswith("v "):
-                verts.append([float(v) for v in line.split()[1:4]])
+        box_index += 1
+        scale = np.fromstring(mesh.attrib.get("scale", "1 1 1"), sep=" ")
+        if scale.shape != (3,):
+            raise ValueError(f"{urdf_path}: mesh {mesh_file} has invalid scale {scale}")
+        verts = [
+            [float(value) for value in line.split()[1:4]]
+            for line in (urdf_path.parent / mesh_file).read_text().splitlines()
+            if line.startswith("v ")
+        ]
         v = np.asarray(verts) * scale
+        if v.shape != (8, 3):
+            raise ValueError(f"{urdf_path.parent / mesh_file}: expected an 8-vertex box, got {v.shape}")
         # oriented box from the (yaw-rotated) footprint + flat top
         xy = np.unique(np.round(v[:, :2], 6), axis=0)
+        if xy.shape != (4, 2) or len(np.unique(np.round(v[:, 2], 6))) != 2:
+            raise ValueError(f"{urdf_path.parent / mesh_file}: vertices do not form a flat-top box")
         center_xy = xy.mean(axis=0)
         rel = xy - center_xy
         order = np.argsort(np.arctan2(rel[:, 1], rel[:, 0]))
@@ -105,15 +126,19 @@ def _add_terrain_boxes(spec: "mujoco.MjSpec", urdf_path: Path) -> None:
         half_b = float(np.linalg.norm(e2)) / 2
         z0, z1 = float(v[:, 2].min()), float(v[:, 2].max())
         body = spec.worldbody.add_body()
+        body.name = f"terrain_box_{box_index}_body"
         body.pos = [float(center_xy[0]), float(center_xy[1]), (z0 + z1) / 2]
         body.quat = [np.cos(yaw / 2), 0, 0, np.sin(yaw / 2)]
         geom = body.add_geom()
+        geom.name = f"terrain_box_{box_index}"
         geom.type = mujoco.mjtGeom.mjGEOM_BOX
         geom.size = [half_a, half_b, (z1 - z0) / 2]
         geom.rgba = [0.55, 0.45, 0.3, 1.0]
+    if box_index == 0:
+        raise ValueError(f"{urdf_path}: expected at least one OmniRetarget mesh box")
 
 
-def build_model(args: Args) -> tuple["mujoco.MjModel", int | None]:
+def build_model(args: Args) -> tuple[mujoco.MjModel, int | None]:
     """Compile the scene; returns (model, qpos offset of the GT robot or None)."""
     spec = mujoco.MjSpec.from_file(args.robot_xml)
     gt_offset = None
@@ -127,9 +152,7 @@ def build_model(args: Args) -> tuple["mujoco.MjModel", int | None]:
     model = spec.compile()
     if args.gt is not None:
         free_addrs = [
-            int(model.jnt_qposadr[j])
-            for j in range(model.njnt)
-            if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE
+            int(model.jnt_qposadr[j]) for j in range(model.njnt) if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE
         ]
         assert len(free_addrs) == 2, "expected two free joints (generated + GT robots)"
         gt_offset = max(free_addrs)  # attached GT copy comes second
@@ -137,7 +160,7 @@ def build_model(args: Args) -> tuple["mujoco.MjModel", int | None]:
 
 
 def set_frame(
-    data: "mujoco.MjData",
+    data: mujoco.MjData,
     qpos: np.ndarray,
     gt_qpos: np.ndarray | None,
     frame: int,
@@ -152,19 +175,26 @@ def set_frame(
         data.qpos[gt_offset + 1] += args.offset_y
 
 
-def track_pelvis(cam: "mujoco.MjvCamera", qpos_frame: np.ndarray) -> None:
+def track_pelvis(cam: mujoco.MjvCamera, qpos_frame: np.ndarray) -> None:
     cam.lookat[:] = qpos_frame[:3]
     cam.distance = 3.0
     cam.elevation = -15.0
     cam.azimuth = 135.0
 
 
-def run_viewer(model, data, qpos, gt_qpos, gt_offset, fps: float, args: Args) -> None:
-    import mujoco.viewer as mjv  # type: ignore[import-not-found]
+def _video_stride_and_fps(source_fps: float, target_fps: int, playback_speed: float) -> tuple[int, float]:
+    if target_fps <= 0:
+        raise ValueError("video_fps must be positive")
+    stride = max(1, round(source_fps / target_fps))
+    return stride, source_fps / stride * playback_speed
 
-    dt = 1.0 / fps
+
+def run_viewer(model, data, qpos, gt_qpos, gt_offset, fps: float, args: Args) -> None:
+    import mujoco.viewer as mjv  # type: ignore[import-not-found]  # noqa: PLC0415
+
+    dt = 1.0 / (fps * args.playback_speed)
     with mjv.launch_passive(model, data, show_left_ui=False, show_right_ui=False) as viewer:
-        frame = 0
+        frame = args.start_frame
         while viewer.is_running():
             start = time.perf_counter()
             set_frame(data, qpos, gt_qpos, frame, gt_offset, args)
@@ -174,33 +204,38 @@ def run_viewer(model, data, qpos, gt_qpos, gt_offset, fps: float, args: Args) ->
             if frame >= qpos.shape[0]:
                 if not args.loop:
                     break
-                frame = 0
+                frame = args.start_frame
             time.sleep(max(0.0, dt - (time.perf_counter() - start)))
 
 
 def render_video(model, data, qpos, gt_qpos, gt_offset, fps: float, args: Args) -> None:
-    import imageio.v2 as imageio
+    import imageio.v2 as imageio  # noqa: PLC0415
 
     out = Path(args.video)  # type: ignore[arg-type]
-    stride = max(1, round(fps / args.video_fps))
+    stride, encoded_fps = _video_stride_and_fps(fps, args.video_fps, args.playback_speed)
     renderer = mujoco.Renderer(model, height=args.height, width=args.width)
     cam = mujoco.MjvCamera()
     frames = []
-    for i in range(0, qpos.shape[0], stride):
+    for i in range(args.start_frame, qpos.shape[0], stride):
         set_frame(data, qpos, gt_qpos, i, gt_offset, args)
         mujoco.mj_forward(model, data)
         track_pelvis(cam, qpos[i])
         renderer.update_scene(data, camera=cam)
         frames.append(renderer.render())
     if out.suffix.lower() == ".gif":
-        imageio.mimsave(out, frames, duration=1.0 / args.video_fps, loop=0)
+        # Pillow's GIF writer expects frame duration in milliseconds.
+        imageio.mimsave(out, frames, duration=1000.0 / encoded_fps, loop=0)
     else:
-        imageio.mimsave(out, frames, fps=args.video_fps)  # needs imageio-ffmpeg for mp4
-    print(f"[OK] {len(frames)} frames -> {out}")
+        imageio.mimsave(out, frames, fps=encoded_fps)  # needs imageio-ffmpeg for mp4
+    print(f"[OK] {len(frames)} frames @ {encoded_fps:g} playback fps -> {out}")
 
 
 def main(args: Args) -> None:
     qpos, fps = load_qpos(args.motion)
+    if not 0 <= args.start_frame < qpos.shape[0]:
+        raise ValueError(f"start frame {args.start_frame} outside [0,{qpos.shape[0]})")
+    if not np.isfinite(args.playback_speed) or args.playback_speed <= 0.0:
+        raise ValueError("playback_speed must be finite and positive")
     gt_qpos = None
     if args.gt is not None:
         gt_qpos, gt_fps = load_qpos(args.gt)
@@ -209,9 +244,7 @@ def main(args: Args) -> None:
     model, gt_offset = build_model(args)
     # Kinematic replay only: disable contacts/constraints so overlapping
     # robots (generated + GT) cannot blow up the constraint solver.
-    model.opt.disableflags |= (
-        mujoco.mjtDisableBit.mjDSBL_CONTACT | mujoco.mjtDisableBit.mjDSBL_CONSTRAINT
-    )
+    model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT | mujoco.mjtDisableBit.mjDSBL_CONSTRAINT
     data = mujoco.MjData(model)
     if model.nq != qpos.shape[1] * (2 if gt_qpos is not None else 1):
         raise ValueError(f"{args.motion}: qpos has {qpos.shape[1]} columns, model expects nq={model.nq}")
