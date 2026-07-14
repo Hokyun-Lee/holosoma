@@ -17,6 +17,7 @@ import dataclasses
 import json
 import math
 import random
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -80,6 +81,103 @@ def terrain_balanced_sample_weights(
     return weights, counts
 
 
+class ValidationLossAccumulator:
+    """Term-aware aggregation of scalar batch losses.
+
+    Motion windows have a fixed, unpadded horizon, so weighting ordinary
+    frame-mean losses by batch size is exactly equivalent to weighting by valid
+    frames.  Contact and top-tail terms expose usable counts in the current
+    batch and are weighted by those counts.  Max diagnostics are reduced by
+    max, and count diagnostics by sum.  Terms whose true denominator depends on
+    predicted scan-grid validity remain explicitly marked as approximations.
+    """
+
+    _MAX_TERMS = {
+        "joint_limit_max_violation_rad",
+        "lower_body_max_penetration_m",
+    }
+    _SUM_TERMS = {"lower_body_terrain_tail_count"}
+    _VARIABLE_DENOMINATOR_TERMS = {
+        "terrain_penetration",
+        "lower_body_terrain_penetration",
+        "lower_body_penetration_value_rate_5mm",
+    }
+
+    def __init__(self) -> None:
+        self.weighted_sums: dict[str, float] = {}
+        self.weights: dict[str, float] = {}
+        self.maxima: dict[str, float] = {}
+        self.sums: dict[str, float] = {}
+        self.seen_terms: set[str] = set()
+        self.num_batches = 0
+        self.num_samples = 0
+
+    def update(self, losses: Mapping[str, torch.Tensor], batch: Mapping[str, torch.Tensor]) -> None:
+        batch_size = int(batch["x"].shape[0])
+        self.num_batches += 1
+        self.num_samples += batch_size
+        for name, tensor in losses.items():
+            self.seen_terms.add(name)
+            if tensor.numel() != 1:
+                raise ValueError(f"Validation loss {name!r} must be scalar, got shape {tuple(tensor.shape)}")
+            value = float(tensor.item())
+            if name in self._MAX_TERMS:
+                self.maxima[name] = max(self.maxima.get(name, -math.inf), value)
+                continue
+            if name in self._SUM_TERMS:
+                self.sums[name] = self.sums.get(name, 0.0) + value
+                continue
+            weight = self._term_weight(name, losses, batch, batch_size)
+            if weight <= 0.0:
+                continue
+            self.weighted_sums[name] = self.weighted_sums.get(name, 0.0) + value * weight
+            self.weights[name] = self.weights.get(name, 0.0) + weight
+
+    @staticmethod
+    def _term_weight(
+        name: str,
+        losses: Mapping[str, torch.Tensor],
+        batch: Mapping[str, torch.Tensor],
+        batch_size: int,
+    ) -> float:
+        if name == "foot_slide":
+            contact = batch.get("contact")
+            if contact is None or contact.shape[1] < 2:
+                return 0.0
+            return float((contact[:, 1:] & contact[:, :-1]).sum().item())
+        if name == "lower_body_terrain_tail":
+            count = losses.get("lower_body_terrain_tail_count")
+            return float(count.item()) if count is not None else float(batch_size)
+        return float(batch_size)
+
+    def finalize(self, loss_weights: Any | None = None) -> tuple[dict[str, float], dict[str, Any]]:
+        if self.num_batches == 0:
+            raise RuntimeError("validation loader produced no batches")
+        values = {name: total / self.weights[name] for name, total in self.weighted_sums.items()}
+        values.update(self.maxima)
+        values.update(self.sums)
+        for name in self.seen_terms:
+            values.setdefault(name, 0.0)
+        total_recomputed = loss_weights is not None
+        if loss_weights is not None:
+            values["total"] = sum(
+                float(getattr(loss_weights, name)) * values.get(name, 0.0) for name in loss_weights.__dataclass_fields__
+            )
+        approximated = sorted(self._VARIABLE_DENOMINATOR_TERMS & values.keys())
+        metadata = {
+            "method": "term_aware_weighted_batch_reduction",
+            "num_batches": self.num_batches,
+            "num_samples": self.num_samples,
+            "default_weight": "batch_samples_equivalent_to_valid_frames_for_fixed_unpadded_horizon",
+            "count_weighted_terms": ["foot_slide", "lower_body_terrain_tail"],
+            "max_reduced_terms": sorted(self._MAX_TERMS & values.keys()),
+            "sum_reduced_terms": sorted(self._SUM_TERMS & values.keys()),
+            "sample_weight_approximations": approximated,
+            "total_recomputed_from_aggregated_terms": total_recomputed,
+        }
+        return values, metadata
+
+
 def resolve_device(device: str) -> torch.device:
     if device == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -99,18 +197,40 @@ def build_checkpoint(
     model: torch.nn.Module,
     ema_model: torch.nn.Module | None,
     optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
     scaler: torch.amp.GradScaler,
     cfg: TrainConfig,
     normalizer: FeatureNormalizer,
     layout: FeatureLayout,
+    *,
+    train_sampler_generator: torch.Generator | None = None,
+    metrics_history: list[dict] | None = None,
 ) -> dict:
+    rng_state = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch_cpu": torch.get_rng_state(),
+        "torch_cuda": (
+            torch.cuda.get_rng_state_all() if torch.cuda.is_available() and torch.cuda.is_initialized() else None
+        ),
+    }
     return {
         "format_version": CKPT_FORMAT_VERSION,
         "step": step,
         "model": model.state_dict(),
         "ema": ema_model.state_dict() if ema_model is not None else None,
         "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
         "scaler": scaler.state_dict(),
+        "rng_state": rng_state,
+        "train_sampler_generator_state": (
+            train_sampler_generator.get_state() if train_sampler_generator is not None else None
+        ),
+        # WeightedRandomSampler materializes an epoch draw when its iterator is
+        # created.  Its generator state improves epoch-boundary continuation,
+        # but does not encode the cursor of an already materialized draw.
+        "sampler_resume_semantics": "generator_state_only_no_inflight_cursor",
+        "metrics_history": copy.deepcopy(metrics_history or []),
         "config": dataclasses.asdict(cfg),
         "normalizer": normalizer.state_dict(),
         "layout": layout.to_metadata(),
@@ -125,6 +245,7 @@ class Trainer:
         seed_everything(cfg.seed)
 
         self.out_dir = Path(cfg.out_root) / cfg.run_name
+        self._guard_output_directory()
         for sub in ("checkpoints", "samples", "plots", "logs"):
             (self.out_dir / sub).mkdir(parents=True, exist_ok=True)
         (self.out_dir / "config.yaml").write_text(yaml.safe_dump(dataclasses.asdict(cfg), sort_keys=False))
@@ -168,6 +289,25 @@ class Trainer:
             )
             logger.info(f"W&B run: {self.wandb.run_url or self.wandb.run_id}")
 
+    def _guard_output_directory(self) -> None:
+        """Reject accidental scratch reuse before writing anything."""
+        if self.cfg.resume is not None or not self.out_dir.exists():
+            return
+        entries = sorted(self.out_dir.iterdir(), key=lambda path: path.name)
+        if not entries:
+            return
+        if self.cfg.allow_existing_output:
+            logger.warning(f"Scratch run is reusing a non-empty output directory by explicit opt-in: {self.out_dir}")
+            return
+        preview = ", ".join(path.name for path in entries[:5])
+        if len(entries) > 5:
+            preview += f", ... ({len(entries)} entries)"
+        raise FileExistsError(
+            "Refusing to start a scratch run in non-empty output directory "
+            f"{self.out_dir} ({preview}). Choose a new run_name, pass --resume, "
+            "or explicitly set allow_existing_output=True."
+        )
+
     # -- setup ----------------------------------------------------------------
 
     def _build_data(self) -> None:
@@ -209,6 +349,7 @@ class Trainer:
                 min_heading_disp=d.min_heading_disp,
                 terrain_dim=d.terrain_dim,
                 use_terrain_scan=d.use_terrain_scan,
+                scan_grid=d.scan_grid,
             )
 
         self.train_dataset = make_dataset(train_clips, d.train_stride)
@@ -226,11 +367,21 @@ class Trainer:
             self.normalizer = compute_normalizer(self.train_dataset, cfg.norm_max_windows, cfg.seed)
             self.normalizer.save(norm_path)
 
-        loader_kwargs = {
+        common_loader_kwargs = {
             "batch_size": cfg.batch_size,
-            "num_workers": cfg.num_workers,
             "pin_memory": self.device.type == "cuda",
+        }
+        train_loader_kwargs = {
+            **common_loader_kwargs,
+            "num_workers": cfg.num_workers,
             "persistent_workers": cfg.num_workers > 0,
+        }
+        val_loader_kwargs = {
+            **common_loader_kwargs,
+            "num_workers": cfg.val_num_workers,
+            # There can be all/flat/terrain validation loaders.  Keeping their
+            # pools alive multiplied worker count and memory for the full run.
+            "persistent_workers": False,
         }
         self.train_sampler_generator: torch.Generator | None = None
         if d.terrain_train_fraction is None:
@@ -238,7 +389,7 @@ class Trainer:
                 self.train_dataset,
                 shuffle=True,
                 drop_last=True,
-                **loader_kwargs,
+                **train_loader_kwargs,
             )
         else:
             weights, counts = terrain_balanced_sample_weights(
@@ -257,13 +408,13 @@ class Trainer:
                 sampler=sampler,
                 shuffle=False,
                 drop_last=True,
-                **loader_kwargs,
+                **train_loader_kwargs,
             )
             logger.info(
                 "Terrain-balanced train sampler enabled "
                 f"(target terrain={d.terrain_train_fraction:.3f}, windows={counts})"
             )
-        self.val_loader = DataLoader(self.val_dataset, shuffle=False, drop_last=False, **loader_kwargs)
+        self.val_loader = DataLoader(self.val_dataset, shuffle=False, drop_last=False, **val_loader_kwargs)
         self.val_stratum_loaders: dict[str, DataLoader] = {}
         self.val_stratum_counts: dict[str, int] = {}
         if d.stratified_validation:
@@ -279,7 +430,7 @@ class Trainer:
                     Subset(self.val_dataset, indices),
                     shuffle=False,
                     drop_last=False,
-                    **loader_kwargs,
+                    **val_loader_kwargs,
                 )
                 for name, indices in strata.items()
             }
@@ -422,10 +573,13 @@ class Trainer:
             self.model,
             self.ema_model,
             self.optimizer,
+            self.scheduler,
             self.scaler,
             self.cfg,
             self.normalizer,
             self.layout,
+            train_sampler_generator=self.train_sampler_generator,
+            metrics_history=self.metrics_history,
         )
         path = self.out_dir / "checkpoints" / (name or f"ckpt_{self.step:08d}.pt")
         torch.save(ckpt, path)
@@ -440,8 +594,14 @@ class Trainer:
         if ckpt["layout"]["dim"] != self.layout.dim:
             raise ValueError(f"Checkpoint feature dim {ckpt['layout']['dim']} != current layout {self.layout.dim}")
         self.model.load_state_dict(ckpt["model"])
-        if self.ema_model is not None and ckpt.get("ema") is not None:
-            self.ema_model.load_state_dict(ckpt["ema"])
+        if self.ema_model is not None:
+            if ckpt.get("ema") is not None:
+                self.ema_model.load_state_dict(ckpt["ema"])
+            else:
+                # A no-EMA checkpoint must not leave the freshly randomized
+                # EMA copy as the model used by validation and inference.
+                self.ema_model.load_state_dict(ckpt["model"])
+                logger.warning("Checkpoint has no EMA state; initialized EMA from the loaded model weights")
         self.normalizer = FeatureNormalizer.from_state_dict(ckpt["normalizer"])
         if self.cfg.resume_weights_only:
             self.step = 0
@@ -450,9 +610,63 @@ class Trainer:
             self.optimizer.load_state_dict(ckpt["optimizer"])
             self.scaler.load_state_dict(ckpt["scaler"])
             self.step = int(ckpt["step"])
-            for _ in range(self.step):
-                self.scheduler.step()
+            scheduler_state = ckpt.get("scheduler")
+            if scheduler_state is not None:
+                self.scheduler.load_state_dict(scheduler_state)
+            else:
+                self._position_scheduler_for_legacy_checkpoint()
+                logger.warning("Legacy checkpoint has no scheduler state; reconstructed its position from step")
+
+            history = ckpt.get("metrics_history", [])
+            if not isinstance(history, list):
+                raise ValueError("Checkpoint metrics_history must be a list")
+            self.metrics_history = copy.deepcopy(history)
+
+            sampler_state = ckpt.get("train_sampler_generator_state")
+            if self.train_sampler_generator is not None and sampler_state is not None:
+                self.train_sampler_generator.set_state(sampler_state.detach().cpu())
+                logger.info("Restored terrain sampler generator state; an in-flight epoch cursor is not checkpointed")
+            elif self.train_sampler_generator is not None and sampler_state is None:
+                logger.warning("Checkpoint has no terrain sampler generator state; sampler restarts from config seed")
+            elif self.train_sampler_generator is None and sampler_state is not None:
+                logger.warning("Checkpoint sampler state ignored because the current config has no weighted sampler")
+
+            rng_state = ckpt.get("rng_state")
+            if rng_state is not None:
+                self._restore_rng_state(rng_state)
+            else:
+                logger.warning("Legacy checkpoint has no RNG state; random streams restart from config seed")
             logger.info(f"Resumed from {path} at step {self.step}")
+
+    def _position_scheduler_for_legacy_checkpoint(self) -> None:
+        """Position LambdaLR without replaying ``step()`` before optimizer steps."""
+        self.scheduler.last_epoch = self.step
+        self.scheduler._step_count = self.step + 1
+        self.scheduler._last_lr = [group["lr"] for group in self.optimizer.param_groups]
+
+    def _restore_rng_state(self, state: Mapping[str, Any]) -> None:
+        """Restore process RNGs saved by :func:`build_checkpoint`."""
+        if not isinstance(state, Mapping):
+            raise ValueError("Checkpoint rng_state must be a mapping")
+        required = {"python", "numpy", "torch_cpu"}
+        missing = required - set(state)
+        if missing:
+            raise ValueError(f"Checkpoint rng_state is missing {sorted(missing)}")
+        random.setstate(state["python"])
+        np.random.set_state(state["numpy"])
+        torch.set_rng_state(state["torch_cpu"].detach().cpu())
+
+        cuda_states = state.get("torch_cuda")
+        if cuda_states is None or not torch.cuda.is_available():
+            return
+        device_count = torch.cuda.device_count()
+        for device_index, cuda_state in enumerate(cuda_states[:device_count]):
+            torch.cuda.set_rng_state(cuda_state.detach().cpu(), device=device_index)
+        if len(cuda_states) != device_count:
+            logger.warning(
+                "Checkpoint CUDA RNG device count differs from this host "
+                f"({len(cuda_states)} saved, {device_count} available); restored the overlap"
+            )
 
     # -- core steps ---------------------------------------------------------------
 
@@ -650,9 +864,8 @@ class Trainer:
         noisy_diffusion_gen = torch.Generator(device=self.device.type).manual_seed(seed)
         condition_gen = torch.Generator(device=self.device.type).manual_seed(seed + 1)
 
-        clean_agg: dict[str, float] = {}
-        noisy_agg: dict[str, float] = {}
-        n = 0
+        clean_agg = ValidationLossAccumulator()
+        noisy_agg = ValidationLossAccumulator()
         for i, cpu_batch in enumerate(loader):
             if i >= cfg.val_batches:
                 break
@@ -662,8 +875,7 @@ class Trainer:
                 generator=clean_diffusion_gen,
                 apply_condition_noise_input=False,
             )
-            for k, v in clean_losses.items():
-                clean_agg[k] = clean_agg.get(k, 0.0) + v.item()
+            clean_agg.update(clean_losses, batch)
             if noise_enabled:
                 noisy_losses = self._forward_losses(
                     batch,
@@ -671,13 +883,13 @@ class Trainer:
                     apply_condition_noise_input=True,
                     condition_generator=condition_gen,
                 )
-                for k, v in noisy_losses.items():
-                    noisy_agg[k] = noisy_agg.get(k, 0.0) + v.item()
-            n += 1
-        if n == 0:
-            raise RuntimeError("validation loader produced no batches")
-        clean_losses = {k: v / n for k, v in clean_agg.items()}
-        noisy_losses = {k: v / max(n, 1) for k, v in noisy_agg.items()} if noise_enabled else dict(clean_losses)
+                noisy_agg.update(noisy_losses, batch)
+        clean_losses, clean_aggregation = clean_agg.finalize(cfg.loss)
+        if noise_enabled:
+            noisy_losses, noisy_aggregation = noisy_agg.finalize(cfg.loss)
+        else:
+            noisy_losses = dict(clean_losses)
+            noisy_aggregation = copy.deepcopy(clean_aggregation)
 
         batch = self._batch_to_device(next(iter(loader)))
         if noise_enabled:
@@ -727,7 +939,13 @@ class Trainer:
             "sample_metrics_clean": clean_metrics,
             "sample_metrics_noisy": noisy_metrics,
             "condition_noise_delta": robustness,
-            "num_loss_batches": n,
+            "loss_aggregation_clean": clean_aggregation,
+            "loss_aggregation_noisy": noisy_aggregation,
+            "loss_aggregation_scope": ("full_loader" if clean_agg.num_batches == len(loader) else "first_n_batches"),
+            "sample_scope": "first_batch",
+            "sample_num_items": int(batch["x"].shape[0]),
+            "num_loss_batches": clean_agg.num_batches,
+            "num_loss_samples": clean_agg.num_samples,
             "seed": seed,
         }
 
@@ -768,9 +986,13 @@ class Trainer:
                 "loss_noisy": result["loss_noisy"],
                 "sample_noisy": result["sample_metrics_noisy"],
                 "condition_noise_delta": result["condition_noise_delta"],
+                "loss_aggregation_scope": result["loss_aggregation_scope"],
+                "sample_scope": result["sample_scope"],
+                "num_loss_samples": result["num_loss_samples"],
+                "sample_num_items": result["sample_num_items"],
             }
             logger.info(
-                f"[{prefix} clean @ {self.step}] "
+                f"[{prefix} first-batch sample clean @ {self.step}] "
                 + " ".join(f"{key}={value:.4f}" for key, value in result["sample_metrics_clean"].items())
             )
         self.wandb.log(wandb_payload, step=self.step)
@@ -786,6 +1008,10 @@ class Trainer:
             "val_sample_metrics_clean": primary["sample_metrics_clean"],
             "val_sample_metrics_noisy": primary["sample_metrics_noisy"],
             "val_condition_noise_delta": primary["condition_noise_delta"],
+            "val_loss_aggregation": primary["loss_aggregation_clean"],
+            "val_loss_aggregation_scope": primary["loss_aggregation_scope"],
+            "val_sample_scope": primary["sample_scope"],
+            "val_sample_num_items": primary["sample_num_items"],
             "val_condition_noise": {
                 "enabled": noise_enabled,
                 "diffusion_seed": cfg.val_seed,

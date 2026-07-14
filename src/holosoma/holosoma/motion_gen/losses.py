@@ -59,6 +59,40 @@ class LossWeights:
     """Top-tail lower-body collision loss for rare deep penetrations."""
 
 
+def validate_terrain_condition_masks(
+    flat: torch.Tensor | None,
+    has_scan: torch.Tensor | None,
+    *,
+    batch_size: int,
+    device: torch.device,
+) -> None:
+    """Validate the mutually-exclusive terrain membership contract.
+
+    ``flat`` means the legacy analytic ground-plane condition, while
+    ``has_scan`` selects an explicit sampled height field.  A sample cannot
+    belong to both because counting both surfaces changes loss/metric scale
+    and makes terrain depth ambiguous.
+    """
+
+    for name, mask in (("flat", flat), ("has_scan", has_scan)):
+        if mask is None:
+            continue
+        if tuple(mask.shape) != (batch_size,):
+            raise ValueError(f"{name} must have shape ({batch_size},), got {tuple(mask.shape)}")
+        if mask.dtype != torch.bool:
+            raise TypeError(f"{name} must be a boolean tensor, got {mask.dtype}")
+        if mask.device != device:
+            raise ValueError(f"{name} must be on {device}, got {mask.device}")
+
+    if flat is not None and has_scan is not None:
+        overlap = flat & has_scan
+        if bool(overlap.any()):
+            indices = torch.nonzero(overlap, as_tuple=False).flatten().detach().cpu().tolist()
+            raise ValueError(
+                f"flat and has_scan must be mutually exclusive per sample; overlap at batch indices {indices}"
+            )
+
+
 def compute_losses(
     pred_x0: torch.Tensor,
     gt_x0: torch.Tensor,
@@ -102,6 +136,12 @@ def compute_losses(
         dict with each unweighted term and the weighted "total".
     """
     B, H, _ = pred_x0.shape
+    validate_terrain_condition_masks(
+        flat,
+        has_scan,
+        batch_size=B,
+        device=pred_x0.device,
+    )
     if seq_mask is None:
         seq_mask = torch.ones(B, H, dtype=torch.bool, device=pred_x0.device)
     m = seq_mask.float().unsqueeze(-1)  # (B, H, 1)
@@ -218,19 +258,26 @@ def compute_losses(
     else:
         losses["foot_slide"] = torch.zeros((), device=pred_x0.device)
 
-    # Terrain penetration: ground plane z=0 for flat clips; interpolated
-    # multi-box terrain height for clips with a real scan (Phase B).
-    pen_total = pred_x0.new_zeros(())
+    # Terrain penetration implementation contract: ground plane z=0 for flat
+    # clips and interpolated height for scanned clips are disjoint surfaces.
+    # Average once over every eligible (sample, frame, body) value so the
+    # scale is independent of flat/scanned batch composition.  In particular,
+    # no-surface samples and seq-masked frames are absent from the denominator.
+    pen_sumsq = pred_x0.new_zeros(())
+    pen_count = pred_x0.new_zeros(())
     z = pred["body_pos"][..., 2]  # (B, H, num_bodies)
     if flat is not None:
-        pen = torch.relu(-z) * flat.view(B, 1, 1).float() * m
-        pen_total = pen_total + (pen**2).sum() / denom
+        gate = (flat.view(B, 1, 1) & seq_mask.unsqueeze(-1)).expand_as(z)
+        pen = torch.relu(-z)
+        pen_sumsq = pen_sumsq + (pen.square() * gate).sum()
+        pen_count = pen_count + gate.sum()
     if terrain_scan is not None and has_scan is not None and scan_grid is not None and has_scan.any():
         h, valid = interpolate_scan_heights(terrain_scan, pred["body_pos"][..., :2], scan_grid)
-        gate = has_scan.view(B, 1, 1).float() * valid.float() * m
-        pen = torch.relu(h - z) * gate
-        pen_total = pen_total + (pen**2).sum() / gate.sum().clamp_min(1.0)
-    losses["terrain_penetration"] = pen_total
+        gate = has_scan.view(B, 1, 1) & valid & seq_mask.unsqueeze(-1)
+        pen = torch.relu(h - z)
+        pen_sumsq = pen_sumsq + (pen.square() * gate).sum()
+        pen_count = pen_count + gate.sum()
+    losses["terrain_penetration"] = pen_sumsq / pen_count.clamp_min(1.0)
 
     # The tracked body origins above miss foot surfaces and the lower part of
     # each shin.  Use the pinned G1 MJCF's 12 collision-marker spheres so this

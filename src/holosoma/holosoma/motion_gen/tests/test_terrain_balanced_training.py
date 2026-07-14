@@ -54,12 +54,12 @@ def _memory_clip(
         flat_terrain=not scanned,
         source="synthetic",
         terrain_scan=terrain_scan,
-        terrain_grid=None,
+        terrain_grid=torch.from_numpy(ScanGrid().to_array()).float() if scanned else None,
     )
 
 
 def _memory_dataset(*, include_flat: bool = True, include_terrain: bool = True) -> MotionWindowDataset:
-    terrain_dim = 9
+    terrain_dim = ScanGrid().dim
     clips = []
     if include_flat:
         clips.append(

@@ -45,14 +45,23 @@ def main(args: Args) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     clips = load_split_clips(
-        cfg.data.processed_dir, cfg.data.splits_file, args.split, gen.layout,
-        cfg.data.metadata_dir, cfg.data.fps,
+        cfg.data.processed_dir,
+        cfg.data.splits_file,
+        args.split,
+        gen.layout,
+        cfg.data.metadata_dir,
+        cfg.data.fps,
     )
     dataset = MotionWindowDataset(
-        clips, gen.layout,
-        past_frames=cfg.data.past_frames, future_frames=cfg.data.future_frames,
-        stride=cfg.data.val_stride, min_heading_disp=cfg.data.min_heading_disp,
-        terrain_dim=cfg.data.terrain_dim, use_terrain_scan=cfg.data.use_terrain_scan,
+        clips,
+        gen.layout,
+        past_frames=cfg.data.past_frames,
+        future_frames=cfg.data.future_frames,
+        stride=cfg.data.val_stride,
+        min_heading_disp=cfg.data.min_heading_disp,
+        terrain_dim=cfg.data.terrain_dim,
+        use_terrain_scan=cfg.data.use_terrain_scan,
+        scan_grid=cfg.data.scan_grid,
     )
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
     joint_limits = load_joint_limits(Path(cfg.data.metadata_dir) / "joint_limits.json", gen.layout)
@@ -61,10 +70,10 @@ def main(args: Args) -> None:
     agg: dict[str, float] = {}
     counts: dict[str, int] = {}
     plotted = 0
-    for i, batch in enumerate(loader):
+    for i, cpu_batch in enumerate(loader):
         if i >= args.num_batches:
             break
-        batch = {k: v.to(gen.device) for k, v in batch.items()}
+        batch = {k: v.to(gen.device) for k, v in cpu_batch.items()}
         # Dataset windows are canonical; the anchor is at origin/yaw=0, so
         # generate() applies an identity canonicalization.
         out = gen.generate(
@@ -78,8 +87,13 @@ def main(args: Args) -> None:
             seed=args.seed + i,
         )
         metrics = compute_metrics(
-            out.features, batch["x"], gen.layout, cfg.data.fps,
-            joint_limits=joint_limits, contact=batch["contact"], flat=batch["flat"],
+            out.features,
+            batch["x"],
+            gen.layout,
+            cfg.data.fps,
+            joint_limits=joint_limits,
+            contact=batch["contact"],
+            flat=batch["flat"],
             terrain_scan=batch["terrain"] if cfg.data.use_terrain_scan else None,
             has_scan=batch.get("has_scan"),
             scan_grid=cfg.data.scan_grid if cfg.data.use_terrain_scan else None,
@@ -89,7 +103,9 @@ def main(args: Args) -> None:
             counts[k] = counts.get(k, 0) + 1
         if plotted < args.num_plots:
             plot_window_comparison(
-                out.features[0].cpu(), batch["x"][0].cpu(), gen.layout,
+                out.features[0].cpu(),
+                batch["x"][0].cpu(),
+                gen.layout,
                 out_dir / f"eval_window_{i:02d}.png",
             )
             plotted += 1

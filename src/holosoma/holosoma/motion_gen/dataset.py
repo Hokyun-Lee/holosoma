@@ -27,10 +27,12 @@ from holosoma.motion_gen.features import (
     pack_features,
     quat_enforce_continuity,
 )
+from holosoma.motion_gen.terrain import ScanGrid
 
 # Contact proxy thresholds (implementation choice; no contact labels in data).
 _CONTACT_HEIGHT_MARGIN = 0.03  # m above the per-clip minimum foot height
 _CONTACT_SPEED_MAX = 0.25  # m/s horizontal foot speed
+_SCAN_GRID_ATOL = 1.0e-6
 
 
 @dataclass
@@ -43,6 +45,7 @@ class MotionClip:
     source: str = "unknown"
     terrain_scan: torch.Tensor | None = None  # (T, G) heading-aligned heights
     terrain_grid: torch.Tensor | None = None  # (5,) grid definition
+    source_path: str | None = None
 
     @property
     def num_frames(self) -> int:
@@ -98,10 +101,31 @@ def load_wbt_motion(
     terrain_scan = None
     terrain_grid = None
     if "terrain_height" in data.files:
-        terrain_scan = torch.from_numpy(np.asarray(data["terrain_height"], dtype=np.float32))
-        terrain_grid = torch.from_numpy(np.asarray(data["terrain_grid"], dtype=np.float32))
+        if "terrain_grid" not in data.files:
+            raise ValueError(
+                f"{path}: terrain_height is present but terrain_grid is missing; "
+                "regenerate the scan metadata with add_terrain_scans."
+            )
+        terrain_scan_array = np.asarray(data["terrain_height"], dtype=np.float32)
+        terrain_grid_array = np.asarray(data["terrain_grid"], dtype=np.float32)
+        if terrain_scan_array.ndim != 2:
+            raise ValueError(
+                f"{path}: terrain_height must have shape (frames, grid.dim), got {terrain_scan_array.shape}."
+            )
+        if terrain_grid_array.shape != (5,):
+            raise ValueError(
+                f"{path}: terrain_grid must have shape (5,) "
+                "[x_min, x_max, y_min, y_max, spacing], "
+                f"got {terrain_grid_array.shape}."
+            )
+        if not np.isfinite(terrain_scan_array).all() or not np.isfinite(terrain_grid_array).all():
+            raise ValueError(f"{path}: terrain_height/terrain_grid contains NaN/Inf values.")
+        terrain_scan = torch.from_numpy(terrain_scan_array)
+        terrain_grid = torch.from_numpy(terrain_grid_array)
         if terrain_scan.shape[0] != features.shape[0]:
-            raise ValueError(f"{path}: terrain_height frames {terrain_scan.shape[0]} != motion frames {features.shape[0]}")
+            raise ValueError(
+                f"{path}: terrain_height frames {terrain_scan.shape[0]} != motion frames {features.shape[0]}"
+            )
 
     foot_idx = layout.foot_body_indices()
     feet = body_pos[:, foot_idx]  # (T, n_feet, 3)
@@ -120,6 +144,7 @@ def load_wbt_motion(
         source=source,
         terrain_scan=terrain_scan,
         terrain_grid=terrain_grid,
+        source_path=str(path),
     )
 
 
@@ -150,9 +175,7 @@ def load_split_clips(
                 meta = json.loads(meta_path.read_text())
                 flat = bool(meta.get("flat_terrain", False))
                 source = str(meta.get("source", "unknown"))
-        clips.append(
-            load_wbt_motion(npz_path, layout, expected_fps=expected_fps, flat_terrain=flat, source=source)
-        )
+        clips.append(load_wbt_motion(npz_path, layout, expected_fps=expected_fps, flat_terrain=flat, source=source))
     return clips
 
 
@@ -180,6 +203,7 @@ class MotionWindowDataset(Dataset):
         min_heading_disp: float = 0.05,
         terrain_dim: int = 121,
         use_terrain_scan: bool = False,
+        scan_grid: ScanGrid | None = None,
     ):
         if past_frames < 1 or future_frames < 1:
             raise ValueError("past_frames and future_frames must be >= 1")
@@ -191,13 +215,50 @@ class MotionWindowDataset(Dataset):
         self.min_heading_disp = min_heading_disp
         self.terrain_dim = terrain_dim
         self.use_terrain_scan = use_terrain_scan
+        # Implementation contract: every consumed scan must carry the exact
+        # configured extents and spacing, not merely the same flattened size.
+        # None intentionally resolves to the historical production default.
+        self.scan_grid = scan_grid if scan_grid is not None else ScanGrid()
         if use_terrain_scan:
+            if terrain_dim != self.scan_grid.dim:
+                raise ValueError(
+                    f"configured terrain_dim {terrain_dim} != configured scan_grid.dim "
+                    f"{self.scan_grid.dim} for {self.scan_grid}."
+                )
             for clip in clips:
-                if clip.terrain_scan is not None and clip.terrain_scan.shape[1] != terrain_dim:
+                if clip.terrain_scan is None:
+                    continue  # Legacy/no-scan clips retain their zero condition.
+                location = clip.source_path or clip.name
+                if clip.terrain_scan.ndim != 2:
                     raise ValueError(
-                        f"{clip.name}: terrain scan dim {clip.terrain_scan.shape[1]} != "
+                        f"{location} (clip {clip.name!r}): terrain scan must be 2-D, "
+                        f"got shape {tuple(clip.terrain_scan.shape)}."
+                    )
+                if clip.terrain_scan.shape[1] != terrain_dim:
+                    raise ValueError(
+                        f"{location} (clip {clip.name!r}): terrain scan dim "
+                        f"{clip.terrain_scan.shape[1]} != "
                         f"configured terrain_dim {terrain_dim} (re-run add_terrain_scans "
                         "with a matching grid or fix the config)."
+                    )
+                if clip.terrain_grid is None:
+                    raise ValueError(
+                        f"{location} (clip {clip.name!r}): terrain scan is present but "
+                        "terrain_grid metadata is missing."
+                    )
+                actual_grid = clip.terrain_grid.detach().cpu().numpy().astype(np.float64, copy=False)
+                if actual_grid.shape != (5,) or not np.isfinite(actual_grid).all():
+                    raise ValueError(
+                        f"{location} (clip {clip.name!r}): terrain_grid must be five "
+                        "finite values [x_min, x_max, y_min, y_max, spacing], "
+                        f"got {actual_grid.tolist() if actual_grid.ndim == 1 else actual_grid.shape}."
+                    )
+                expected_grid = self.scan_grid.to_array().astype(np.float64, copy=False)
+                if not np.allclose(actual_grid, expected_grid, rtol=0.0, atol=_SCAN_GRID_ATOL):
+                    raise ValueError(
+                        f"{location} (clip {clip.name!r}): terrain_grid contract mismatch; "
+                        f"stored={actual_grid.tolist()}, configured={expected_grid.tolist()} "
+                        f"(absolute tolerance {_SCAN_GRID_ATOL:g})."
                     )
 
         self._index: list[tuple[int, int]] = []
@@ -207,8 +268,7 @@ class MotionWindowDataset(Dataset):
                 self._index.append((ci, start))
         if not self._index:
             raise ValueError(
-                f"No valid windows: window={self.window} frames, "
-                f"clip lengths={[c.num_frames for c in clips]}."
+                f"No valid windows: window={self.window} frames, clip lengths={[c.num_frames for c in clips]}."
             )
 
     def __len__(self) -> int:
@@ -220,9 +280,7 @@ class MotionWindowDataset(Dataset):
         window = clip.features[start : start + self.window]
         anchor = self.past_frames - 1
         canon, transform = canonicalize_window(window, self.layout, anchor_index=anchor)
-        heading = compute_target_heading(
-            canon, self.layout, anchor_index=anchor, min_disp=self.min_heading_disp
-        )
+        heading = compute_target_heading(canon, self.layout, anchor_index=anchor, min_disp=self.min_heading_disp)
         contact = clip.foot_contact[start + self.past_frames : start + self.window]
         terrain = torch.zeros(self.terrain_dim)
         has_scan = False

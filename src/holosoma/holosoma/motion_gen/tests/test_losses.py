@@ -159,6 +159,93 @@ def test_terrain_penetration_only_on_flat():
     assert flat_on["terrain_penetration"] > 0.1
 
 
+def test_terrain_penetration_denominator_uses_only_flat_valid_body_values():
+    layout, gt = _window(bsz=2, horizon=2)
+    pred = gt.clone()
+    body = pred[..., layout.body_pos_slice].reshape(2, 2, layout.num_bodies, 3)
+    body[0, 0, :, 2] = -0.2  # The sole eligible sample/frame.
+    body[0, 1, :, 2] = -10.0  # Flat, but seq-masked.
+    body[1, :, :, 2] = -20.0  # Valid frames, but not a flat sample.
+
+    losses = compute_losses(
+        pred,
+        gt,
+        layout,
+        LossWeights(),
+        flat=torch.tensor([True, False]),
+        seq_mask=torch.tensor([[True, False], [True, True]]),
+    )
+
+    assert losses["terrain_penetration"].item() == pytest.approx(0.2**2)
+
+
+def test_terrain_penetration_is_one_gated_mean_across_disjoint_surfaces():
+    layout, gt = _window(bsz=2, horizon=2)
+    pred = gt.clone()
+    body = pred[..., layout.body_pos_slice].reshape(2, 2, layout.num_bodies, 3)
+    body[..., :2] = 0.0  # Every body origin lies inside the scan grid.
+    body[0, :, :, 2] = -1.0  # Flat depth 1 m.
+    body[1, :, :, 2] = 0.0  # Scanned-terrain depth 2 m.
+    grid = ScanGrid()
+
+    losses = compute_losses(
+        pred,
+        gt,
+        layout,
+        LossWeights(),
+        flat=torch.tensor([True, False]),
+        terrain_scan=torch.full((2, grid.dim), 2.0),
+        has_scan=torch.tensor([False, True]),
+        scan_grid=grid,
+    )
+
+    # Equal eligible counts: mean([1^2, 2^2]), not flat_mean + scan_mean.
+    assert losses["terrain_penetration"].item() == pytest.approx(2.5)
+
+
+def test_terrain_condition_masks_reject_flat_scan_overlap():
+    layout, pred = _window(bsz=2, horizon=1)
+    grid = ScanGrid()
+
+    with pytest.raises(ValueError, match=r"mutually exclusive.*indices \[1\]"):
+        compute_losses(
+            pred,
+            pred,
+            layout,
+            LossWeights(),
+            flat=torch.tensor([False, True]),
+            terrain_scan=torch.zeros(2, grid.dim),
+            has_scan=torch.tensor([False, True]),
+            scan_grid=grid,
+        )
+
+
+@pytest.mark.parametrize(
+    ("flat", "has_scan", "error_type", "match"),
+    [
+        (torch.tensor([[True]]), None, ValueError, "flat must have shape"),
+        (None, torch.tensor([1.0]), TypeError, "has_scan must be a boolean"),
+    ],
+)
+def test_terrain_condition_mask_contract_rejects_invalid_shape_or_dtype(
+    flat,
+    has_scan,
+    error_type,
+    match,
+):
+    layout, pred = _window(bsz=1, horizon=1)
+
+    with pytest.raises(error_type, match=match):
+        compute_losses(
+            pred,
+            pred,
+            layout,
+            LossWeights(),
+            flat=flat,
+            has_scan=has_scan,
+        )
+
+
 def test_fk_consistency_is_zero_on_fk_body_positions_and_has_gradients():
     layout = FeatureLayout()
     fk = G1ForwardKinematics(dtype=torch.float64)

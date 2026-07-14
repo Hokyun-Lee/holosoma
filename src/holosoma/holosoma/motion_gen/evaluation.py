@@ -13,6 +13,7 @@ from pathlib import Path
 import torch
 
 from holosoma.motion_gen.features import FeatureLayout, quat_angle, unpack_features
+from holosoma.motion_gen.losses import validate_terrain_condition_masks
 from holosoma.motion_gen.terrain import interpolate_scan_heights
 
 
@@ -45,7 +46,19 @@ def compute_metrics(
     scan_grid=None,
     fk_model: torch.nn.Module | None = None,
 ) -> dict[str, float]:
-    """Metrics over a batch of windows (B, H, D), physical canonical units."""
+    """Metrics over a batch of windows (B, H, D), physical canonical units.
+
+    Terrain membership follows the same implementation contract as training:
+    ``flat`` and ``has_scan`` are boolean, batch-shaped, and mutually
+    exclusive.  Every penetration mean divides only by values selected by its
+    terrain gate (and, for scans, the interpolation-validity gate).
+    """
+    validate_terrain_condition_masks(
+        flat,
+        has_scan,
+        batch_size=pred_x0.shape[0],
+        device=pred_x0.device,
+    )
     pred = unpack_features(pred_x0, layout)
     gt = unpack_features(gt_x0, layout)
 
@@ -82,10 +95,9 @@ def compute_metrics(
 
     if flat is not None and flat.any():
         z = pred["body_pos"][..., 2]
-        pen = torch.relu(-z) * flat.view(-1, 1, 1).float()
-        metrics["terrain_penetration_m"] = (
-            pen.sum() / flat.float().sum().clamp_min(1.0) / z.shape[1] / z.shape[2]
-        ).item()
+        gate = flat.view(-1, 1, 1).expand_as(z)
+        pen = torch.relu(-z)
+        metrics["terrain_penetration_m"] = (pen.mul(gate).sum() / gate.sum().clamp_min(1)).item()
 
     if terrain_scan is not None and has_scan is not None and scan_grid is not None and has_scan.any():
         z = pred["body_pos"][..., 2]

@@ -111,6 +111,14 @@ class ConditionNoiseCfg:
 class TrainConfig:
     run_name: str = "motion_gen"
     out_root: str = "logs/motion_gen"
+    allow_existing_output: bool = False
+    """Allow a scratch run to reuse a non-empty output directory.
+
+    The safe default prevents silent config/metric/checkpoint overwrites.  This
+    opt-in retains the earlier normalization-stat reuse workflow when it is
+    explicitly intended.  Resume runs are always allowed to use their target
+    output directory.
+    """
     device: str = "auto"  # "auto" | "cuda" | "cpu"
     seed: int = 42
 
@@ -148,6 +156,8 @@ class TrainConfig:
     MDM-style) during training; enables classifier-free guidance."""
 
     num_workers: int = 4
+    val_num_workers: int = 0
+    """Validation loader workers; zero avoids one persistent pool per stratum."""
     log_interval: int = 50
     ckpt_interval: int = 10_000
     val_interval: int = 2_000
