@@ -41,8 +41,8 @@ footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted
 <body>
 <header class="container">
   <h1>Terrain Feasibility Gate</h1>
-  <p>최종 robust+FK generator의 실제 지형 rollout을<br>MuJoCo collision geometry와 직접 재생으로 검증</p>
-  <span class="tag fail">현재 판정: FAIL · dynamic feasibility 미평가</span>
+  <p>robust+FK baseline과 feasibility warm10k의 실제 지형 rollout을<br>MuJoCo collision geometry와 4-way 진단으로 비교</p>
+  <span class="tag fail">stride-12 진단: FAIL · production-matched gate 대기</span>
 </header>
 <nav><div class="container">
   <a href="#result">판정</a><a href="#scope">검증 범위</a><a href="#metrics">실측 결과</a>
@@ -53,20 +53,22 @@ footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted
 
 <section id="result">
   <h2>1. 결론</h2>
-  <div class="callout bad"><b>현재 generator motion은 이 지형에서 feasible하지 않다.</b> 최신 <code>terrain_robust_fk_4090/final.pt</code>를 2-step DDIM으로 실제 <code>climb_09</code> 박스 scan에 조건화해 242 frame을 생성했다. MuJoCo collision shape 기준 최대 지형 침투는 <b>0.2603 m</b>, strict 5 mm gate 초과 frame rate는 <b>40.91%</b>였고 그중 5 cm 초과 severity rate는 <b>35.95%</b>였다. 오른쪽 ankle-roll은 최대 <b>0.02153 rad</b> joint limit를 넘었고, generator body head와 qpos 기반 MuJoCo FK의 최대 오차도 <b>0.03265 m</b>였다.</div>
-  <p>Quaternion은 정상이고 재계획 경계가 유일한 큰 불연속 원인은 아니었다. 실패의 핵심은 obstacle에 접근한 뒤 발과 무릎 collision shape가 박스 내부로 깊게 들어가는 것이다. 그러므로 이 generator를 고정한 채 장시간 scratch PPO부터 돌리는 것은 현재 우선순위가 아니다.</p>
+  <div class="callout bad"><b>완료된 stride-12 진단에서는 warm10k 이후에도 terrain feasibility 개선을 확인하지 못했다.</b> Autonomous-history 진단인 <code>generated_feedback + keep_current</code>에서 old baseline 대비 joint-limit 최대 위반은 <b>0.02153→0.00815 rad</b>, body-head↔FK 최대 오차는 <b>32.65→28.24 mm</b>로 개선됐다. 그러나 242-frame rollout의 root 오차 mean/final은 <b>0.6377/1.5917→0.7368/1.8468 m</b>로 커졌고, MuJoCo box 최대 침투도 <b>0.2603→0.2639 m</b>, 5 mm 초과 frame rate도 <b>40.91→41.74%</b>로 개선되지 않았다.</div>
+  <p>즉 warm-start 10k가 직접 최적화한 joint/FK proxy에는 효과가 있었지만, 이 장기 생성-output feedback 진단에서 누적되는 root drift와 collision-shape 침투까지 해결하지는 못했다. Oracle heading은 root drift를 줄여도 collision을 없애지 못했고, source-history의 작은 root 오차는 매 cycle 정답 history를 넣는 teacher-forced 진단이므로 autonomous feasibility 근거가 아니다. 다만 이 표는 <b>12 frame=0.24 s</b>마다 재계획했고 실제 <code>wbt_gen.py</code>는 <b>25 step=0.5 s</b>마다 재계획하므로 production cadence와 다르다. 따라서 이 결과를 최종 production gate로 사용하지 않으며, stride-25 재평가 전 production scratch full 재학습과 Stage-9 scratch PPO 재개 판단을 보류한다.</p>
   <div class="card">
     <ul>
-      <li>☑ 최종 checkpoint로 2-step 실제 terrain-conditioned rollout 생성</li>
+      <li>☑ old baseline과 warm10k checkpoint를 동일 seed/scan의 stride-12 4-way 2-step 진단으로 비교</li>
       <li>☑ quaternion, joint limit, 속도/가속도, 재계획 경계 검사</li>
       <li>☑ predicted body head ↔ MuJoCo FK 정합 검사</li>
       <li>☑ 실제 URDF box collision depth 검사</li>
       <li>☑ 동일 source segment를 같은 scene에서 비교</li>
       <li>☑ headless GIF 실제 생성, interactive MuJoCo의 start-frame/playback 경로 회귀 테스트 및 사용자 실행 명령 준비</li>
-      <li>☑ JSON/NPZ/GIF/scene/source/synthetic stress를 W&amp;B run + artifact로 기록</li>
+      <li>☑ old 4-way, warm10k 학습, warm10k 4-way를 W&amp;B run + artifact로 기록</li>
       <li>☐ actuator, torque, balance, friction을 포함한 dynamic feasibility</li>
+      <li>☐ 실제 <code>wbt_gen.py</code> cadence와 일치하는 stride-25 production gate</li>
     </ul>
   </div>
+  <div class="callout warn"><b>진행 중 결과 제외</b>: tail pilot 및 full-scratch 관련 실행은 완료 판정 전의 중간 상태다. 이 문서의 수치와 결론에는 완료된 old 4-way, warm10k 학습, warm10k 4-way만 포함했으며, 실행 중인 job을 완료 또는 개선 성공으로 해석하지 않는다.</div>
 </section>
 
 <section id="scope">
@@ -83,17 +85,28 @@ footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted
 
   <h3>재현 조건</h3>
   <ul>
-    <li>Checkpoint: <code>logs/motion_gen/terrain_robust_fk_4090/checkpoints/final.pt</code>, SHA-256 <code>7c63764b…ed5fa</code></li>
+    <li>Old checkpoint: <code>logs/motion_gen/terrain_robust_fk_4090/checkpoints/final.pt</code>, SHA-256 <code>7c63764b…ed5fa</code></li>
+    <li>Warm10k checkpoint: <code>logs/motion_gen/terrain_feasibility_warm10k_s42/checkpoints/final.pt</code>, SHA-256 <code>9750f931199a5a3b581f18fdd0d9338ef714f3e1a5564ef4a1c5e39d9de42644</code></li>
     <li>Seed clip: <code>omni_climb_09_z1_0</code>, start 100, seed 123</li>
-    <li>Sampler: deterministic 2-step DDIM, 20 cycles, 12-frame stride, 2-frame initial history</li>
-    <li>Output: 242 frames at 50 Hz. 이는 generator 자기 출력 feedback rollout이며 실제 robot state feedback인 Stage-9 closed loop가 아니다.</li>
+    <li>Sampler: deterministic 2-step DDIM, 20 cycles, <b>12-frame stride(0.24 s)</b>, 2-frame initial history. 실제 <code>wbt_gen.py</code>는 0.5 s/25-step cadence이므로 production-matched가 아니다.</li>
+    <li>Output: 각 variant 242 frames at 50 Hz. <code>generated_feedback</code>도 generator 자기 출력 feedback이며 실제 robot state feedback인 Stage-9 closed loop가 아니다.</li>
     <li>Scan: 17×17=289, x=[−0.3,1.3], y=[−0.8,0.8], 0.1 m, root-yaw local, x-major/y-fastest, absolute world-z metres, 별도 normalization 없음</li>
   </ul>
-  <div class="callout warn"><b>구현 선택</b>: collision gate의 5 mm surface tolerance, 심각도 진단용 5 cm deep-penetration threshold, 0.001 rad joint-limit tolerance, quaternion norm tolerance 0.001, body-FK max-error gate 2 cm, continuity 상한(root 5 m/s·20 rad/s, joint 20 rad/s·500 rad/s², frame joint-L2 0.5 rad)은 논문 공개값이 아니다. 모두 CLI로 노출했다. Strict gate는 실제 box가 있는 terrain URDF, 정확한 14-body raw head, qpos/MJCF joint mapping이 빠지거나 불일치하면 pass하지 않는다.</div>
+
+  <h3>4-way 진단의 의미</h3>
+  <div class="table"><table>
+    <tr><th>축</th><th>모드</th><th>의미</th></tr>
+    <tr><td rowspan="2">History</td><td><code>generated_feedback</code></td><td>직전 생성 frame을 다음 cycle의 2-frame history로 사용. 장기 생성 누적오차 진단.</td></tr>
+    <tr><td><code>source_history</code></td><td>매 cycle마다 정렬된 source 2 frame으로 되돌리는 teacher forcing. 독립 window를 이어 붙이므로 boundary continuity fail은 예상된 진단값이다.</td></tr>
+    <tr><td rowspan="2">Heading</td><td><code>keep_current</code></td><td><code>target_heading=None</code>; anchor-local +x/current facing 사용.</td></tr>
+    <tr><td><code>oracle_cycle</code></td><td>그 cycle의 source 미래 변위로 heading을 계산. 배포 시 알 수 없는 진단용 oracle이다.</td></tr>
+  </table></div>
+  <div class="callout warn"><b>모두 구현 선택이며 논문 값이 아니다.</b> Collision gate의 5 mm surface tolerance, 진단용 5 cm deep-penetration threshold, 0.001 rad joint-limit tolerance, quaternion norm tolerance 0.001, body-FK max-error gate 2 cm, continuity 상한(root 5 m/s·20 rad/s, joint 20 rad/s·500 rad/s², frame joint-L2 0.5 rad)은 이 재현의 CLI threshold다. Warm10k의 <code>fk_consistency=10.0</code>, <code>joint_limit=10.0</code>, <code>lower_body_terrain_penetration=1.0</code>을 포함한 모든 loss weight, condition-noise 크기, warm-start/10k step, clip·start·seed·cycle 수 역시 구현 및 평가 선택이다. 논문 공개 hyperparameter로 인용하면 안 된다. Strict gate는 실제 box가 있는 terrain URDF, 정확한 14-body raw head, qpos/MJCF joint mapping이 빠지거나 불일치하면 pass하지 않는다.</div>
 </section>
 
 <section id="metrics">
   <h2>3. 실측 결과 <small>(2026-07-14 KST)</small></h2>
+  <h3>기존 checkpoint 단일 generated-feedback audit</h3>
   <div class="table"><table>
     <tr><th>지표</th><th>Generated</th><th>Source segment</th><th>판정/주의</th></tr>
     <tr><td>finite qpos</td><td>pass</td><td>pass</td><td>표현 정상</td></tr>
@@ -110,6 +123,32 @@ footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted
   </table></div>
   <p>Generated worst contact는 frame 104(2.08 s)의 오른발-박스 0.2603 m이며, frame 117–123 부근에는 왼쪽 무릎이 약 0.23–0.24 m 들어간다. Source의 worst contact는 오른손-박스 약 0.081 m다. Source도 collision-perfect gold standard가 아니므로 source pass/fail로 generator를 판정하지 않았고, body 이름과 depth를 JSON에 모두 보존했다.</p>
 
+  <h3>Old checkpoint stride-12 4-way diagnostic — W&amp;B <code>g58j5c1b</code></h3>
+  <div class="table"><table>
+    <tr><th>History + heading</th><th>root error<br>mean / final</th><th>collision<br>max / &gt;5 mm frames</th><th>joint limit<br>max / frames</th><th>FK mean / p95 / max</th><th>continuity</th></tr>
+    <tr><td>generated + keep</td><td>0.6377 / 1.5917 m</td><td>0.2603 m / 40.91%</td><td>0.02153 rad / 30.17%</td><td>5.12 / 14.53 / 32.65 mm</td><td><span class="tag pass">pass</span></td></tr>
+    <tr><td>generated + oracle</td><td>0.2151 / 0.2351 m</td><td>0.1824 m / 79.75%</td><td>0.04006 rad / 14.46%</td><td>6.34 / 18.73 / 37.78 mm</td><td><span class="tag pass">pass</span></td></tr>
+    <tr><td>source + keep</td><td>0.03417 / 0.06408 m</td><td>0.06759 m / 66.53%</td><td>0.05772 rad / 4.96%</td><td>11.60 / 30.55 / 132.60 mm</td><td><span class="tag fail">diagnostic fail</span></td></tr>
+    <tr><td>source + oracle</td><td>0.02367 / 0.05747 m</td><td>0.07123 m / 62.40%</td><td>0.05794 rad / 4.96%</td><td>11.80 / 31.12 / 132.74 mm</td><td><span class="tag fail">diagnostic fail</span></td></tr>
+  </table></div>
+
+  <h3>Warm10k checkpoint stride-12 4-way diagnostic — W&amp;B <code>uv0baaq6</code></h3>
+  <div class="table"><table>
+    <tr><th>History + heading</th><th>root error<br>mean / final</th><th>collision<br>max / &gt;5 mm frames</th><th>joint limit<br>max / frames</th><th>FK mean / p95 / max</th><th>continuity</th></tr>
+    <tr><td>generated + keep</td><td><b>0.7368 / 1.8468 m</b></td><td><b>0.2639 m / 41.74%</b></td><td>0.00815 rad / 1.24%</td><td>3.57 / 10.21 / 28.24 mm</td><td><span class="tag pass">pass</span></td></tr>
+    <tr><td>generated + oracle</td><td>0.1822 / 0.1607 m</td><td><b>0.2166 m / 80.17%</b></td><td>0 / 0%</td><td>4.36 / 12.69 / 31.71 mm</td><td><span class="tag pass">pass</span></td></tr>
+    <tr><td>source + keep</td><td>0.03386 / 0.06306 m</td><td>0.07051 m / 69.42%</td><td>0.02347 rad / 3.31%</td><td>8.38 / 21.62 / 112.44 mm</td><td><span class="tag fail">diagnostic fail</span></td></tr>
+    <tr><td>source + oracle</td><td>0.02316 / 0.05565 m</td><td>0.06791 m / 66.12%</td><td>0.02501 rad / 3.72%</td><td>8.45 / 21.96 / 112.64 mm</td><td><span class="tag fail">diagnostic fail</span></td></tr>
+  </table></div>
+  <div class="callout warn"><b>비교 해석</b>: generated+keep에서 joint-limit 최대 위반은 약 62% 줄고 FK mean/max도 약 30%/14% 줄었다. 반면 root mean/final과 collision max/rate는 모두 악화했다. Generated+oracle은 root mean/final을 old보다 줄였지만 collision max는 0.1824→0.2166 m로 커졌다. 따라서 heading 좌표정책 하나가 원인은 아니며, warm10k의 single-window joint/FK 개선을 이 stride-12 long-rollout terrain feasibility 개선으로 일반화할 수 없다. &gt;5 mm rate에는 의도된 손/지지 접촉이 포함되므로 max depth와 contact body를 함께 봐야 한다. 이 표는 old/warm의 통제 비교에는 유효하지만 production-matched 최종 gate는 아니다.</div>
+
+  <h3>완료된 실제 산출물</h3>
+  <ul>
+    <li>Old: <code>logs/motion_gen/terrain_feasibility/climb09_rollout_modes_2step/comparison.json</code></li>
+    <li>Warm10k: <code>logs/motion_gen/terrain_feasibility/climb09_warm10k_rollout_modes_2step/comparison.json</code></li>
+    <li>각 디렉터리의 <code>variants/{generated_feedback__keep_current,generated_feedback__oracle_cycle,source_history__keep_current,source_history__oracle_cycle}/</code> 아래에 <code>motion_qpos.npz</code>, <code>motion_raw.npz</code>, <code>feasibility.json</code>이 있다.</li>
+  </ul>
+
   <h3>Flat / 30 cm / 60 cm strict stress</h3>
   <div class="table"><table>
     <tr><th>scan</th><th>left/right foot z max</th><th>left/right knee max</th><th>body-origin penetration max/rate</th></tr>
@@ -121,34 +160,38 @@ footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted
 </section>
 
 <section id="generate">
-  <h2>4. 최신 motion 다시 생성</h2>
+  <h2>4. 완료된 warm10k 4-way 진단 재현</h2>
 <pre><code>ROOT=/home/dyros24/holosoma
-PYGEN=$HOME/.holosoma_deps/miniconda3/envs/hssim/bin/python
-GEN=$ROOT/logs/motion_gen/terrain_robust_fk_4090/checkpoints/final.pt
+PY=$HOME/.holosoma_deps/miniconda3/envs/hsmujoco/bin/python
+GEN=$ROOT/logs/motion_gen/terrain_feasibility_warm10k_s42/checkpoints/final.pt
 TERRAIN=$ROOT/data/motion_gen/raw/omniretarget_terrain/climb_09/multi_boxes_z_scale_1.0.urdf
-OUT=$ROOT/logs/motion_gen/terrain_feasibility/climb09_robust_fk_2step
+OUT=$ROOT/logs/motion_gen/terrain_feasibility/climb09_warm10k_rollout_modes_2step
 
 cd "$ROOT"
-$PYGEN -m holosoma.motion_gen.scripts.sample \
-  --ckpt "$GEN" \
-  --clip omni_climb_09_z1_0 \
-  --mode rollout --start 100 \
-  --num-steps 2 --seed 123 \
+WANDB_CONSOLE=off $PY -m holosoma.motion_gen.scripts.evaluate_rollout_modes \
+  --checkpoint "$GEN" --clip omni_climb_09_z1_0 \
+  --terrain-urdf "$TERRAIN" --start 100 --seed 123 \
+  --num-steps 2 \
   --num-cycles 20 --replan-stride 12 \
-  --terrain-urdf "$TERRAIN" --out-dir "$OUT"</code></pre>
-  <p>Viewer에는 <code>*_gen_qpos.npz</code>를 바로 넣는다. <code>convert_data_format_mj_headless.py</code> 변환은 direct MuJoCo viewer에는 필요하지 않다.</p>
+  --output-dir "$OUT" --run-mujoco-feasibility \
+  --wandb-mode online --wandb-entity hkleetony-dyros \
+  --wandb-project HoloSomaMotionGenerator \
+  --wandb-group terrain_rollout_modes \
+  --wandb-name climb09-warm10k-rollout-modes-2step</code></pre>
+  <p>이 명령은 네 variant에 동일한 <code>seed+cycle</code>과 terrain sampler를 사용하고, 각 variant의 raw/qpos/feasibility JSON과 최상위 <code>comparison.json</code>을 쓴다. Old 결과는 <code>GEN</code>을 <code>terrain_robust_fk_4090/checkpoints/final.pt</code>, <code>OUT</code>을 <code>climb09_rollout_modes_2step</code>로 지정해 같은 조건으로 얻었다. Viewer에는 variant의 <code>motion_qpos.npz</code>를 바로 넣으며 별도 format 변환은 필요 없다.</p>
+  <div class="callout warn"><b>주의</b>: 위 명령은 완료된 W&amp;B run과 동일한 <code>--replan-stride 12</code> 진단 재현이다. 실제 tracker 연결의 25-step cadence를 재현하는 production gate 명령이 아니다.</div>
 </section>
 
 <section id="audit">
-  <h2>5. 정량 feasibility 검사</h2>
+  <h2>5. 단일 variant 정량 feasibility 재검사</h2>
 <pre><code>ROOT=/home/dyros24/holosoma
 PYMJ=$HOME/.holosoma_deps/miniconda3/envs/hsretargeting/bin/python
 DIR=$ROOT/src/holosoma_retargeting/holosoma_retargeting
-OUT=$ROOT/logs/motion_gen/terrain_feasibility/climb09_robust_fk_2step
-GEN=$ROOT/logs/motion_gen/terrain_robust_fk_4090/checkpoints/final.pt
+OUT=$ROOT/logs/motion_gen/terrain_feasibility/climb09_warm10k_rollout_modes_2step
+GEN=$ROOT/logs/motion_gen/terrain_feasibility_warm10k_s42/checkpoints/final.pt
 TERRAIN=$ROOT/data/motion_gen/raw/omniretarget_terrain/climb_09/multi_boxes_z_scale_1.0.urdf
-QPOS=$OUT/omni_climb_09_z1_0_s100_rollout20x12_gen_qpos.npz
-RAW=$OUT/omni_climb_09_z1_0_s100_rollout20x12_gen_raw.npz
+QPOS=$OUT/variants/generated_feedback__keep_current/motion_qpos.npz
+RAW=$OUT/variants/generated_feedback__keep_current/motion_raw.npz
 GT=$ROOT/data/motion_gen/processed_paperscale/omni_climb_09_z1_0.npz
 
 cd "$DIR"
@@ -158,114 +201,99 @@ $PYMJ data_conversion/evaluate_motion_feasibility_mj.py \
   --reference "$GT" --reference-start-frame 100 \
   --generator-checkpoint "$GEN" --generator-clip omni_climb_09_z1_0 \
   --generator-seed 123 --generator-num-steps 2 --generator-num-cycles 20 \
-  --output "$OUT/feasibility.json"
+  --replan-stride 12 \
+  --output "$OUT/variants/generated_feedback__keep_current/feasibility_rerun.json"
 
-# CI/strict gate: 현재 checkpoint는 report를 쓴 뒤 의도적으로 exit 1
+# Strict diagnostic: report를 쓴 뒤 현재 결과에서는 의도적으로 exit 1
 $PYMJ data_conversion/evaluate_motion_feasibility_mj.py \
   --motion "$QPOS" --raw-motion "$RAW" \
   --terrain-urdf "$TERRAIN" \
   --reference "$GT" --reference-start-frame 100 \
   --generator-checkpoint "$GEN" --generator-clip omni_climb_09_z1_0 \
   --generator-seed 123 --generator-num-steps 2 --generator-num-cycles 20 \
-  --output "$OUT/feasibility_strict.json" \
+  --replan-stride 12 \
+  --output "$OUT/variants/generated_feedback__keep_current/feasibility_strict.json" \
   --require-kinematic-gate</code></pre>
-  <p>일반 audit는 threshold 실패 결과도 관측값으로 저장하기 위해 exit 0이다. NaN·shape·missing-file 같은 입력 오류는 report 전에 즉시 실패한다. 자동 threshold/coverage gate가 필요할 때 <code>--require-kinematic-gate</code>를 사용한다.</p>
+  <p>기존 완료 report는 <code>feasibility.json</code>이다. 일반 audit는 threshold 실패 결과도 관측값으로 저장하기 위해 exit 0이다. NaN·shape·missing-file 같은 입력 오류는 report 전에 즉시 실패한다. 자동 threshold/coverage gate가 필요할 때 <code>--require-kinematic-gate</code>를 사용한다. 여기서 strict는 stride-12 artifact의 일관된 재검사일 뿐 production-matched 최종 판정은 아니다.</p>
 </section>
 
 <section id="view">
   <h2>6. 사용자가 직접 MuJoCo에서 보기</h2>
-  <h3>GUI — 실패 구간부터 0.25× slow motion</h3>
+  <h3>GUI — warm10k generated-feedback 실패 구간 직접 재생</h3>
 <pre><code>ROOT=/home/dyros24/holosoma
 PYMJ=$HOME/.holosoma_deps/miniconda3/envs/hsretargeting/bin/python
 DIR=$ROOT/src/holosoma_retargeting/holosoma_retargeting
-OUT=$ROOT/logs/motion_gen/terrain_feasibility/climb09_robust_fk_2step
+OUT=$ROOT/logs/motion_gen/terrain_feasibility/climb09_warm10k_rollout_modes_2step
 TERRAIN=$ROOT/data/motion_gen/raw/omniretarget_terrain/climb_09/multi_boxes_z_scale_1.0.urdf
 
 cd "$DIR"
 $PYMJ data_conversion/view_motion_mj.py \
-  --motion "$OUT/omni_climb_09_z1_0_s100_rollout20x12_gen_qpos.npz" \
+  --motion "$OUT/variants/generated_feedback__keep_current/motion_qpos.npz" \
   --gt "$ROOT/data/motion_gen/processed_paperscale/omni_climb_09_z1_0.npz" \
   --gt-start 100 \
   --terrain-urdf "$TERRAIN" \
   --robot-xml "$DIR/models/g1/g1_29dof.xml" \
-  --start-frame 90 --playback-speed 0.25</code></pre>
+  --start-frame 80 --playback-speed 0.25</code></pre>
   <ul>
     <li>흰/회색 robot: generator, 반투명 파란 robot: source, 갈색 box: generator가 scan한 동일 terrain</li>
-    <li>frame 104 부근 오른발, frame 117–123 부근 왼쪽 무릎이 box 안으로 들어가는지 확인</li>
+    <li>Warm10k generated+keep의 worst contact는 frame 100 오른쪽 ankle-roll 0.2639 m이며, frame 114–115의 왼쪽 ankle-roll도 약 0.243 m 들어간다.</li>
     <li>마우스 drag로 회전/이동하고 wheel로 확대한다. 창을 닫으면 종료한다.</li>
-    <li>처음부터 같은 0.25× 속도로 보려면 <code>--start-frame 90</code>만 제거한다. 원속도까지 복원하려면 <code>--playback-speed 0.25</code>도 제거한다.</li>
+    <li>다른 완료 variant는 motion 경로의 디렉터리 이름을 <code>generated_feedback__oracle_cycle</code>, <code>source_history__keep_current</code>, <code>source_history__oracle_cycle</code> 중 하나로 바꾸면 된다.</li>
+    <li>처음부터 같은 0.25× 속도로 보려면 <code>--start-frame 80</code>만 제거한다. 원속도까지 복원하려면 <code>--playback-speed 0.25</code>도 제거한다.</li>
   </ul>
 
   <h3>창 없이 GIF 생성</h3>
 <pre><code>ROOT=/home/dyros24/holosoma
 PYMJ=$HOME/.holosoma_deps/miniconda3/envs/hsretargeting/bin/python
 DIR=$ROOT/src/holosoma_retargeting/holosoma_retargeting
-OUT=$ROOT/logs/motion_gen/terrain_feasibility/climb09_robust_fk_2step
+OUT=$ROOT/logs/motion_gen/terrain_feasibility/climb09_warm10k_rollout_modes_2step
 TERRAIN=$ROOT/data/motion_gen/raw/omniretarget_terrain/climb_09/multi_boxes_z_scale_1.0.urdf
 
 cd "$DIR"
 MUJOCO_GL=egl $PYMJ data_conversion/view_motion_mj.py \
-  --motion "$OUT/omni_climb_09_z1_0_s100_rollout20x12_gen_qpos.npz" \
+  --motion "$OUT/variants/generated_feedback__keep_current/motion_qpos.npz" \
   --gt "$ROOT/data/motion_gen/processed_paperscale/omni_climb_09_z1_0.npz" \
   --gt-start 100 \
   --terrain-urdf "$TERRAIN" \
   --robot-xml "$DIR/models/g1/g1_29dof.xml" \
-  --video "$OUT/preview.gif" --video-fps 25
+  --video "$OUT/generated_feedback_keep_current.gif" --video-fps 25
 
 # 충돌 구간만 더 느리게
 MUJOCO_GL=egl $PYMJ data_conversion/view_motion_mj.py \
-  --motion "$OUT/omni_climb_09_z1_0_s100_rollout20x12_gen_qpos.npz" \
+  --motion "$OUT/variants/generated_feedback__keep_current/motion_qpos.npz" \
   --gt "$ROOT/data/motion_gen/processed_paperscale/omni_climb_09_z1_0.npz" \
   --gt-start 100 --terrain-urdf "$TERRAIN" \
-  --start-frame 90 --playback-speed 0.25 \
-  --video "$OUT/collision_segment_f90.gif" --video-fps 10</code></pre>
+  --start-frame 80 --playback-speed 0.25 \
+  --video "$OUT/collision_segment_f80.gif" --video-fps 10</code></pre>
   <div class="callout warn"><b>Viewer와 evaluator의 차이</b>: viewer는 겹친 source robot 때문에 contact/constraint를 비활성화하고 qpos를 직접 그리는 정성 도구다. 정량 evaluator는 source overlay 없이 contact를 활성화한 별도 model에서 각 frame의 signed collision distance를 읽는다.</div>
 </section>
 
 <section id="wandb">
   <h2>7. W&amp;B 기록</h2>
-  <p>실행 결과를 <a href="https://wandb.ai/hkleetony-dyros/HoloSomaMotionGenerator/runs/1gzs0tq5">W&amp;B run <code>1gzs0tq5</code></a>에 기록했다. Remote artifact v0는 12파일: schema-v3 report, qpos/raw, 정상 timing의 full/slow GIF, robot XML, terrain URDF+OBJ, evaluator/viewer source, synthetic stress JSON/NPZ다. Report는 checkpoint와 reference NPZ를 재배포하지 않고 SHA-256만 기록하며 총 13개 local provenance file을 hash한다. <code>hsretargeting</code> env에는 wandb가 없으므로 online logging 재실행은 <code>hsmujoco</code> env를 사용한다.</p>
-<pre><code>PYWB=$HOME/.holosoma_deps/miniconda3/envs/hsmujoco/bin/python
-ROOT=/home/dyros24/holosoma
-DIR=$ROOT/src/holosoma_retargeting/holosoma_retargeting
-OUT=$ROOT/logs/motion_gen/terrain_feasibility/climb09_robust_fk_2step
-GEN=$ROOT/logs/motion_gen/terrain_robust_fk_4090/checkpoints/final.pt
-QPOS=$OUT/omni_climb_09_z1_0_s100_rollout20x12_gen_qpos.npz
-RAW=$OUT/omni_climb_09_z1_0_s100_rollout20x12_gen_raw.npz
-GT=$ROOT/data/motion_gen/processed_paperscale/omni_climb_09_z1_0.npz
-TERRAIN=$ROOT/data/motion_gen/raw/omniretarget_terrain/climb_09/multi_boxes_z_scale_1.0.urdf
-
-cd "$DIR"
-WANDB_CONSOLE=off $PYWB data_conversion/evaluate_motion_feasibility_mj.py \
-  --motion "$QPOS" --raw-motion "$RAW" --terrain-urdf "$TERRAIN" \
-  --reference "$GT" --reference-start-frame 100 \
-  --generator-checkpoint "$GEN" --generator-clip omni_climb_09_z1_0 \
-  --generator-seed 123 --generator-num-steps 2 --generator-num-cycles 20 \
-  --preview "$OUT/preview.gif" \
-  --artifact-files \
-    "$ROOT/logs/motion_gen/terrain_feasibility/synthetic_height_stress/terrain_sensitivity_s5750_seed123.json" \
-    "$ROOT/logs/motion_gen/terrain_feasibility/synthetic_height_stress/terrain_sensitivity_s5750_seed123.npz" \
-    "$OUT/collision_segment_f90.gif" \
-  --output "$OUT/feasibility_wandb_v5.json" \
-  --wandb-mode online --wandb-entity hkleetony-dyros \
-  --wandb-project HoloSomaMotionGenerator \
-  --wandb-group terrain_feasibility \
-  --wandb-name climb09-robust-fk-2step-seed123-v5</code></pre>
-  <p>핵심 local artifact는 <code>logs/motion_gen/terrain_feasibility/climb09_robust_fk_2step/</code>와 <code>logs/motion_gen/terrain_feasibility/synthetic_height_stress/</code>에 있다. 데이터·로그 디렉터리는 gitignore이다. Remote artifact와 report hash manifest가 실행 provenance를 보존하지만, 278 MB checkpoint와 라이선스가 있는 reference NPZ 본체는 업로드하지 않는다.</p>
+  <div class="table"><table>
+    <tr><th>완료 실행</th><th>W&amp;B</th><th>상태와 artifact</th></tr>
+    <tr><td>Old stride-12 4-way</td><td><a href="https://wandb.ai/hkleetony-dyros/HoloSomaMotionGenerator/runs/g58j5c1b"><code>g58j5c1b</code></a></td><td><code>finished</code>; comparison artifact v0, 14 files, 1,038,156 bytes</td></tr>
+    <tr><td>Warm-start feasibility 10k 학습</td><td><a href="https://wandb.ai/hkleetony-dyros/HoloSomaMotionGenerator/runs/b6clu496"><code>b6clu496</code></a></td><td><code>finished</code>; final-checkpoint artifact v0, 290,483,911 bytes</td></tr>
+    <tr><td>Warm10k stride-12 4-way</td><td><a href="https://wandb.ai/hkleetony-dyros/HoloSomaMotionGenerator/runs/uv0baaq6"><code>uv0baaq6</code></a></td><td><code>finished</code>; comparison artifact v0, 14 files, 1,038,596 bytes</td></tr>
+    <tr><td>초기 old 단일 audit</td><td><a href="https://wandb.ai/hkleetony-dyros/HoloSomaMotionGenerator/runs/1gzs0tq5"><code>1gzs0tq5</code></a></td><td><code>finished</code>; schema-v3 report/GIF/synthetic stress의 역사적 기록</td></tr>
+  </table></div>
+  <p>W&amp;B API에서 2026-07-14 KST에 위 네 run이 모두 <code>finished</code>이고 artifact가 <code>COMMITTED</code>임을 다시 확인했다. Warm 학습의 local provenance는 <code>logs/motion_gen/terrain_feasibility_warm10k_s42/{config.yaml,metrics.json,wandb_run.json,checkpoints/final.pt}</code>, 4-way provenance는 앞 절의 두 <code>comparison.json</code>과 variant 디렉터리에 있다. Log/data 디렉터리는 gitignore이다.</p>
+  <div class="callout warn"><b>W&amp;B 상태의 의미</b>: <code>finished</code>는 해당 10k 또는 stride-12 진단 프로세스가 정상 종료됐다는 뜻일 뿐, terrain feasibility나 production cadence gate 통과를 뜻하지 않는다. Tail pilot/full scratch의 중간 run은 이 완료 표에 넣지 않았다.</div>
 </section>
 
 <section id="limits">
   <h2>8. 남은 한계와 다음 단계</h2>
   <ol>
+    <li><b>Production cadence mismatch</b>: 완료된 4-way 표는 12-frame(0.24 s) stride다. 실제 <code>wbt_gen.py</code>의 0.5 s/25-step replanning과 맞춘 재평가 전에는 최종 production gate로 사용하지 않는다.</li>
     <li><b>단일 clip/seed</b>: 이 결과는 실패를 입증하기에는 충분하지만 전체 분포의 success rate는 아니다. climb/scene별 여러 history·seed를 batch gate로 확장해야 한다.</li>
     <li><b>Box approximation</b>: 실제 mesh가 아니라 OmniRetarget의 box 근사와 G1 MJCF collision shape를 사용했다.</li>
     <li><b>Source도 collision-perfect가 아님</b>: climbing source의 손 contact가 box 안으로 최대 약 8.1 cm 들어가므로 contact rate만으로 generated/source 우열을 말하지 않는다.</li>
     <li><b>Collision metric 범위</b>: 값은 MuJoCo pairwise contact signed gap이며 일반 mesh SDF가 아니다. Ground와 이름이 붙은 terrain box만 세고 robot self-collision은 제외한다.</li>
     <li><b>URDF 범위</b>: viewer/evaluator는 world 좌표가 OBJ vertex에 baked되고 origin/rpy가 0인 OmniRetarget 8-vertex box만 지원한다. 다른 URDF는 조용히 오정렬하지 않고 오류를 낸다.</li>
-    <li><b>동역학 미평가</b>: 이 검사를 통과한 뒤에만 actuator가 있는 IsaacLab tracker에서 fall, torque, slip, contact, obstacle success를 평가한다.</li>
-    <li><b>Generator 개선 우선</b>: joint-limit loss/clamp, qpos-FK body consistency, collision-shape 또는 sole-point terrain loss, obstacle-height-balanced training, multi-step rollout loss를 먼저 검토한다.</li>
+    <li><b>동역학 미평가</b>: kinematic gate를 개선한 뒤 actuator가 있는 IsaacLab tracker에서 fall, torque, slip, contact, obstacle success를 별도로 평가해야 한다.</li>
+    <li><b>Warm10k의 범위</b>: joint-limit/FK proxy는 개선됐지만 collision/root drift는 개선되지 않았다. 다음 후보는 collision-shape 또는 sole-point terrain loss, obstacle-height-balanced sampling, generated-feedback multi-step rollout loss, root/heading composition 진단이다.</li>
   </ol>
-  <div class="callout bad"><b>학습 결정</b>: 2026-07-14에 시작했던 full-terrain closed-loop scratch30k run은 이 gate를 우선하기 위해 약 97 update에서 의도적으로 중단했다. 해당 run은 성능 결과가 아니라 initialization diagnostic으로만 보존한다. Generator gate를 통과하기 전에는 같은 30k production을 재개하지 않는다.</div>
+  <div class="callout bad"><b>학습 결정</b>: Stage-9 tracker production은 향후 offline-tracker warm start가 아니라 처음부터 closed-loop로 재학습한다. 다만 2026-07-14에 시작했던 full-terrain closed-loop scratch30k run은 generator gate를 우선하기 위해 약 97 update에서 의도적으로 중단했으며 initialization diagnostic일 뿐이다. 현재 실행 중인 tail pilot/full-scratch 관련 job도 완료 전 중간 상태라 이 문서에서 성능 결과로 주장하지 않는다. Stride-25 재평가와 collision/root-drift 개선 증거가 나오기 전까지 production scratch full 채택·재개 결정은 보류한다.</div>
 </section>
 
 <footer>

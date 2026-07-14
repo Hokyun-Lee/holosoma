@@ -246,22 +246,31 @@ under a random per-episode heading command — effectively a heading-steerable
 locomotion controller. Checkpoint:
 `logs/WholeBodyTracking/20260711_122501-*/model_12000.pt`.
 
+### Stage-5 tracker route comparison: `model_12000` vs `model_29999`
+
 A second run trained the same `exp:g1-29dof-wbt-gen` preset **from scratch**
 (`training.checkpoint: null`, PPO `resume: null`) for all 30,000 iterations.
 It completed without logged errors in about 18 h 40 min with 4096 environments,
-producing 61 PT checkpoints and 61 ONNX exports; final checkpoint:
-`logs/WholeBodyTracking/20260711_144420-*/model_29999.pt`. TensorBoard final
-scalars at iteration 29,999 versus the offline-9k + closed-loop-3k run endpoint
-at iteration 12,048 (latest persisted checkpoint: 12,000) were: average episode length **489.2 vs 492.7** (max 500),
-relative body position **0.918 vs 0.972**, global reference position **0.465
-vs 0.466**, global reference orientation **0.464 vs 0.477**, and body linear
-velocity **0.844 vs 0.848**. Thus the offline-pretrained route used 12k total
-PPO iterations (only 3k closed-loop adaptation) yet matched or exceeded the
-30k closed-loop-only run, suggesting better sample efficiency in this
-implementation. These are rolling training scalars rather than a common
-independent evaluation; both runs use seed 42, but their reset seed motions
-differ (walk4 vs largebox). It is therefore not a statistical superiority
-claim; matched multi-seed ablation remains necessary.
+producing 61 PT checkpoints and 61 ONNX exports. This is tracker/PPO scratch
+training; it is distinct from the generator scratch-retraining plan below.
+
+| tracker route | offline tracker + closed-loop fine-tune | closed-loop PPO from scratch |
+|---|---:|---:|
+| checkpoint | `20260711_122501-*/model_12000.pt` | `20260711_144420-*/model_29999.pt` |
+| total PPO iterations | 12,048 (9k offline + about 3k closed-loop) | 29,999 |
+| average episode length / 500 | **492.7** | 489.2 |
+| relative body position reward | **0.972** | 0.918 |
+| global reference position reward | **0.466** | 0.465 |
+| global reference orientation reward | **0.477** | 0.464 |
+| body linear velocity reward | **0.848** | 0.844 |
+
+The offline-pretrained route used only about 3k closed-loop adaptation
+iterations yet matched or exceeded the 30k closed-loop-only endpoint. This
+suggests better sample efficiency in the Stage-5 implementation, but these are
+rolling TensorBoard training scalars rather than a common independent
+evaluation. Both runs use seed 42, and their reset seed motions differ (walk4
+versus largebox); this is not a statistical superiority claim. A matched
+multi-seed ablation remains necessary.
 
 During `eval_agent.py`, generated motion does not advance through a clip list:
 the command stochastically replans a 25-frame window every 0.5 s. A uniform
@@ -1292,6 +1301,60 @@ pairwise signed contact gap, not a general mesh SDF; the report excludes robot
 self-collision and environment geoms other than ground/named terrain boxes.
 The terrain loader now rejects nonzero URDF origins and non-8-vertex/non-flat
 boxes instead of silently misplacing unsupported geometry.
+
+### Feasibility-objective generator retraining infrastructure (2026-07-14)
+
+The processed split contains far less terrain-conditioned data than its clip
+count initially suggests: terrain-scan windows are **89,075 / 455,499 =
+19.555%** in train and **728 / 7,048 = 10.329%** in validation. The previous
+fixed validation protocol used the first eight non-shuffled batches (2,048
+windows at batch size 256), all before the first terrain window at validation
+index 6,320; the sampled validation batch was also the first no-scan LAFAN
+batch. Therefore the old clean/noisy validation and sample figures remain
+flat/no-scan diagnostics, but they are terrain-blind and must not be cited as
+terrain-generalization evidence.
+
+The new `terrain_feasibility_4090` preset addresses that diagnostic gap with a
+deterministic weighted sampler whose expected probability mass is 50% terrain
+scan and 50% no-scan (it does not force an exact 50/50 split in every batch).
+Validation is stratified into separate `val_flat/*` and `val_terrain/*`
+streams while retaining the old aggregate aliases for compatibility. The
+optional W&B adapter is lazy and a no-op by default for old presets; this
+preset selects online logging of flattened metrics, resolved config, run
+identity/URL, summaries, and the final checkpoint artifact with SHA-256
+provenance.
+
+The feasibility objective is an **implementation choice**, because the paper
+does not publish these loss definitions or weights:
+
+| term | implementation in `terrain_feasibility_4090` |
+|---|---|
+| joint-limit loss | squared hinge outside exact G1 MJCF limits with a 0.005 rad inward margin; weight **10.0** |
+| FK consistency | differentiable exact-tree G1 FK versus the predicted 14-body head; weight **10.0** |
+| mean lower-body terrain penetration | mean squared active depth beyond a 0.005 m tolerance; weight **1.0** |
+| tail terrain penetration | mean square of the largest `ceil(1%)` active valid proxy depths; weight **0.1** |
+
+Terrain penetration uses the exact lower-body collision-sphere markers in the
+pinned G1 MJCF, in XML order: per side, one 0.01 m-radius
+`ankle_intermediate_1_link` sphere at local `[0, 0, -0.28]`, plus five 0.005
+m-radius ankle-roll sole spheres at `[0.12, +/-0.03, -0.03]`, `[0.14, 0,
+-0.03]`, and `[-0.05, +/-0.025, -0.03]`. This gives 12 proxies total (two
+lower-leg/ankle-intermediate and ten sole proxies). Differentiable FK places
+them from the root/joint branch, so the loss cannot be satisfied solely by
+moving the independent predicted body-position head. These are exact MJCF
+marker spheres, not complete knee/limb mesh SDFs; contact feasibility outside
+their coverage still requires the strict MuJoCo audit.
+
+Generator feasibility retraining follows a strict from-scratch principle:
+`resume=None` and `resume_weights_only=False`, rather than warm-starting the
+terrain checkpoint under a changed objective. The 200k full-scratch run is not
+reported as completed or feasible here. Any resulting checkpoint is held out
+of tracker training until it passes the long self-feedback rollout gate. The
+diagnostic matrix separately varies generated-feedback versus source-history
+conditioning and current-heading versus oracle-cycle heading so feedback
+accumulation is not confused with heading semantics. Full terrain
+closed-loop PPO remains paused until that long-rollout strict MuJoCo gate is
+passed.
 
 ## Known limitations / not yet verified
 

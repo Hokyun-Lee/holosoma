@@ -218,6 +218,7 @@ $PY src/holosoma/holosoma/eval_agent.py \
 
 <section id="s6">
   <h2><span class="num">6.</span>남은 한계 / 다음 단계</h2>
+  <div class="callout warn"><b>현재 상태 (2026-07-14)</b>: 위 <code>model_12000.pt</code>와 <code>model_29999.pt</code>는 Stage 5 평지 폐루프 결과로 보존한다. 새 terrain closed-loop tracker의 from-scratch 학습은 generator가 strict MuJoCo 장기 self-feedback feasibility gate를 통과할 때까지 보류 중이다. 먼저 terrain-feasibility objective로 generator를 from scratch 재학습하고, 관통·관절 범위·replan 연속성을 장기 rollout에서 검증한 뒤 tracker PPO를 다시 시작한다.</div>
   <ul>
     <li>per-body reference 방향·각속도 보상은 zero-weight (generator representation에 body 방향 없음 — 논문과 동일한 제약)</li>
     <li>조건 노이즈 σ=0.01은 구현 선택 — 논문은 노이즈 주입 사실만 명시, 크기는 비공개</li>
