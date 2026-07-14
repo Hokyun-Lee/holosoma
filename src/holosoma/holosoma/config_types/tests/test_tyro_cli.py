@@ -2,7 +2,10 @@ import tyro
 from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.config_values.experiment import AnnotatedExperimentConfig
 from holosoma.config_values.wbt.g1.experiment_gen import g1_29dof_wbt_gen
-from holosoma.config_values.wbt.g1.experiment_gen_terrain import g1_29dof_wbt_gen_terrain
+from holosoma.config_values.wbt.g1.experiment_gen_terrain import (
+    g1_29dof_wbt_gen_terrain,
+    g1_29dof_wbt_gen_terrain_scratch,
+)
 from holosoma.utils.tyro_utils import TYRO_CONIFG
 
 
@@ -21,9 +24,7 @@ def test_generated_motion_terrain_experiment_is_separate_from_flat():
     assert parsed.terrain.terrain_term.mesh_type == "trimesh"
     assert g1_29dof_wbt_gen.terrain.terrain_term.mesh_type == "plane"
     flat_motion_cfg = g1_29dof_wbt_gen.command.setup_terms["motion_command"].params["motion_config"]
-    terrain_motion_cfg = g1_29dof_wbt_gen_terrain.command.setup_terms["motion_command"].params[
-        "motion_config"
-    ]
+    terrain_motion_cfg = g1_29dof_wbt_gen_terrain.command.setup_terms["motion_command"].params["motion_config"]
     assert not flat_motion_cfg.use_sim_terrain_scan
     assert terrain_motion_cfg.use_sim_terrain_scan
     assert flat_motion_cfg.past_noise_std == 0.01
@@ -74,3 +75,33 @@ def test_generated_motion_heading_reward_cli_off_switch():
         config=TYRO_CONIFG,
     )
     assert parsed.reward.terms["motion_heading_alignment"].weight == 0.0
+
+
+def test_generated_motion_terrain_scratch_has_fresh_tracker_initialization() -> None:
+    parsed = tyro.cli(
+        AnnotatedExperimentConfig,
+        args=("exp:g1-29dof-wbt-gen-terrain-scratch",),
+        config=TYRO_CONIFG,
+    )
+
+    assert parsed is not g1_29dof_wbt_gen_terrain
+    assert parsed.training.name == "g1_29dof_wbt_gen_terrain_scratch_manager"
+    assert parsed.training.num_envs == 1024
+    assert parsed.training.checkpoint is None
+    assert parsed.algo.config.checkpoint_load_mode == "strict"
+    assert parsed.algo.config.load_optimizer is False
+    assert parsed.algo.config.num_learning_iterations == 30000
+    assert parsed.algo.config.save_interval == 500
+
+    motion_cfg = parsed.command.setup_terms["motion_command"].params["motion_config"]
+    assert motion_cfg.use_sim_terrain_scan is True
+    assert motion_cfg.require_fully_measured_history is True
+    assert motion_cfg.denoise_steps == 2
+    assert "terrain_height_scan" in parsed.observation.groups["actor_obs"].terms
+    assert parsed.reward.terms["motion_heading_alignment"].weight == 1.0
+    assert parsed.curriculum.setup_terms["terrain_curriculum"].params["enabled"] is True
+
+    # The scratch alias must not change the warm-start migration contract.
+    assert g1_29dof_wbt_gen_terrain.algo.config.checkpoint_load_mode == "expand_input"
+    assert g1_29dof_wbt_gen_terrain.algo.config.load_optimizer is True
+    assert g1_29dof_wbt_gen_terrain_scratch.training.checkpoint is None

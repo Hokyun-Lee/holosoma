@@ -50,4 +50,32 @@ g1_29dof_wbt_gen_terrain = replace(
 )
 
 
-__all__ = ["g1_29dof_wbt_gen_terrain"]
+# Tracker-from-scratch counterpart of the canonical terrain closed-loop
+# experiment.  The diffusion generator is still a pretrained frozen model;
+# "scratch" refers specifically to the PPO policy/value networks, observation
+# normalizers, and optimizer state.  Keeping this as a distinct preset prevents
+# a Stage-4/5 tracker checkpoint from being mistaken for fresh initialization.
+# The 1,024-env setting is an implementation choice for a single RTX 4090, not
+# a value reported by the paper.
+g1_29dof_wbt_gen_terrain_scratch = replace(
+    g1_29dof_wbt_gen_terrain,
+    training=replace(
+        g1_29dof_wbt_gen_terrain.training,
+        name="g1_29dof_wbt_gen_terrain_scratch_manager",
+        num_envs=1024,
+        checkpoint=None,
+    ),
+    algo=replace(
+        g1_29dof_wbt_gen_terrain.algo,
+        config=replace(
+            g1_29dof_wbt_gen_terrain.algo.config,
+            checkpoint_load_mode="strict",
+            load_optimizer=False,
+            num_learning_iterations=30000,
+            save_interval=500,
+        ),
+    ),
+)
+
+
+__all__ = ["g1_29dof_wbt_gen_terrain", "g1_29dof_wbt_gen_terrain_scratch"]

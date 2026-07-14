@@ -17,7 +17,10 @@ from holosoma.config_values.wbt.g1.experiment_ablation import (
     g1_29dof_wbt_ablation_f_no_heading_reward,
 )
 from holosoma.config_values.wbt.g1.experiment_gen import g1_29dof_wbt_gen
-from holosoma.config_values.wbt.g1.experiment_gen_terrain import g1_29dof_wbt_gen_terrain
+from holosoma.config_values.wbt.g1.experiment_gen_terrain import (
+    g1_29dof_wbt_gen_terrain,
+    g1_29dof_wbt_gen_terrain_scratch,
+)
 from typing_extensions import Annotated
 
 DEFAULTS = {
@@ -31,6 +34,7 @@ DEFAULTS = {
     "g1_29dof_wbt_fast_sac_w_object": g1_29dof_wbt_fast_sac_w_object,
     "g1_29dof_wbt_gen": g1_29dof_wbt_gen,
     "g1_29dof_wbt_gen_terrain": g1_29dof_wbt_gen_terrain,
+    "g1_29dof_wbt_gen_terrain_scratch": g1_29dof_wbt_gen_terrain_scratch,
     "g1_29dof_wbt_ablation_a_fixed_reference": g1_29dof_wbt_ablation_a_fixed_reference,
     "g1_29dof_wbt_ablation_b_generator_blind": g1_29dof_wbt_ablation_b_generator_blind,
     "g1_29dof_wbt_ablation_c_full_no_finetune": g1_29dof_wbt_ablation_c_full_no_finetune,
