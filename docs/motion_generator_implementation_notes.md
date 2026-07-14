@@ -1068,6 +1068,75 @@ PYTHONPATH=src/holosoma ~/.holosoma_deps/miniconda3/envs/hssim/bin/python \
   --output-prefix logs/terrain_evaluations/stage10/fine_tune_seed_replication_v1/report/stage10_fine_tune_seed_replication_v1
 ```
 
+### Initialization audit and full-terrain scratch ablation (2026-07-14)
+
+The Stage-9/10 D/E/F/contact policies are not tracker-from-scratch runs. They
+all load the Stage-5 `model_12000.pt` policy, optimizer, and empirical
+normalizers at actor/critic widths 154/286, then use append-only expansion to
+702/834. The earlier completed 30k scratch run is also the flat 154/286
+`exp:g1-29dof-wbt-gen` system without simulator terrain scan or five-frame
+history. It cannot establish full-terrain closed-loop scratch performance.
+
+This does not mean warm-starting is contrary to the paper. The current paper
+[§III-B/III-C](https://arxiv.org/html/2604.17335) explicitly pre-trains the
+tracker on offline motion and then fine-tunes the pretrained tracker with a
+frozen generator. The actual reproduction gap is that the paper's tracker
+pretraining observation already includes five-frame proprioception and terrain
+height scans, whereas our Stage-4 tracker did not. The more faithful correction
+is therefore: random-init the final observation architecture for offline
+multi-motion tracker pretraining, then run generator-in-the-loop fine-tuning.
+
+For the user-requested direct scratch comparison, commit `f1dfe6c` adds
+`exp:g1-29dof-wbt-gen-terrain-scratch`. Here `scratch` means new PPO
+actor/critic weights, AdamW state, observation normalizers, and curriculum
+state; the robust+FK diffusion generator remains pretrained and frozen. The
+preset fixes `training.checkpoint=None`, `checkpoint_load_mode=strict`,
+`load_optimizer=False`, 1,024 environments, 30,000 updates, and save interval
+500. Environment count and checkpoint cadence are implementation choices.
+
+The 64-env, two-update Isaac Sim gate at
+`logs/WholeBodyTracking/20260714_031002-g1_29dof_wbt_gen_terrain_scratch_manager-locomotion/`
+exited zero. Its saved config has a null tracker checkpoint, and its
+`model_00001.pt` has actor/critic first layers `(512,702)`/`(512,834)`, fresh
+702/834 normalizers, 98 recursive tensors with zero non-finite elements, and
+SHA-256
+`c727aaa7dacc4c91b6e519a56db7a722af3d57d7f4c3f293cf211b72e43edc35`.
+The log contains no tracker/optimizer load and reports frozen generator step
+10,000, trainable generator parameters zero, simulator scan, measured-history
+guard, 25-step replanning, and two-step denoising. `model_00000` is saved after
+the first PPO update rather than before optimization.
+
+The 30k production run started at 2026-07-14 12:12 KST but was intentionally
+stopped about three minutes later to prioritize the generator terrain-feasibility
+gate:
+
+- [W&B run `jumqrb99`](https://wandb.ai/hkleetony-dyros/WholeBodyTracking/runs/jumqrb99)
+- local run `logs/WholeBodyTracking/20260714_031210-g1_29dof_wbt_gen_terrain_scratch_manager-stage9_terrain_closedloop_scratch30k_v1/`
+- training seed 42, 1,024 env, 30,000 planned updates, 24 steps/env/update, or
+  737,280,000 planned environment transitions if completed
+- canonical undesired-contact reward weight `-0.1`; the `-1.0` pilot is not
+  mixed into this initialization comparison
+- generator SHA-256
+  `7c63764b771ec43fb5d463d77b6860eee8e46f1db5c0b196554f98cc527ed5fa`
+  and reset motion SHA-256
+  `2ba2364641f7ba742fcb50382019e6340b0c68a92f79965b4839a68db3991a86`
+
+TensorBoard contains steps 0--96, i.e. 97 updates and 2,383,872 samples. W&B
+received through step 95 and records state `crashed`, which reflects the manual
+interrupt rather than a simulator exception. Save interval 500 had not been
+reached, so only `model_00000.pt` exists and it is the checkpoint after the
+first PPO update. This run is an initialization diagnostic, not a training or
+performance result, and should not be resumed until the frozen generator passes
+the terrain-feasibility gate below.
+
+This run is a direct closed-loop scratch **initialization diagnostic**, not a
+replacement for the paper's offline-pretrain-then-fine-tune result. Its planned
+30k budget would have had one quarter of the transitions of the prior 4,096-env
+flat scratch30k run, but the actual stopped run contains only 2,383,872 samples;
+iteration count alone is not a sample-efficiency comparison. The walk4 reset seed preserves
+comparability with corrected warm-start runs but belongs to the generator
+validation split; held-out reset-seed evaluation remains required.
+
 ### Stage-9 contact-penalty pilot
 
 As an exploratory follow-up to the still-open combined fall/collision
@@ -1143,6 +1212,86 @@ identities across evaluation seeds. This new 27-source/2,700-episode report is
 the three-policy, three-fine-tune-seed, three-evaluation-seed common-L1 grid and
 reuses nine old sources. Their episode counts must not be added as independent
 samples.
+
+## Generator terrain-feasibility gate (2026-07-14)
+
+Before resuming long tracker training, the final robust+FK generator was audited
+directly on its matching OmniRetarget box geometry. The new
+`data_conversion/evaluate_motion_feasibility_mj.py` loads generated qpos into
+the 29-DoF G1 MJCF, names the terrain geoms added by `view_motion_mj.py`, keeps
+MuJoCo contacts active, and calls `mj_forward` at every frame. It reports finite
+state/quaternion checks, MJCF joint-range violations, finite-difference motion,
+generated replan-boundary steps, predicted 14-body head versus MuJoCo FK, and
+signed robot-environment collision gap. The reference row uses aligned periodic
+samples and is not called a replan boundary. `--require-kinematic-gate` turns
+the observational report into a non-zero strict gate. A terrain URDF and raw
+motion are required for PASS by default; raw joint names and reconstructed qpos
+must match the MJCF order/export exactly. Optional W&B logging uploads the
+scalar tree and provenance artifact.
+
+The audited rollout used
+`terrain_robust_fk_4090/checkpoints/final.pt`, `omni_climb_09_z1_0` start 100,
+seed 123, deterministic 2-step DDIM, 20 self-feedback cycles, stride 12, and the
+matching `climb_09/multi_boxes_z_scale_1.0.urdf`. It produced 242 frames at 50
+Hz. This is an offline generator self-feedback rollout, not measured robot-state
+feedback. Gate thresholds are implementation choices, not paper values: 5 mm
+collision-gap tolerance, 5 cm deep-penetration severity diagnostic, 0.001 rad
+joint-range tolerance, 0.001 quaternion-norm tolerance, 2 cm maximum
+body-head/FK error, and continuity maxima of 5 m/s root translation, 20 rad/s
+root rotation, 20 rad/s joint speed, 500 rad/s² joint acceleration, and 0.5 rad
+frame joint-L2 step. The gate uses 5 mm, not 5 cm. It also requires at least
+one parsed terrain box and the exact canonical 14-body raw-head order, so an
+empty/unsupported URDF or partial FK head cannot silently pass.
+
+Measured result: **fail**.
+
+| generated metric | value |
+|---|---:|
+| max terrain collision depth | 0.260264 m |
+| frames deeper than 5 mm collision gate | 40.9091% |
+| frames deeper than 5 cm | 35.9504% |
+| non-foot frames deeper than 5 mm | 36.3636% |
+| right ankle-roll max / any-joint violating-frame rate | 0.021532 rad / 30.1653% |
+| all joint-value violation rate | 1.04018% |
+| quaternion max norm error | 8.62e-8 |
+| body-head/FK mean / p95 / max | 5.117 / 14.535 / 32.649 mm |
+| generated replan-boundary joint L2 max | 0.291276 rad |
+| continuity absolute limits | pass |
+
+The aligned source segment has no joint-range violation, but its maximum box
+collision depth is 0.080984 m, mainly a right-hand contact. It is therefore not
+a collision-perfect gold standard. Generated max penetration is nevertheless
+3.214 times deeper, and the generated worst contacts are right foot at frame
+104 followed by left-knee contacts around frames 117--123. Contact-rate deltas
+must not be interpreted alone because climbing source hand contacts may be
+intentional.
+
+The pre-existing fixed-history flat/0.30/0.60 m sensitivity test was also run
+with both strict flags. Body-origin penetration max/rate is
+`0/0%`, `0.252639 m/3.714%`, and `0.361918 m/9.714%`; foot height and knee
+flexion decrease as obstacle height rises. It exits one on the non-increasing
+penetration requirement. A meaningful condition response is therefore not a
+feasibility pass.
+
+Local artifacts are under
+`logs/motion_gen/terrain_feasibility/{climb09_robust_fk_2step,synthetic_height_stress}/`.
+The finished [W&B run `1gzs0tq5`](https://wandb.ai/hkleetony-dyros/HoloSomaMotionGenerator/runs/1gzs0tq5)
+contains a 12-file artifact: report, qpos/raw, full/slow GIFs with verified
+40/400 ms frame timing, robot XML, terrain URDF+OBJ, evaluator/viewer source,
+and synthetic stress JSON/NPZ. The schema-v3 report hashes 13 local provenance files and
+stores the exact checkpoint/clip/seed/steps/cycles/stride metadata. The 278 MB
+checkpoint and licensed reference NPZ remain hash-only rather than being
+uploaded. The exact generation,
+strict-audit, headless GIF, and interactive slow-motion commands are in
+`docs/motion_generator_feasibility_ko.html`. The viewer remains visualization
+only: it directly sets qpos and disables contacts/constraints for the
+generated/source overlay. The evaluator uses a separate single-robot scene with contacts
+active. Neither calls `mj_step` or evaluates actuators, torque, balance,
+friction, or dynamic tracker feasibility. Collision depth here is MuJoCo's
+pairwise signed contact gap, not a general mesh SDF; the report excludes robot
+self-collision and environment geoms other than ground/named terrain boxes.
+The terrain loader now rejects nonzero URDF origins and non-8-vertex/non-flat
+boxes instead of silently misplacing unsupported geometry.
 
 ## Known limitations / not yet verified
 

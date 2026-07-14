@@ -202,12 +202,12 @@ $R check src/holosoma/holosoma/motion_gen/{configs.py,condition_noise.py,kinemat
   <ul>
     <li>Clean accuracy가 약 4 mm 나빠졌으므로 condition-noise 크기와 FK weight는 multi-seed ablation이 필요하다.</li>
     <li>0.30/0.60 m obstacle에서 발 높이·무릎 굴곡이 증가하지 않고 body-origin penetration proxy가 커진다. Height scan conditioning만으로는 원하는 climbing policy가 형성되지 않았다.</li>
-    <li>현재 검증은 generator 단일 0.5초 window다. 실제 contact/collision과 obstacle crossing은 Stage 9 terrain closed-loop PPO와 Stage 10 공통 simulator 평가에서 측정해야 한다.</li>
-    <li>Stage 9에서는 이 robust+FK generator를 frozen으로 두고 tracker만 업데이트하되, 실측 state/history/terrain scan과 2-step replanning 경로가 유지되는지 다시 확인한다.</li>
+    <li>후속 <a href="motion_generator_feasibility_ko.html">terrain feasibility gate</a>에서 실제 climb_09 장기 rollout을 MuJoCo collision shape로 검사했고 최대 0.260 m 침투와 joint-limit 위반으로 실패했다. Stage 8의 <code>meaningful_physical_response</code>는 feasibility pass가 아니다.</li>
+    <li>Generator의 terrain gate를 개선·통과한 뒤에만 Stage 9의 actuator/contact를 포함한 dynamic tracker 평가를 재개한다.</li>
   </ul>
 </section>
 
-<footer>HoloSoma motion_gen · Stage 8 진행 문서 · 이전: <a href="motion_generator_stage7_ko.html">Stage 7 tracker 개선</a></footer>
+<footer>HoloSoma motion_gen · Stage 8 진행 문서 · 이전: <a href="motion_generator_stage7_ko.html">Stage 7 tracker 개선</a> · 후속: <a href="motion_generator_feasibility_ko.html">Terrain feasibility gate</a></footer>
 </main>
 </body>
 </html>

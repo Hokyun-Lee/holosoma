@@ -188,14 +188,14 @@ cd src/holosoma_retargeting/holosoma_retargeting
     <tr><th>Val subset</th><th>지표</th><th>2차 (zero-scan)</th><th><b>3차 (real scan)</b></th></tr>
     <tr><td rowspan="2">terrain val (climb_09 ×5 z-scale + scene_04)</td>
         <td>body MPJPE</td><td>0.0432 m</td><td>0.0457 m (동급)</td></tr>
-    <tr><td><b>scan penetration</b> (실제 지형 침투)</td><td>0.21 mm</td><td><b>0.06 mm (3.5× 감소)</b></td></tr>
+    <tr><td><b>body-origin scan-penetration proxy</b></td><td>0.21 mm</td><td><b>0.06 mm (3.5× 감소)</b></td></tr>
     <tr><td>flat val (walk4 + run1)</td><td>body MPJPE</td><td>0.0566 m</td><td>0.0546 m (동급)</td></tr>
   </table></div>
   <h3>해석 (정직하게)</h3>
   <ul>
-    <li><b>물리적 타당성 개선</b>: 실제 지형 아래로 body가 침투하는 정도가 3.5배 감소 — scan 조건 + scan 기반 penetration loss의 효과.</li>
+    <li><b>학습 proxy 개선</b>: sampled body/link 원점의 scan-penetration proxy가 3.5배 감소했다. Collision shape 전체의 물리적 타당성이나 feasibility를 뜻하지 않는다.</li>
     <li><b>MPJPE는 노이즈 수준에서 동일</b>: 0.5초 horizon에서는 과거 2 frame이 이미 지형 상태(발 높이 등)를 강하게 함의하므로, 이 평가 설정에서는 scan 조건의 추가 정보가 크지 않다. terrain 조건의 진짜 효용은 <b>미지의 지형 배치에서 heading 명령으로 조향할 때</b>(receding-horizon 배포)로 예상되며, 이는 tracker 통합 후 검증 가능.</li>
-    <li><b>정성 검증</b>: climb_09 rollout에서 생성 로봇이 scan을 따라 박스에 접근해 올라섬 (MuJoCo 렌더로 확인, <code>--terrain-urdf</code> scan 재샘플링 경로).</li>
+    <li><b>당시 정성 재생의 범위</b>: climb_09 rollout이 scan을 따라 박스에 접근하는 장면을 MuJoCo에서 확인했지만, 이 viewer는 qpos를 강제 지정하고 contact를 끈 상태라 “올라섬”이나 feasibility의 증거가 아니다. 후속 <a href="motion_generator_feasibility_ko.html">collision-shape gate</a>에서 최신 robust+FK rollout은 최대 0.260 m 침투로 실패했다.</li>
   </ul>
 </section>
 
@@ -205,12 +205,12 @@ cd src/holosoma_retargeting/holosoma_retargeting
     <li>chair scene의 <b>의자 오브젝트는 scan에 없음</b> — scan은 고정 stage/platform 박스만 포함 (움직이는 오브젝트 조건은 별도 문제)</li>
     <li>Take 10클립은 terrain 모델 미제공 → zero-scan 유지</li>
     <li>scan grid는 anchor 시점 고정(0.5초 내 지형 변화는 grid 범위로 커버) — 더 긴 horizon엔 부족할 수 있음</li>
-    <li>penetration loss는 body 원점 기준(표면 형상 미반영) — 보수적 근사</li>
+    <li>penetration loss는 body 원점만 검사해 collision shape 표면 침투를 놓칠 수 있다. 후속 collision-shape gate와 함께 해석해야 한다.</li>
   </ul>
 </section>
 
 <footer>
-  HoloSoma motion_gen · 3차 terrain conditioning · 2026-07-11 · 이전 단계: <a href="motion_generator_scaleup_ko.html">2차 데이터 확장</a> · <a href="motion_generator_ko.html">1차 구현</a>
+  HoloSoma motion_gen · 3차 terrain conditioning · 2026-07-11 · 이전 단계: <a href="motion_generator_scaleup_ko.html">2차 데이터 확장</a> · <a href="motion_generator_ko.html">1차 구현</a> · 후속 검증: <a href="motion_generator_feasibility_ko.html">Terrain feasibility gate</a>
 </footer>
 
 </div>

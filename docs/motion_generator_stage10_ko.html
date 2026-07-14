@@ -60,6 +60,7 @@ footer { padding-top:30px; border-top:1px solid var(--border); color:var(--muted
     </ul>
   </div>
   <div class="callout ok"><b>평가 완료의 의미</b>: 체크박스는 실행·산출물·quota 검증이 완료됐다는 뜻이지 모든 ablation 가설이 지지됐다는 뜻이 아니다. D/E fair의 세 fine-tune seed raw pool은 E <code>60.89%</code> 대 D <code>57.56%</code>였지만 training-seed-matched delta는 <code>+10.33/−3.33/+3.00%p</code>로 부호가 섞였다. 따라서 tracker terrain observation ablation의 <b>재현 가능한 실행</b>은 완료했지만 scan의 편익이나 해로움을 입증하지 못했다. 이 <code>n=3</code>은 같은 Stage-5 BASE·optimizer·frozen generator를 공유한 downstream PPO fine-tune 반복이며 end-to-end 독립 pipeline seed가 아니다. Tall hurdle과 unseen rough도 여전히 약하다.</div>
+  <div class="callout warn"><b>초기화 범위 정정</b>: A–F와 D/E fine-tune-seed grid는 모두 154/286 Stage-5 BASE를 702/834로 확장한 warm-start ablation이다. 실행·평가 결과는 유효하지만 최종 terrain/history tracker의 from-scratch 결과가 아니다. Direct 702/834 closed-loop scratch <code>jumqrb99</code>는 generator feasibility 우선 검증을 위해 97 update에서 의도적으로 중단했으며 성능 결과가 아니다. 논문 main pipeline에 더 충실한 비교는 최종 observation 구조의 offline pretraining부터 다시 시작해야 한다.</div>
 </section>
 
 <section>
