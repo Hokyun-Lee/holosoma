@@ -18,6 +18,7 @@ Usage (from the repo root, hssim env):
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,7 +29,9 @@ from loguru import logger
 
 from holosoma.motion_gen.dataset import load_wbt_motion
 from holosoma.motion_gen.export import export_generated_qpos_npz, export_generated_raw_npz
+from holosoma.motion_gen.features import quat_yaw
 from holosoma.motion_gen.sampling import MotionGenerator, MotionGeneratorInput
+from holosoma.motion_gen.terrain import BoxTerrain
 from holosoma.motion_gen.visualization import plot_long_rollout, plot_window_comparison
 
 
@@ -46,15 +49,37 @@ class Args:
     seed: int = 0
     guidance_scale: float | None = None
     num_cycles: int = 16
-    replan_stride: int = 12
+    replan_stride: int | None = None
+    """Frames consumed per generator query. None uses the full checkpoint horizon;
+    shorter explicit values are generator-only diagnostics."""
     heading: tuple[float, float] | None = None
-    """Fixed world-frame target heading; None keeps the current direction
-    (window mode uses the GT heading when None)."""
+    """Fixed world-frame target heading. In rollout mode, None captures the
+    initial anchor facing once; window mode uses the GT heading when None."""
     terrain_urdf: str | None = None
     """Phase B: multi-box terrain URDF for scan conditioning. Window mode of a
     scan-enabled checkpoint uses the clip's stored scans automatically; this
     flag is for rollout mode, where scans must follow the generated root."""
     out_dir: str | None = None
+
+
+def _resolve_replan_stride(requested: int | None, future_frames: int) -> int:
+    """Resolve the CLI default before naming or writing rollout artifacts."""
+    if future_frames < 1:
+        raise ValueError(f"future_frames must be positive, got {future_frames}")
+    resolved = future_frames if requested is None else requested
+    if resolved < 1 or resolved > future_frames:
+        raise ValueError(f"replan_stride must be in [1, {future_frames}] or None, got {requested}")
+    return resolved
+
+
+def _rollout_stem(
+    clip_name: str,
+    *,
+    start: int,
+    num_cycles: int,
+    resolved_stride: int,
+) -> str:
+    return f"{clip_name}_s{start}_rollout{num_cycles}x{resolved_stride}"
 
 
 @torch.no_grad()
@@ -86,47 +111,110 @@ def main(args: Args) -> None:
             logger.info("Conditioning on the clip's stored terrain scan (anchor frame)")
         out = gen.generate(
             MotionGeneratorInput(past_motion=past, target_heading=heading, terrain_height=terrain),
-            num_steps=args.num_steps, deterministic=args.deterministic,
-            seed=args.seed, guidance_scale=args.guidance_scale,
+            num_steps=args.num_steps,
+            deterministic=args.deterministic,
+            seed=args.seed,
+            guidance_scale=args.guidance_scale,
         )
         stem = f"{clip.name}_s{args.start}_win"
         plot_window_comparison(out.features[0].cpu(), gt_future, gen.layout, out_dir / f"{stem}.png")
         export_generated_raw_npz(
-            out.features[0].cpu(), gen.layout, cfg.data.fps, out_dir / f"{stem}_gen_raw.npz",
+            out.features[0].cpu(),
+            gen.layout,
+            cfg.data.fps,
+            out_dir / f"{stem}_gen_raw.npz",
             gt_features=gt_future,
         )
         export_generated_qpos_npz(out.features[0].cpu(), gen.layout, cfg.data.fps, out_dir / f"{stem}_gen_qpos.npz")
     elif args.mode == "rollout":
+        resolved_stride = _resolve_replan_stride(args.replan_stride, H)
+        rollout_heading = heading
+        heading_mode = "explicit_fixed_world"
+        if rollout_heading is None:
+            initial_yaw = quat_yaw(past[:, -1, gen.layout.root_quat_slice])
+            rollout_heading = torch.stack(
+                (torch.cos(initial_yaw), torch.sin(initial_yaw)),
+                dim=-1,
+            )
+            heading_mode = "initial_facing_fixed_world"
         terrain_fn = None
         if args.terrain_urdf is not None:
             if not use_scan:
                 raise ValueError("--terrain-urdf given but the checkpoint was trained without terrain scans")
-            from holosoma.motion_gen.features import quat_yaw
-            from holosoma.motion_gen.terrain import BoxTerrain
-
             terrain = BoxTerrain.from_urdf(args.terrain_urdf)
             grid = cfg.data.scan_grid
 
             def terrain_fn(past_win: torch.Tensor) -> torch.Tensor:
                 anchor = past_win[:, -1]
                 scans = [
-                    terrain.sample_scan(
-                        anchor[b, :2].cpu().numpy(), float(quat_yaw(anchor[b, 3:7])), grid
-                    )
+                    terrain.sample_scan(anchor[b, :2].cpu().numpy(), float(quat_yaw(anchor[b, 3:7])), grid)
                     for b in range(anchor.shape[0])
                 ]
                 return torch.from_numpy(np.stack(scans)).float().to(gen.device)
 
         traj = gen.receding_horizon(
-            past[0], num_cycles=args.num_cycles, replan_stride=args.replan_stride,
-            target_heading=heading[0] if heading is not None else None,
-            num_steps=args.num_steps, deterministic=args.deterministic, seed=args.seed,
+            past[0],
+            num_cycles=args.num_cycles,
+            replan_stride=resolved_stride,
+            target_heading=rollout_heading[0],
+            num_steps=args.num_steps,
+            deterministic=args.deterministic,
+            seed=args.seed,
             terrain_fn=terrain_fn,
         ).cpu()
-        stem = f"{clip.name}_s{args.start}_rollout{args.num_cycles}x{args.replan_stride}"
+        stem = _rollout_stem(
+            clip.name,
+            start=args.start,
+            num_cycles=args.num_cycles,
+            resolved_stride=resolved_stride,
+        )
         plot_long_rollout(traj, gen.layout, out_dir / f"{stem}.png")
-        export_generated_raw_npz(traj, gen.layout, cfg.data.fps, out_dir / f"{stem}_gen_raw.npz")
-        export_generated_qpos_npz(traj, gen.layout, cfg.data.fps, out_dir / f"{stem}_gen_qpos.npz")
+        raw_path = export_generated_raw_npz(
+            traj,
+            gen.layout,
+            cfg.data.fps,
+            out_dir / f"{stem}_gen_raw.npz",
+        )
+        qpos_path = export_generated_qpos_npz(
+            traj,
+            gen.layout,
+            cfg.data.fps,
+            out_dir / f"{stem}_gen_qpos.npz",
+        )
+        metadata_path = out_dir / f"{stem}_metadata.json"
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "kind": "motion-generator-receding-horizon-sample",
+                    "checkpoint": str(Path(args.ckpt).expanduser().resolve()),
+                    "clip": str(clip_path.expanduser().resolve()),
+                    "start_frame": args.start,
+                    "past_frames": P,
+                    "future_frames": H,
+                    "fps": cfg.data.fps,
+                    "num_cycles": args.num_cycles,
+                    "requested_replan_stride": args.replan_stride,
+                    "resolved_replan_stride": resolved_stride,
+                    "full_horizon_stride": resolved_stride == H,
+                    "trajectory_frames": int(traj.shape[0]),
+                    "num_steps": args.num_steps,
+                    "deterministic": args.deterministic,
+                    "seed": args.seed,
+                    "guidance_scale": args.guidance_scale,
+                    "requested_target_heading_world_xy": (list(args.heading) if args.heading is not None else None),
+                    "resolved_target_heading_world_xy": [float(value) for value in rollout_heading[0].detach().cpu()],
+                    "heading_mode": heading_mode,
+                    "terrain_urdf": args.terrain_urdf,
+                    "files": {
+                        "raw": str(raw_path.resolve()),
+                        "qpos": str(qpos_path.resolve()),
+                    },
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
         logger.info(
             "To build a full WBT-schema npz (all bodies + velocities) run, from "
             "src/holosoma_retargeting/holosoma_retargeting (hsretargeting env):\n"
@@ -134,6 +222,7 @@ def main(args: Args) -> None:
             f"--input-file {(out_dir / (stem + '_gen_qpos.npz')).resolve()} "
             f"--output-name {(out_dir / (stem + '_gen_mj.npz')).resolve()} --output-fps {int(cfg.data.fps)}"
         )
+        logger.info(f"Resolved replan stride: {resolved_stride}/{H} frames; metadata: {metadata_path}")
     else:
         raise ValueError(f"Unknown mode {args.mode}")
     logger.info(f"Outputs in {out_dir}")

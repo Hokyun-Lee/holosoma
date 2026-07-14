@@ -117,8 +117,7 @@ def test_generator_inference_and_determinism(trained):
     past = trained.val_dataset[0]["past"].unsqueeze(0)
 
     outs = [
-        gen.generate(MotionGeneratorInput(past_motion=past), num_steps=3, deterministic=True, seed=7)
-        for _ in range(2)
+        gen.generate(MotionGeneratorInput(past_motion=past), num_steps=3, deterministic=True, seed=7) for _ in range(2)
     ]
     H = gen.cfg.data.future_frames
     assert outs[0].root_pos.shape == (1, H, 3)
@@ -131,14 +130,10 @@ def test_generator_inference_and_determinism(trained):
 
 
 def test_per_sample_ddim_is_invariant_to_batch_order_and_subset(trained):
-    gen = MotionGenerator.from_checkpoint(
-        str(trained.out_dir / "checkpoints" / "final.pt"), device="cpu"
-    )
+    gen = MotionGenerator.from_checkpoint(str(trained.out_dir / "checkpoints" / "final.pt"), device="cpu")
     past = torch.stack([trained.val_dataset[index]["past"] for index in range(3)])
     heading = torch.tensor([[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]])
-    terrain = torch.stack(
-        [trained.val_dataset[index]["terrain"] for index in range(3)]
-    )
+    terrain = torch.stack([trained.val_dataset[index]["terrain"] for index in range(3)])
     seeds = torch.tensor([101, 202, 303], dtype=torch.long)
     full = gen.generate(
         MotionGeneratorInput(
@@ -165,9 +160,7 @@ def test_per_sample_ddim_is_invariant_to_batch_order_and_subset(trained):
 
 
 def test_per_sample_ddim_validation(trained):
-    gen = MotionGenerator.from_checkpoint(
-        str(trained.out_dir / "checkpoints" / "final.pt"), device="cpu"
-    )
+    gen = MotionGenerator.from_checkpoint(str(trained.out_dir / "checkpoints" / "final.pt"), device="cpu")
     past = trained.val_dataset[0]["past"].unsqueeze(0)
     inp = MotionGeneratorInput(past_motion=past)
     with pytest.raises(ValueError, match="deterministic=True"):
@@ -199,6 +192,29 @@ def test_receding_horizon_shapes(trained):
     assert torch.allclose(quats.norm(dim=-1), torch.ones(15), atol=1e-4)
 
 
+def test_receding_horizon_default_consumes_full_checkpoint_horizon(trained):
+    gen = MotionGenerator.from_checkpoint(str(trained.out_dir / "checkpoints" / "final.pt"), device="cpu")
+    past = trained.val_dataset[0]["past"]
+    traj = gen.receding_horizon(
+        past,
+        num_cycles=2,
+        num_steps=2,
+        deterministic=True,
+    )
+    expected = len(past) + 2 * gen.cfg.data.future_frames
+    assert traj.shape == (expected, gen.layout.dim)
+
+    with pytest.raises(ValueError, match="replan_stride must be"):
+        gen.receding_horizon(past, num_cycles=1, replan_stride=0, num_steps=2)
+    with pytest.raises(ValueError, match="replan_stride must be"):
+        gen.receding_horizon(
+            past,
+            num_cycles=1,
+            replan_stride=gen.cfg.data.future_frames + 1,
+            num_steps=2,
+        )
+
+
 def test_generate_with_target_heading(trained):
     """Regression: world-frame heading rotation used to crash on shape mismatch."""
     gen = MotionGenerator.from_checkpoint(str(trained.out_dir / "checkpoints" / "final.pt"), device="cpu")
@@ -206,7 +222,8 @@ def test_generate_with_target_heading(trained):
     heading = torch.tensor([[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]])
     out = gen.generate(
         MotionGeneratorInput(past_motion=past, target_heading=heading),
-        num_steps=2, deterministic=True,
+        num_steps=2,
+        deterministic=True,
     )
     assert out.features.shape == (3, gen.cfg.data.future_frames, gen.layout.dim)
     assert torch.isfinite(out.features).all()
@@ -216,13 +233,19 @@ def test_receding_horizon_with_heading_and_guidance(trained):
     gen = MotionGenerator.from_checkpoint(str(trained.out_dir / "checkpoints" / "final.pt"), device="cpu")
     past = trained.val_dataset[0]["past"]
     traj = gen.receding_horizon(
-        past, num_cycles=2, replan_stride=4, num_steps=2,
-        target_heading=torch.tensor([0.0, 1.0]), deterministic=True,
+        past,
+        num_cycles=2,
+        replan_stride=4,
+        num_steps=2,
+        target_heading=torch.tensor([0.0, 1.0]),
+        deterministic=True,
     )
     assert traj.shape == (2 + 2 * 4, gen.layout.dim)
     out = gen.generate(
         MotionGeneratorInput(past_motion=past.unsqueeze(0)),
-        num_steps=2, deterministic=True, guidance_scale=2.0,
+        num_steps=2,
+        deterministic=True,
+        guidance_scale=2.0,
     )
     assert torch.isfinite(out.features).all()
 

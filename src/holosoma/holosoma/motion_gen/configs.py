@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 from holosoma.motion_gen.losses import LossWeights
 from holosoma.motion_gen.terrain import ScanGrid
+from holosoma.motion_gen.wandb_logging import WandbLoggingConfig
 
 
 @dataclass
@@ -42,6 +43,15 @@ class DataCfg:
     """Optional cap on the number of val clips (debug presets)."""
     overfit: bool = False
     """If True, validate on the train split (single-motion overfit checks)."""
+    terrain_train_fraction: float | None = None
+    """Optional total sampling probability assigned to scanned-terrain windows.
+
+    ``None`` preserves the original window-uniform loader.  Non-``None``
+    values use a weighted sampler that is uniform inside the scanned-terrain
+    and no-scan strata.  The paper does not publish a balancing ratio.
+    """
+    stratified_validation: bool = False
+    """Report deterministic flat/no-scan and scanned-terrain validation separately."""
 
 
 @dataclass
@@ -109,12 +119,19 @@ class TrainConfig:
     diffusion: DiffusionCfg = field(default_factory=DiffusionCfg)
     loss: LossWeights = field(default_factory=LossWeights)
     condition_noise: ConditionNoiseCfg = field(default_factory=ConditionNoiseCfg)
+    wandb: WandbLoggingConfig = field(default_factory=WandbLoggingConfig)
     fk_calibration_tolerance_m: float | None = 1.0e-3
     """Maximum GT-vs-FK body error accepted when FK loss is enabled.
 
     This fail-fast threshold is an implementation choice. ``None`` disables
     the dataset/MJCF calibration check (intended only for synthetic tests).
     """
+    joint_limit_margin_rad: float = 0.0
+    """Soft joint-limit safety margin; an implementation choice in radians."""
+    terrain_penetration_tolerance_m: float = 0.0
+    """Allowed lower-body proxy contact depth before loss, in metres."""
+    terrain_penetration_tail_fraction: float = 0.01
+    """Valid lower-body proxy fraction optimized by the optional tail loss."""
 
     batch_size: int = 256
     lr: float = 1e-4
@@ -281,6 +298,48 @@ def terrain_robust_fk_4090() -> TrainConfig:
     return cfg
 
 
+def terrain_feasibility_4090() -> TrainConfig:
+    """Full-scratch terrain-feasibility training on one RTX 4090.
+
+    This preset fixes the terrain-blind validation path and adds explicit
+    joint-limit and pinned-MJCF lower-body collision-proxy losses.  Every loss
+    weight, margin, tolerance, and the 50/50 sampler are implementation choices
+    because arXiv:2604.17335 does not publish them.  The name describes the
+    training objective; feasibility still has to pass the MuJoCo gate.
+    """
+    cfg = terrain_robust_fk_4090()
+    cfg.run_name = "terrain_feasibility_4090"
+    cfg.resume = None
+    cfg.resume_weights_only = False
+    cfg.max_steps = 200_000
+    cfg.ckpt_interval = 25_000
+    cfg.val_interval = 2_000
+    cfg.sample_interval = 10_000
+    cfg.val_batches = 32
+    cfg.val_sample_steps = 2
+    cfg.data.terrain_train_fraction = 0.5
+    cfg.data.stratified_validation = True
+    cfg.loss.joint_limit = 10.0
+    cfg.loss.lower_body_terrain_penetration = 1.0
+    # Implementation choice: the raw 1% tail term is roughly two orders of
+    # magnitude larger than the mean collision term on the legacy checkpoint.
+    # A 0.1 weight keeps it influential without dominating reconstruction.
+    cfg.loss.lower_body_terrain_tail = 0.1
+    cfg.loss.fk_consistency = 10.0
+    cfg.joint_limit_margin_rad = 0.005
+    cfg.terrain_penetration_tolerance_m = 0.005
+    cfg.terrain_penetration_tail_fraction = 0.01
+    cfg.wandb = WandbLoggingConfig(
+        mode="online",
+        entity="hkleetony-dyros",
+        project="HoloSomaMotionGenerator",
+        group="terrain_feasibility_retrain",
+        tags=["generator", "terrain", "feasibility", "scratch"],
+        log_final_checkpoint_artifact=True,
+    )
+    return cfg
+
+
 PRESETS = {
     "smoke": smoke,
     "debug": debug,
@@ -289,4 +348,5 @@ PRESETS = {
     "terrain_4090": terrain_4090,
     "terrain_robust_4090": terrain_robust_4090,
     "terrain_robust_fk_4090": terrain_robust_fk_4090,
+    "terrain_feasibility_4090": terrain_feasibility_4090,
 }

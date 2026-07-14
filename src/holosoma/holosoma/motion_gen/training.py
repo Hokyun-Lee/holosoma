@@ -18,12 +18,13 @@ import json
 import math
 import random
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
 import yaml
 from loguru import logger
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
 from torch.utils.tensorboard import SummaryWriter
 
 from holosoma.motion_gen.condition_noise import (
@@ -41,8 +42,42 @@ from holosoma.motion_gen.losses import compute_losses
 from holosoma.motion_gen.model import MotionDiffusionTransformer
 from holosoma.motion_gen.normalization import FeatureNormalizer, compute_normalizer
 from holosoma.motion_gen.visualization import plot_window_comparison
+from holosoma.motion_gen.wandb_logging import MotionGenWandbLogger
 
 CKPT_FORMAT_VERSION = 1
+
+
+def terrain_stratum_indices(dataset: MotionWindowDataset) -> dict[str, list[int]]:
+    """Partition dataset windows by whether their source clip has a scan.
+
+    The ``terrain`` stratum is the condition the generator can actually see:
+    a real height scan.  ``flat`` is retained as the concise logging name for
+    the complementary no-scan stratum; its exact counts are recorded so the
+    distinction remains auditable.
+    """
+    strata: dict[str, list[int]] = {"flat": [], "terrain": []}
+    for window_index, (clip_index, _) in enumerate(dataset._index):
+        clip = dataset.clips[clip_index]
+        name = "terrain" if dataset.use_terrain_scan and clip.terrain_scan is not None else "flat"
+        strata[name].append(window_index)
+    return strata
+
+
+def terrain_balanced_sample_weights(
+    dataset: MotionWindowDataset,
+    terrain_fraction: float,
+) -> tuple[torch.Tensor, dict[str, int]]:
+    """Return per-window weights assigning total mass to each scan stratum."""
+    if not math.isfinite(terrain_fraction) or not 0.0 < terrain_fraction < 1.0:
+        raise ValueError("terrain_train_fraction must be finite and strictly between 0 and 1")
+    strata = terrain_stratum_indices(dataset)
+    counts = {name: len(indices) for name, indices in strata.items()}
+    if not counts["flat"] or not counts["terrain"]:
+        raise ValueError(f"terrain-balanced sampling requires both scanned-terrain and no-scan windows; got {counts}")
+    weights = torch.empty(len(dataset), dtype=torch.double)
+    weights[strata["terrain"]] = terrain_fraction / counts["terrain"]
+    weights[strata["flat"]] = (1.0 - terrain_fraction) / counts["flat"]
+    return weights, counts
 
 
 def resolve_device(device: str) -> torch.device:
@@ -106,22 +141,45 @@ class Trainer:
         if cfg.resume:
             self.load_checkpoint(cfg.resume)
 
+        wandb_cfg = copy.deepcopy(cfg.wandb)
+        if wandb_cfg.name is None:
+            wandb_cfg.name = cfg.run_name
+        self.wandb = MotionGenWandbLogger(wandb_cfg).init(
+            resolved_config=dataclasses.asdict(cfg),
+            run_dir=self.out_dir,
+        )
+        if self.wandb.enabled:
+            run_info = {
+                "run_id": self.wandb.run_id,
+                "run_url": self.wandb.run_url,
+                "mode": wandb_cfg.mode,
+            }
+            (self.out_dir / "wandb_run.json").write_text(json.dumps(run_info, indent=2))
+            self.wandb.summary(
+                {
+                    "run": {
+                        "output_directory": str(self.out_dir.resolve()),
+                        "model_parameters": self.num_model_parameters,
+                        "train_windows": len(self.train_dataset),
+                        "val_windows": len(self.val_dataset),
+                    },
+                    "data": {"val_stratum_counts": self.val_stratum_counts},
+                }
+            )
+            logger.info(f"W&B run: {self.wandb.run_url or self.wandb.run_id}")
+
     # -- setup ----------------------------------------------------------------
 
     def _build_data(self) -> None:
         cfg = self.cfg
         d = cfg.data
-        train_clips = load_split_clips(
-            d.processed_dir, d.splits_file, "train", self.layout, d.metadata_dir, d.fps
-        )
+        train_clips = load_split_clips(d.processed_dir, d.splits_file, "train", self.layout, d.metadata_dir, d.fps)
         if d.max_train_clips:
             train_clips = train_clips[: d.max_train_clips]
         if d.overfit:
             val_clips = train_clips
         else:
-            val_clips = load_split_clips(
-                d.processed_dir, d.splits_file, "val", self.layout, d.metadata_dir, d.fps
-            )
+            val_clips = load_split_clips(d.processed_dir, d.splits_file, "val", self.layout, d.metadata_dir, d.fps)
             if d.max_val_clips:
                 val_clips = val_clips[: d.max_val_clips]
         logger.info(
@@ -174,12 +232,60 @@ class Trainer:
             "pin_memory": self.device.type == "cuda",
             "persistent_workers": cfg.num_workers > 0,
         }
-        self.train_loader = DataLoader(self.train_dataset, shuffle=True, drop_last=True, **loader_kwargs)
+        self.train_sampler_generator: torch.Generator | None = None
+        if d.terrain_train_fraction is None:
+            self.train_loader = DataLoader(
+                self.train_dataset,
+                shuffle=True,
+                drop_last=True,
+                **loader_kwargs,
+            )
+        else:
+            weights, counts = terrain_balanced_sample_weights(
+                self.train_dataset,
+                d.terrain_train_fraction,
+            )
+            self.train_sampler_generator = torch.Generator().manual_seed(cfg.seed)
+            sampler = WeightedRandomSampler(
+                weights,
+                num_samples=len(self.train_dataset),
+                replacement=True,
+                generator=self.train_sampler_generator,
+            )
+            self.train_loader = DataLoader(
+                self.train_dataset,
+                sampler=sampler,
+                shuffle=False,
+                drop_last=True,
+                **loader_kwargs,
+            )
+            logger.info(
+                "Terrain-balanced train sampler enabled "
+                f"(target terrain={d.terrain_train_fraction:.3f}, windows={counts})"
+            )
         self.val_loader = DataLoader(self.val_dataset, shuffle=False, drop_last=False, **loader_kwargs)
+        self.val_stratum_loaders: dict[str, DataLoader] = {}
+        self.val_stratum_counts: dict[str, int] = {}
+        if d.stratified_validation:
+            strata = terrain_stratum_indices(self.val_dataset)
+            self.val_stratum_counts = {name: len(indices) for name, indices in strata.items()}
+            missing = [name for name, indices in strata.items() if not indices]
+            if missing:
+                raise ValueError(
+                    f"stratified validation requires both strata; missing {missing}, counts={self.val_stratum_counts}"
+                )
+            self.val_stratum_loaders = {
+                name: DataLoader(
+                    Subset(self.val_dataset, indices),
+                    shuffle=False,
+                    drop_last=False,
+                    **loader_kwargs,
+                )
+                for name, indices in strata.items()
+            }
+            logger.info(f"Stratified validation windows: {self.val_stratum_counts}")
 
-        self.joint_limits = load_joint_limits(
-            Path(d.metadata_dir) / "joint_limits.json", self.layout
-        )
+        self.joint_limits = load_joint_limits(Path(d.metadata_dir) / "joint_limits.json", self.layout)
         if self.joint_limits is None:
             logger.warning("No joint_limits.json found; joint-limit violation metric disabled.")
 
@@ -197,6 +303,7 @@ class Trainer:
             dropout=cfg.model.dropout,
         ).to(self.device)
         n_params = sum(p.numel() for p in self.model.parameters())
+        self.num_model_parameters = n_params
         logger.info(f"Model parameters: {n_params / 1e6:.2f} M")
 
         self.diffusion = GaussianDiffusion(
@@ -204,10 +311,30 @@ class Trainer:
             schedule=cfg.diffusion.schedule,
             param=cfg.diffusion.param,
         )
+        for loss_name in cfg.loss.__dataclass_fields__:
+            loss_weight = getattr(cfg.loss, loss_name)
+            if not math.isfinite(loss_weight) or loss_weight < 0.0:
+                raise ValueError(f"loss.{loss_name} must be finite and >= 0")
+        if not math.isfinite(cfg.joint_limit_margin_rad) or cfg.joint_limit_margin_rad < 0.0:
+            raise ValueError("joint_limit_margin_rad must be finite and >= 0")
+        if not math.isfinite(cfg.terrain_penetration_tolerance_m) or cfg.terrain_penetration_tolerance_m < 0.0:
+            raise ValueError("terrain_penetration_tolerance_m must be finite and >= 0")
+        if (
+            not math.isfinite(cfg.terrain_penetration_tail_fraction)
+            or not 0.0 < cfg.terrain_penetration_tail_fraction <= 1.0
+        ):
+            raise ValueError("terrain_penetration_tail_fraction must be finite and in (0, 1]")
+        if cfg.loss.joint_limit != 0.0 and self.joint_limits is None:
+            raise ValueError("loss.joint_limit is non-zero but joint_limits.json is unavailable")
+        self.joint_limits_device = self.joint_limits.to(self.device) if self.joint_limits is not None else None
+
         self.fk_model: G1ForwardKinematics | None = None
-        if cfg.loss.fk_consistency != 0.0:
-            if cfg.loss.fk_consistency < 0.0:
-                raise ValueError("loss.fk_consistency must be >= 0")
+        needs_fk = (
+            cfg.loss.fk_consistency != 0.0
+            or cfg.loss.lower_body_terrain_penetration != 0.0
+            or cfg.loss.lower_body_terrain_tail != 0.0
+        )
+        if needs_fk:
             source_mjcf = (
                 Path(__file__).resolve().parents[4]
                 / "src/holosoma_retargeting/holosoma_retargeting/models/g1/g1_29dof.xml"
@@ -220,8 +347,11 @@ class Trainer:
                 source_mjcf_path=source_mjcf,
             ).eval()
             logger.info(
-                "Differentiable FK consistency enabled "
-                f"(weight={cfg.loss.fk_consistency:g}, source={source_mjcf})"
+                "Differentiable FK geometry enabled "
+                f"(consistency_weight={cfg.loss.fk_consistency:g}, "
+                "lower_body_terrain_weight="
+                f"{cfg.loss.lower_body_terrain_penetration:g}, tail_weight="
+                f"{cfg.loss.lower_body_terrain_tail:g}, source={source_mjcf})"
             )
             self._validate_fk_dataset_calibration()
         self.ema_model = None
@@ -230,9 +360,7 @@ class Trainer:
             for p in self.ema_model.parameters():
                 p.requires_grad_(False)
 
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
-        )
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
         def lr_lambda(step: int) -> float:
             if step < cfg.warmup_steps:
@@ -271,10 +399,7 @@ class Trainer:
                 "Motion dataset is inconsistent with the pinned G1 FK model: "
                 f"max body error {max_error:.6g} m exceeds {tolerance:.6g} m"
             )
-        logger.info(
-            "FK dataset calibration passed "
-            f"({count} windows, mean={mean_error:.3e} m, max={max_error:.3e} m)"
-        )
+        logger.info(f"FK dataset calibration passed ({count} windows, mean={mean_error:.3e} m, max={max_error:.3e} m)")
 
     # -- EMA -------------------------------------------------------------------
 
@@ -293,8 +418,14 @@ class Trainer:
     def save_checkpoint(self, name: str | None = None) -> Path:
         assert self.normalizer is not None
         ckpt = build_checkpoint(
-            self.step, self.model, self.ema_model, self.optimizer, self.scaler,
-            self.cfg, self.normalizer, self.layout,
+            self.step,
+            self.model,
+            self.ema_model,
+            self.optimizer,
+            self.scaler,
+            self.cfg,
+            self.normalizer,
+            self.layout,
         )
         path = self.out_dir / "checkpoints" / (name or f"ckpt_{self.step:08d}.pt")
         torch.save(ckpt, path)
@@ -307,19 +438,14 @@ class Trainer:
         if ckpt.get("format_version") != CKPT_FORMAT_VERSION:
             raise ValueError(f"Checkpoint format {ckpt.get('format_version')} != {CKPT_FORMAT_VERSION}")
         if ckpt["layout"]["dim"] != self.layout.dim:
-            raise ValueError(
-                f"Checkpoint feature dim {ckpt['layout']['dim']} != current layout {self.layout.dim}"
-            )
+            raise ValueError(f"Checkpoint feature dim {ckpt['layout']['dim']} != current layout {self.layout.dim}")
         self.model.load_state_dict(ckpt["model"])
         if self.ema_model is not None and ckpt.get("ema") is not None:
             self.ema_model.load_state_dict(ckpt["ema"])
         self.normalizer = FeatureNormalizer.from_state_dict(ckpt["normalizer"])
         if self.cfg.resume_weights_only:
             self.step = 0
-            logger.info(
-                f"Loaded weights/EMA/normalizer from {path}; "
-                "optimizer, scheduler, and step restart at zero"
-            )
+            logger.info(f"Loaded weights/EMA/normalizer from {path}; optimizer, scheduler, and step restart at zero")
         else:
             self.optimizer.load_state_dict(ckpt["optimizer"])
             self.scaler.load_state_dict(ckpt["scaler"])
@@ -384,21 +510,45 @@ class Trainer:
             # unconditional branch used by classifier-free guidance is trained.
             drop = torch.rand(bsz, device=self.device, generator=generator) < cfg.cond_dropout
         pred = self.model(
-            x_t, t, past, batch["heading"], terrain_condition,
-            drop_past=drop, drop_heading=drop, drop_terrain=drop,
+            x_t,
+            t,
+            past,
+            batch["heading"],
+            terrain_condition,
+            drop_past=drop,
+            drop_heading=drop,
+            drop_terrain=drop,
         )
         x0_hat = self.diffusion.pred_to_x0(pred, x_t, t)
         x0_hat_phys = self.normalizer.denormalize(x0_hat)
         return compute_losses(
-            x0_hat_phys, gt_phys, self.layout, cfg.loss,
-            contact=batch["contact"], flat=batch["flat"],
+            x0_hat_phys,
+            gt_phys,
+            self.layout,
+            cfg.loss,
+            contact=batch["contact"],
+            flat=batch["flat"],
             terrain_scan=batch["terrain"] if cfg.data.use_terrain_scan else None,
             has_scan=batch.get("has_scan"),
             scan_grid=cfg.data.scan_grid if cfg.data.use_terrain_scan else None,
             fk_model=getattr(self, "fk_model", None),
+            joint_limits=getattr(self, "joint_limits_device", None),
+            joint_limit_margin_rad=cfg.joint_limit_margin_rad,
+            terrain_penetration_tolerance_m=cfg.terrain_penetration_tolerance_m,
+            terrain_penetration_tail_fraction=cfg.terrain_penetration_tail_fraction,
         )
 
     def train(self) -> None:
+        """Run training and close TensorBoard/W&B cleanly on every exit."""
+        try:
+            self._train_impl()
+        except BaseException:
+            self.writer.flush()
+            self.writer.close()
+            self.wandb.finish(exit_code=1)
+            raise
+
+    def _train_impl(self) -> None:
         cfg = self.cfg
         self.model.train()
         train_iter = iter(self.train_loader)
@@ -445,10 +595,15 @@ class Trainer:
                 for k, v in last_losses.items():
                     self.writer.add_scalar(f"train/{k}", v.item(), self.step)
                 self.writer.add_scalar("train/lr", lr, self.step)
+                train_log: dict[str, Any] = {
+                    "train": {key: value.item() for key, value in last_losses.items()},
+                    "optimizer": {"lr": lr},
+                }
                 if self.device.type == "cuda":
-                    self.writer.add_scalar(
-                        "train/max_vram_gb", torch.cuda.max_memory_allocated() / 2**30, self.step
-                    )
+                    max_vram_gb = torch.cuda.max_memory_allocated() / 2**30
+                    self.writer.add_scalar("train/max_vram_gb", max_vram_gb, self.step)
+                    train_log["system"] = {"max_vram_gb": max_vram_gb}
+                self.wandb.log(train_log, step=self.step)
 
             if self.step % cfg.val_interval == 0:
                 self.validate()
@@ -459,10 +614,26 @@ class Trainer:
             if self.step % cfg.ckpt_interval == 0:
                 self.save_checkpoint()
 
-        self.save_checkpoint("final.pt")
+        final_checkpoint = self.save_checkpoint("final.pt")
         self.validate()
         self.sample_and_export()
         self.writer.flush()
+        self.wandb.summary(
+            {
+                "run": {"final_step": self.step, "completed": True},
+                "data": {"val_stratum_counts": self.val_stratum_counts},
+            }
+        )
+        self.wandb.artifact(
+            final_checkpoint,
+            metadata={
+                "step": self.step,
+                "preset_run_name": self.cfg.run_name,
+                "training_from_scratch": self.cfg.resume is None,
+            },
+        )
+        self.wandb.finish(exit_code=0)
+        self.writer.close()
         logger.info(f"Training done. Outputs: {self.out_dir}")
 
     # -- validation / sampling ------------------------------------------------------
@@ -471,19 +642,18 @@ class Trainer:
         return self.ema_model if self.ema_model is not None else self.model
 
     @torch.no_grad()
-    def validate(self) -> dict:
+    def _validate_loader(self, loader: DataLoader, seed: int) -> dict[str, Any]:
+        """Evaluate deterministic clean/noisy loss and sampling on one stratum."""
         cfg = self.cfg
-        self.model.eval()
-        clean_diffusion_gen = torch.Generator(device=self.device.type).manual_seed(cfg.val_seed)
+        clean_diffusion_gen = torch.Generator(device=self.device.type).manual_seed(seed)
         noise_enabled = cfg.condition_noise.is_enabled()
-        noisy_diffusion_gen = torch.Generator(device=self.device.type).manual_seed(cfg.val_seed)
-        condition_gen = torch.Generator(device=self.device.type).manual_seed(cfg.val_seed + 1)
+        noisy_diffusion_gen = torch.Generator(device=self.device.type).manual_seed(seed)
+        condition_gen = torch.Generator(device=self.device.type).manual_seed(seed + 1)
 
-        # 1) Deterministic diffusion-loss evaluation on the val split.
         clean_agg: dict[str, float] = {}
         noisy_agg: dict[str, float] = {}
         n = 0
-        for i, cpu_batch in enumerate(self.val_loader):
+        for i, cpu_batch in enumerate(loader):
             if i >= cfg.val_batches:
                 break
             batch = self._batch_to_device(cpu_batch)
@@ -504,16 +674,12 @@ class Trainer:
                 for k, v in noisy_losses.items():
                     noisy_agg[k] = noisy_agg.get(k, 0.0) + v.item()
             n += 1
-        val_losses = {k: v / max(n, 1) for k, v in clean_agg.items()}
-        val_losses_noisy = (
-            {k: v / max(n, 1) for k, v in noisy_agg.items()}
-            if noise_enabled
-            else dict(val_losses)
-        )
+        if n == 0:
+            raise RuntimeError("validation loader produced no batches")
+        clean_losses = {k: v / n for k, v in clean_agg.items()}
+        noisy_losses = {k: v / max(n, 1) for k, v in noisy_agg.items()} if noise_enabled else dict(clean_losses)
 
-        # 2) Sampling metrics on one fixed val batch. Clean and noisy
-        # conditions share the exact same initial DDIM noise tensor.
-        batch = self._batch_to_device(next(iter(self.val_loader)))
+        batch = self._batch_to_device(next(iter(loader)))
         if noise_enabled:
             sample_phys, noisy_sample_phys = self._generate_validation_pair(
                 batch,
@@ -525,14 +691,15 @@ class Trainer:
             noisy_sample_phys = sample_phys
 
         metric_kwargs = {
-            "joint_limits": self.joint_limits,
+            "joint_limits": self.joint_limits_device,
             "contact": batch["contact"],
             "flat": batch["flat"],
             "terrain_scan": batch["terrain"] if cfg.data.use_terrain_scan else None,
             "has_scan": batch.get("has_scan"),
             "scan_grid": cfg.data.scan_grid if cfg.data.use_terrain_scan else None,
+            "fk_model": self.fk_model,
         }
-        metrics = compute_metrics(
+        clean_metrics = compute_metrics(
             sample_phys,
             batch["x"],
             self.layout,
@@ -547,51 +714,89 @@ class Trainer:
             **metric_kwargs,
         )
         robustness = {
-            f"{key}_delta": noisy_metrics[key] - metrics[key]
-            for key in sorted(metrics.keys() & noisy_metrics.keys())
+            f"{key}_delta": noisy_metrics[key] - clean_metrics[key]
+            for key in sorted(clean_metrics.keys() & noisy_metrics.keys())
         }
         robustness["sample_condition_response_mean_abs_mixed_units"] = (
-            noisy_sample_phys - sample_phys
-        ).abs().mean().item()
+            (noisy_sample_phys - sample_phys).abs().mean().item()
+        )
 
-        for k, v in val_losses.items():
-            self.writer.add_scalar(f"val/loss_{k}", v, self.step)
-        for k, v in metrics.items():
-            self.writer.add_scalar(f"val/{k}", v, self.step)
-        if noise_enabled:
-            for k, v in val_losses_noisy.items():
-                self.writer.add_scalar(f"val_noisy/loss_{k}", v, self.step)
-            for k, v in noisy_metrics.items():
-                self.writer.add_scalar(f"val_noisy/{k}", v, self.step)
-            for k, v in robustness.items():
-                self.writer.add_scalar(f"val_condition_noise/{k}", v, self.step)
+        return {
+            "loss_clean": clean_losses,
+            "loss_noisy": noisy_losses,
+            "sample_metrics_clean": clean_metrics,
+            "sample_metrics_noisy": noisy_metrics,
+            "condition_noise_delta": robustness,
+            "num_loss_batches": n,
+            "seed": seed,
+        }
+
+    @torch.no_grad()
+    def validate(self) -> dict:
+        cfg = self.cfg
+        self.model.eval()
+        noise_enabled = cfg.condition_noise.is_enabled()
+        loaders: dict[str, DataLoader] = {"all": self.val_loader}
+        loaders.update(self.val_stratum_loaders)
+        seed_offsets = {"all": 0, "flat": 10_000, "terrain": 20_000}
+        results = {
+            name: self._validate_loader(loader, cfg.val_seed + seed_offsets.get(name, 30_000))
+            for name, loader in loaders.items()
+        }
+
+        wandb_payload: dict[str, Any] = {}
+        for name, result in results.items():
+            prefix = "val" if name == "all" else f"val_{name}"
+            for key, value in result["loss_clean"].items():
+                self.writer.add_scalar(f"{prefix}/loss_{key}", value, self.step)
+            for key, value in result["sample_metrics_clean"].items():
+                self.writer.add_scalar(f"{prefix}/{key}", value, self.step)
+            if noise_enabled:
+                for key, value in result["loss_noisy"].items():
+                    self.writer.add_scalar(f"{prefix}_noisy/loss_{key}", value, self.step)
+                for key, value in result["sample_metrics_noisy"].items():
+                    self.writer.add_scalar(f"{prefix}_noisy/{key}", value, self.step)
+                for key, value in result["condition_noise_delta"].items():
+                    self.writer.add_scalar(
+                        f"{prefix}_condition_noise/{key}",
+                        value,
+                        self.step,
+                    )
+            wandb_payload[prefix] = {
+                "loss_clean": result["loss_clean"],
+                "sample_clean": result["sample_metrics_clean"],
+                "loss_noisy": result["loss_noisy"],
+                "sample_noisy": result["sample_metrics_noisy"],
+                "condition_noise_delta": result["condition_noise_delta"],
+            }
+            logger.info(
+                f"[{prefix} clean @ {self.step}] "
+                + " ".join(f"{key}={value:.4f}" for key, value in result["sample_metrics_clean"].items())
+            )
+        self.wandb.log(wandb_payload, step=self.step)
+
+        primary = results["all"]
         entry = {
             "step": self.step,
             # Keep the Stage 1--7 keys as clean-metric aliases.
-            "val_loss": val_losses,
-            "val_sample_metrics": metrics,
-            "val_loss_clean": val_losses,
-            "val_loss_noisy": val_losses_noisy,
-            "val_sample_metrics_clean": metrics,
-            "val_sample_metrics_noisy": noisy_metrics,
-            "val_condition_noise_delta": robustness,
+            "val_loss": primary["loss_clean"],
+            "val_sample_metrics": primary["sample_metrics_clean"],
+            "val_loss_clean": primary["loss_clean"],
+            "val_loss_noisy": primary["loss_noisy"],
+            "val_sample_metrics_clean": primary["sample_metrics_clean"],
+            "val_sample_metrics_noisy": primary["sample_metrics_noisy"],
+            "val_condition_noise_delta": primary["condition_noise_delta"],
             "val_condition_noise": {
                 "enabled": noise_enabled,
                 "diffusion_seed": cfg.val_seed,
                 "condition_seed": cfg.val_seed + 1,
                 "shared_ddim_initial_noise": True,
             },
+            "val_strata": {name: result for name, result in results.items() if name != "all"},
+            "val_stratum_counts": self.val_stratum_counts,
         }
         self.metrics_history.append(entry)
-        (self.out_dir / "metrics.json").write_text(
-            json.dumps({"history": self.metrics_history}, indent=2)
-        )
-        logger.info(f"[val clean @ {self.step}] " + " ".join(f"{k}={v:.4f}" for k, v in metrics.items()))
-        if noise_enabled:
-            logger.info(
-                f"[val noisy @ {self.step}] "
-                + " ".join(f"{k}={v:.4f}" for k, v in noisy_metrics.items())
-            )
+        (self.out_dir / "metrics.json").write_text(json.dumps({"history": self.metrics_history}, indent=2))
         return entry
 
     @torch.no_grad()
@@ -662,23 +867,33 @@ class Trainer:
         """Generate a few val windows; export plots and a raw npz."""
         cfg = self.cfg
         self.model.eval()
-        gen = torch.Generator(device=self.device.type).manual_seed(cfg.val_seed)
-        batch = self._batch_to_device(next(iter(self.val_loader)))
-        sample_phys = self._generate_for_batch(batch, gen)
+        loaders = self.val_stratum_loaders or {"all": self.val_loader}
+        seed_offsets = {"all": 0, "flat": 10_000, "terrain": 20_000}
+        for name, loader in loaders.items():
+            gen = torch.Generator(device=self.device.type).manual_seed(cfg.val_seed + seed_offsets.get(name, 30_000))
+            batch = self._batch_to_device(next(iter(loader)))
+            sample_phys = self._generate_for_batch(batch, gen)
 
-        plot_dir = self.out_dir / "plots" / f"step_{self.step:08d}"
-        sample_dir = self.out_dir / "samples" / f"step_{self.step:08d}"
-        plot_dir.mkdir(parents=True, exist_ok=True)
-        sample_dir.mkdir(parents=True, exist_ok=True)
-        for i in range(min(num_items, sample_phys.shape[0])):
-            plot_window_comparison(
-                sample_phys[i].cpu(), batch["x"][i].cpu(), self.layout,
-                plot_dir / f"window_{i:02d}.png",
-            )
-            export_generated_raw_npz(
-                sample_phys[i].cpu(), self.layout, cfg.data.fps,
-                sample_dir / f"window_{i:02d}_gen_raw.npz",
-                gt_features=batch["x"][i].cpu(),
-                heading=batch["heading"][i].cpu(),
-            )
-        logger.info(f"Exported samples to {sample_dir} and plots to {plot_dir}")
+            plot_dir = self.out_dir / "plots" / f"step_{self.step:08d}"
+            sample_dir = self.out_dir / "samples" / f"step_{self.step:08d}"
+            if name != "all":
+                plot_dir = plot_dir / name
+                sample_dir = sample_dir / name
+            plot_dir.mkdir(parents=True, exist_ok=True)
+            sample_dir.mkdir(parents=True, exist_ok=True)
+            for i in range(min(num_items, sample_phys.shape[0])):
+                plot_window_comparison(
+                    sample_phys[i].cpu(),
+                    batch["x"][i].cpu(),
+                    self.layout,
+                    plot_dir / f"window_{i:02d}.png",
+                )
+                export_generated_raw_npz(
+                    sample_phys[i].cpu(),
+                    self.layout,
+                    cfg.data.fps,
+                    sample_dir / f"window_{i:02d}_gen_raw.npz",
+                    gt_features=batch["x"][i].cpu(),
+                    heading=batch["heading"][i].cpu(),
+                )
+            logger.info(f"Exported {name} samples to {sample_dir} and plots to {plot_dir}")

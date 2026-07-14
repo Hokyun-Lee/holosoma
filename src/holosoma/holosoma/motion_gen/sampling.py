@@ -6,9 +6,11 @@ Designed as the interface the future RL motion tracker will call:
     out = gen.generate(MotionGeneratorInput(past_motion=..., target_heading=...))
 
 Inputs/outputs are world-frame; canonicalization (heading-normalized anchor
-frame) happens inside. Receding-horizon generation follows the paper's
-deployment scheme (re-plan every 0.25 s = 12/13 frames at 50 Hz; here the
-stride is configurable), feeding generated frames back as the next past.
+frame) happens inside. Receding-horizon generation defaults to consuming the
+checkpoint's complete future window before feeding the last generated frames
+back as the next past.  The current production command uses 25 future frames
+at 50 Hz, matching its 0.5 s re-plan interval.  A shorter stride is available
+only as an explicit generator diagnostic.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from holosoma.motion_gen.features import (
     decanonicalize_window,
     pack_features,
     quat_normalize,
+    quat_yaw,
     unpack_features,
     yaw_rotate_xy,
 )
@@ -40,6 +43,7 @@ from holosoma.motion_gen.model import MotionDiffusionTransformer
 from holosoma.motion_gen.normalization import FeatureNormalizer
 from holosoma.motion_gen.terrain import ScanGrid
 from holosoma.motion_gen.training import CKPT_FORMAT_VERSION
+from holosoma.motion_gen.wandb_logging import WandbLoggingConfig
 
 _TORCH_SEED_MAX = (1 << 63) - 1
 
@@ -194,9 +198,7 @@ class MotionGenerator:
         ddim_init_noise = None
         if per_sample_seeds is not None:
             if per_sample_seeds.shape != (bsz,):
-                raise ValueError(
-                    f"per_sample_seeds must have shape ({bsz},), got {tuple(per_sample_seeds.shape)}"
-                )
+                raise ValueError(f"per_sample_seeds must have shape ({bsz},), got {tuple(per_sample_seeds.shape)}")
             ddim_init_noise = per_sample_standard_normal(
                 per_sample_seeds,
                 shape[1:],
@@ -235,8 +237,15 @@ class MotionGenerator:
             if guidance_scale is not None and guidance_scale != 1.0:
                 ones = torch.ones(bsz, dtype=torch.bool, device=self.device)
                 uncond = self.model(
-                    x_t, t, past_norm, heading, terrain,
-                    drop_past=ones, drop_heading=ones, drop_terrain=ones, seq_mask=seq_mask,
+                    x_t,
+                    t,
+                    past_norm,
+                    heading,
+                    terrain,
+                    drop_past=ones,
+                    drop_heading=ones,
+                    drop_terrain=ones,
+                    seq_mask=seq_mask,
                 )
                 pred = uncond + guidance_scale * (pred - uncond)
             return pred
@@ -284,18 +293,28 @@ class MotionGenerator:
         self,
         past_motion: torch.Tensor,
         num_cycles: int = 8,
-        replan_stride: int = 12,
+        replan_stride: int | None = None,
         target_heading: torch.Tensor | Callable[[int], torch.Tensor] | None = None,
         num_steps: int | None = 50,
         deterministic: bool = False,
         seed: int = 0,
         terrain_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        """Stitch a long motion by re-planning every ``replan_stride`` frames.
+        """Stitch a long motion by periodically re-planning generated motion.
 
-        The paper re-plans every 0.25 s (12.5 frames at 50 Hz) at deployment;
-        default 12. Returns (P + num_cycles * replan_stride, D) world features
-        for a single sequence (unbatched input (P, D) is accepted).
+        ``replan_stride=None`` consumes the checkpoint's full future horizon
+        (25 frames for the current production generator), matching
+        :class:`GeneratedMotionCommand`'s 0.5 s / 50 Hz schedule.  Passing a
+        shorter positive stride remains supported for an explicit
+        generator-only diagnostic.  Returns
+        ``(P + num_cycles * resolved_stride, D)`` world features for a single
+        sequence (unbatched input ``(P, D)`` is accepted).
+
+        ``target_heading=None`` captures the final initial-history frame's
+        world-facing direction once and holds that vector for every cycle,
+        matching ``GeneratedMotionCommand(heading_mode="current")``.  A
+        callable remains available when a diagnostic intentionally changes the
+        world heading between cycles.
 
         terrain_fn: optional callback mapping the current past window
         (B, P, D world features) to a (B, terrain_dim) height scan around the
@@ -305,6 +324,14 @@ class MotionGenerator:
         input_device = past_motion.device
         past = (past_motion.unsqueeze(0) if single else past_motion).to(self.device)
         P = past.shape[1]
+        future_frames = self.cfg.data.future_frames
+        resolved_stride = future_frames if replan_stride is None else replan_stride
+        if resolved_stride < 1 or resolved_stride > future_frames:
+            raise ValueError(f"replan_stride must be in [1, {future_frames}] or None, got {replan_stride}")
+        initial_heading = None
+        if target_heading is None:
+            initial_yaw = quat_yaw(past[:, -1, self.layout.root_quat_slice])
+            initial_heading = torch.stack((torch.cos(initial_yaw), torch.sin(initial_yaw)), dim=-1)
         frames = [past.clone()]
         for cycle in range(num_cycles):
             if callable(target_heading):
@@ -313,7 +340,7 @@ class MotionGenerator:
             elif target_heading is not None:
                 heading = target_heading.unsqueeze(0) if target_heading.ndim == 1 else target_heading
             else:
-                heading = None
+                heading = initial_heading
             terrain = terrain_fn(past) if terrain_fn is not None else None
             out = self.generate(
                 MotionGeneratorInput(past_motion=past, target_heading=heading, terrain_height=terrain),
@@ -321,7 +348,7 @@ class MotionGenerator:
                 deterministic=deterministic,
                 seed=seed + cycle,
             )
-            new_frames = out.features[:, :replan_stride]
+            new_frames = out.features[:, :resolved_stride]
             frames.append(new_frames)
             past = torch.cat([past, new_frames], dim=1)[:, -P:]
         result = torch.cat(frames, dim=1).to(input_device)
@@ -338,7 +365,15 @@ def _config_from_dict(d: dict) -> TrainConfig:
             **{
                 k: v
                 for k, v in d.items()
-                if k not in ("data", "model", "diffusion", "loss", "condition_noise")
+                if k
+                not in (
+                    "data",
+                    "model",
+                    "diffusion",
+                    "loss",
+                    "condition_noise",
+                    "wandb",
+                )
             },
             "data": DataCfg(**data),
             "model": ModelCfg(**d["model"]),
@@ -347,5 +382,6 @@ def _config_from_dict(d: dict) -> TrainConfig:
             # Stage 1--7 checkpoints predate condition noise and therefore
             # intentionally reconstruct with the all-zero defaults.
             "condition_noise": ConditionNoiseCfg(**d.get("condition_noise", {})),
+            "wandb": WandbLoggingConfig(**d.get("wandb", {})),
         }
     )

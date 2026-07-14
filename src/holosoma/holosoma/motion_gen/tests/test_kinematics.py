@@ -13,6 +13,7 @@ from holosoma.motion_gen.kinematics import (
     G1_29DOF_BODY_NAMES,
     G1_29DOF_JOINT_BODY_NAMES,
     G1_29DOF_JOINT_NAMES,
+    G1_LOWER_BODY_COLLISION_PROXY_NAMES,
     G1ForwardKinematics,
     validate_source_mjcf,
 )
@@ -20,9 +21,7 @@ from holosoma.motion_gen.kinematics import (
 
 def _source_mjcf() -> Path:
     repo_root = next(
-        parent
-        for parent in Path(__file__).resolve().parents
-        if (parent / "src/holosoma_retargeting").is_dir()
+        parent for parent in Path(__file__).resolve().parents if (parent / "src/holosoma_retargeting").is_dir()
     )
     return repo_root / "src/holosoma_retargeting/holosoma_retargeting/models/g1/g1_29dof.xml"
 
@@ -44,7 +43,28 @@ def test_fixed_model_mapping_and_non_trainable_buffers(tmp_path: Path) -> None:
         "joint_axes",
         "joint_pivots",
         "tracked_body_node_indices",
+        "lower_body_proxy_parent_tracked_indices",
+        "lower_body_proxy_local_positions",
+        "lower_body_proxy_radii",
     }
+    assert G1_LOWER_BODY_COLLISION_PROXY_NAMES == (
+        "left_ankle_intermediate_1_link",
+        "left_ankle_roll_sphere_3_link",
+        "left_ankle_roll_sphere_4_link",
+        "left_ankle_roll_sphere_5_link",
+        "left_ankle_roll_sphere_1_link",
+        "left_ankle_roll_sphere_2_link",
+        "right_ankle_intermediate_1_link",
+        "right_ankle_roll_sphere_3_link",
+        "right_ankle_roll_sphere_4_link",
+        "right_ankle_roll_sphere_5_link",
+        "right_ankle_roll_sphere_1_link",
+        "right_ankle_roll_sphere_2_link",
+    )
+    torch.testing.assert_close(
+        fk.lower_body_proxy_radii,
+        torch.tensor([0.01, *([0.005] * 5), 0.01, *([0.005] * 5)]),
+    )
 
     changed = tmp_path / "changed.xml"
     changed.write_bytes(source.read_bytes() + b"\n<!-- changed -->\n")
@@ -79,11 +99,29 @@ def test_batched_shape_dtype_and_quaternion_normalization(dtype: torch.dtype) ->
     joint_positions = torch.randn(2, 3, 29, generator=generator, dtype=dtype)
 
     actual = fk(root_position, root_quaternion, joint_positions)
+    transform_positions, transform_quaternions = fk.tracked_body_transforms(
+        root_position,
+        root_quaternion,
+        joint_positions,
+    )
+    proxy_centers, proxy_radii = fk.lower_body_collision_spheres_from_tracked_transforms(
+        transform_positions,
+        transform_quaternions,
+    )
     scaled_quaternion = fk(root_position, 3.7 * root_quaternion, joint_positions)
 
     assert actual.shape == (2, 3, 14, 3)
+    assert transform_positions.shape == (2, 3, 14, 3)
+    assert transform_quaternions.shape == (2, 3, 14, 4)
+    assert proxy_centers.shape == (2, 3, 12, 3)
+    assert proxy_radii.shape == (12,)
     assert actual.dtype == dtype
     assert actual.device.type == "cpu"
+    torch.testing.assert_close(actual, transform_positions)
+    torch.testing.assert_close(
+        transform_quaternions.norm(dim=-1),
+        torch.ones(2, 3, 14, dtype=dtype),
+    )
     torch.testing.assert_close(actual, scaled_quaternion)
 
 
@@ -107,6 +145,37 @@ def test_gradcheck_and_gradients_are_finite() -> None:
     assert torch.count_nonzero(joint_positions.grad) > 0
 
 
+def test_collision_proxy_gradcheck_and_gradients_are_finite() -> None:
+    fk = G1ForwardKinematics(dtype=torch.float64)
+    root_position = torch.tensor([[0.1, -0.2, 0.8]], dtype=torch.float64, requires_grad=True)
+    root_quaternion = torch.tensor([[0.9, 0.2, -0.1, 0.3]], dtype=torch.float64, requires_grad=True)
+    joint_positions = torch.linspace(-0.3, 0.4, 29, dtype=torch.float64).unsqueeze(0).requires_grad_()
+
+    def proxy_centers(position, quaternion, joints):
+        return fk.lower_body_collision_spheres(position, quaternion, joints)[0]
+
+    assert torch.autograd.gradcheck(
+        proxy_centers,
+        (root_position, root_quaternion, joint_positions),
+        eps=1.0e-6,
+        atol=2.0e-5,
+        rtol=1.0e-3,
+    )
+    centers, radii = fk.lower_body_collision_spheres(
+        root_position,
+        root_quaternion,
+        joint_positions,
+    )
+    assert not radii.requires_grad
+    (centers.square().mean() + radii.square().mean()).backward()
+    for value in (root_position, root_quaternion, joint_positions):
+        assert value.grad is not None
+        assert torch.isfinite(value.grad).all()
+    # Only lower-body joints can affect these rigid marker centers.
+    assert torch.count_nonzero(joint_positions.grad[..., :12]) > 0
+    assert torch.count_nonzero(joint_positions.grad[..., 12:]) == 0
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
 def test_cuda_device_and_backward() -> None:
     device = torch.device("cuda")
@@ -127,10 +196,7 @@ def test_against_mujoco_ground_truth() -> None:
     model = mujoco.MjModel.from_xml_path(str(_source_mjcf()))
     data = mujoco.MjData(model)
 
-    joint_names = tuple(
-        mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, index)
-        for index in range(1, model.njnt)
-    )
+    joint_names = tuple(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, index) for index in range(1, model.njnt))
     joint_body_names = tuple(
         mujoco.mj_id2name(
             model,
@@ -150,22 +216,48 @@ def test_against_mujoco_ground_truth() -> None:
     root_quaternion = rng.normal(size=(batch_size, 4))
     root_quaternion /= np.linalg.norm(root_quaternion, axis=-1, keepdims=True)
     joint_positions = rng.uniform(-0.7, 0.7, size=(batch_size, 29))
-    body_ids = [
-        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
-        for name in G1_29DOF_BODY_NAMES
+    body_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name) for name in G1_29DOF_BODY_NAMES]
+    proxy_body_ids = [
+        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name) for name in G1_LOWER_BODY_COLLISION_PROXY_NAMES
+    ]
+    proxy_geom_ids = [
+        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name) for name in G1_LOWER_BODY_COLLISION_PROXY_NAMES
     ]
     expected = []
+    expected_proxy_centers = []
     for batch_index in range(batch_size):
         data.qpos[:3] = root_position[batch_index]
         data.qpos[3:7] = root_quaternion[batch_index]
         data.qpos[7:] = joint_positions[batch_index]
         mujoco.mj_forward(model, data)
         expected.append(data.xpos[body_ids].copy())
+        expected_proxy_centers.append(data.xpos[proxy_body_ids].copy())
 
     fk = G1ForwardKinematics(dtype=torch.float64, source_mjcf_path=_source_mjcf())
-    actual = fk(
+    actual = (
+        fk(
+            torch.from_numpy(root_position),
+            torch.from_numpy(root_quaternion),
+            torch.from_numpy(joint_positions),
+        )
+        .detach()
+        .numpy()
+    )
+    actual_proxy_centers, actual_proxy_radii = fk.lower_body_collision_spheres(
         torch.from_numpy(root_position),
         torch.from_numpy(root_quaternion),
         torch.from_numpy(joint_positions),
-    ).detach().numpy()
+    )
     np.testing.assert_allclose(actual, np.stack(expected), atol=5.0e-12, rtol=5.0e-12)
+    np.testing.assert_allclose(
+        actual_proxy_centers.detach().numpy(),
+        np.stack(expected_proxy_centers),
+        atol=5.0e-12,
+        rtol=5.0e-12,
+    )
+    np.testing.assert_allclose(
+        actual_proxy_radii.detach().numpy(),
+        model.geom_size[proxy_geom_ids, 0],
+        atol=0.0,
+        rtol=0.0,
+    )
