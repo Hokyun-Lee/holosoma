@@ -82,6 +82,24 @@ _CSV_FIELDS = (
     "strict_kinematic_gate_pass",
     "max_environment_penetration_m",
     "penetration_over_5mm_frame_rate",
+    "nonfoot_penetration_over_5mm_frame_rate",
+    "reference_max_environment_penetration_m",
+    "reference_penetration_over_5mm_frame_rate",
+    "reference_nonfoot_penetration_over_5mm_frame_rate",
+    "penetration_over_5mm_frame_rate_delta_vs_reference",
+    "nonfoot_penetration_over_5mm_frame_rate_delta_vs_reference",
+    "worst_robot_body",
+    "worst_robot_body_is_foot",
+    "worst_robot_body_max_penetration_m",
+    "worst_robot_body_contact_frame_rate",
+    "worst_robot_body_over_5mm_frame_rate",
+    "worst_robot_body_deep_penetration_frame_rate",
+    "reference_worst_robot_body",
+    "reference_worst_robot_body_is_foot",
+    "reference_worst_robot_body_max_penetration_m",
+    "reference_worst_robot_body_contact_frame_rate",
+    "reference_worst_robot_body_over_5mm_frame_rate",
+    "reference_worst_robot_body_deep_penetration_frame_rate",
     "joint_limit_max_violation_rad",
     "fk_body_error_max_m",
     "root_position_error_m_mean",
@@ -154,7 +172,11 @@ def extract_production_metrics(report: dict[str, Any], *, allow_nonproduction_co
     if feasibility is None:
         raise ValueError("comparison.json has no MuJoCo feasibility result")
     generated = feasibility["generated"]
+    reference = feasibility.get("reference")
+    if reference is None:
+        raise ValueError("comparison.json has no aligned reference feasibility result")
     collision = generated["environment_collision"]
+    reference_collision = reference["environment_collision"]
     tolerance = float(collision["surface_tolerance_m"])
     if not math.isclose(tolerance, PENETRATION_TOLERANCE_M, rel_tol=0.0, abs_tol=1.0e-12):
         raise ValueError(f"Expected a 5 mm penetration tolerance, found {tolerance:.9g} m")
@@ -165,12 +187,62 @@ def extract_production_metrics(report: dict[str, Any], *, allow_nonproduction_co
     strict_pass = bool(feasibility["verdict"]["kinematic_gate_pass"])
     if strict_pass != bool(generated["kinematic_gate_pass"]):
         raise ValueError("MuJoCo feasibility verdict and generated result disagree")
+
+    def worst_body_metrics(source: dict[str, Any], prefix: str) -> dict[str, Any]:
+        breakdown = source["robot_body_breakdown"]
+        if not breakdown:
+            if float(source["max_depth_m"]) != 0.0:
+                raise ValueError(f"{prefix or 'generated'} collision has depth but no body breakdown")
+            return {
+                f"{prefix}worst_robot_body": None,
+                f"{prefix}worst_robot_body_is_foot": None,
+                f"{prefix}worst_robot_body_max_penetration_m": 0.0,
+                f"{prefix}worst_robot_body_contact_frame_rate": 0.0,
+                f"{prefix}worst_robot_body_over_5mm_frame_rate": 0.0,
+                f"{prefix}worst_robot_body_deep_penetration_frame_rate": 0.0,
+            }
+        worst = breakdown[0]
+        worst_depth = float(worst["max_depth_m"])
+        global_depth = float(source["max_depth_m"])
+        if (
+            math.isfinite(worst_depth)
+            and math.isfinite(global_depth)
+            and not math.isclose(
+                worst_depth,
+                global_depth,
+                rel_tol=0.0,
+                abs_tol=1.0e-12,
+            )
+        ):
+            raise ValueError(f"{prefix or 'generated'} worst-body depth disagrees with global depth")
+        return {
+            f"{prefix}worst_robot_body": str(worst["robot_body"]),
+            f"{prefix}worst_robot_body_is_foot": bool(worst["is_foot"]),
+            f"{prefix}worst_robot_body_max_penetration_m": float(worst["max_depth_m"]),
+            f"{prefix}worst_robot_body_contact_frame_rate": float(worst["contact_frame_rate"]),
+            f"{prefix}worst_robot_body_over_5mm_frame_rate": float(worst["over_tolerance_frame_rate"]),
+            f"{prefix}worst_robot_body_deep_penetration_frame_rate": float(worst["deep_penetration_frame_rate"]),
+        }
+
+    comparison = feasibility["comparison_to_reference"]
     metrics = {
         "strict_kinematic_gate_pass": strict_pass,
         "production_contract_match": production_match,
         "penetration_tolerance_m": tolerance,
         "max_environment_penetration_m": float(collision["max_depth_m"]),
         "penetration_over_5mm_frame_rate": float(collision["over_tolerance_frame_rate"]),
+        "nonfoot_penetration_over_5mm_frame_rate": float(collision["nonfoot_over_tolerance_frame_rate"]),
+        "reference_max_environment_penetration_m": float(reference_collision["max_depth_m"]),
+        "reference_penetration_over_5mm_frame_rate": float(reference_collision["over_tolerance_frame_rate"]),
+        "reference_nonfoot_penetration_over_5mm_frame_rate": float(
+            reference_collision["nonfoot_over_tolerance_frame_rate"]
+        ),
+        "penetration_over_5mm_frame_rate_delta_vs_reference": float(comparison["over_tolerance_frame_rate_delta"]),
+        "nonfoot_penetration_over_5mm_frame_rate_delta_vs_reference": float(
+            comparison["nonfoot_over_tolerance_frame_rate_delta"]
+        ),
+        **worst_body_metrics(collision, ""),
+        **worst_body_metrics(reference_collision, "reference_"),
         "joint_limit_max_violation_rad": float(generated["joint_limits"]["max_violation_rad"]),
         "fk_body_error_max_m": float(fk["body_origin_error_m"]["max"]),
         "root_position_error_m_mean": float(alignment["root_position_error_m_mean"]),
@@ -179,12 +251,21 @@ def extract_production_metrics(report: dict[str, Any], *, allow_nonproduction_co
         "kinematic_checks": dict(generated["checks"]),
     }
     numeric_metrics = {key: value for key, value in metrics.items() if isinstance(value, float)}
-    invalid = {key: value for key, value in numeric_metrics.items() if not math.isfinite(value) or value < 0.0}
+    invalid = {
+        key: value
+        for key, value in numeric_metrics.items()
+        if not math.isfinite(value) or (value < 0.0 and "_delta_" not in key)
+    }
     if invalid:
         raise ValueError(f"Production metrics must be finite and non-negative, got {invalid}")
-    rate = metrics["penetration_over_5mm_frame_rate"]
-    if rate > 1.0:
-        raise ValueError(f"Penetration frame rate must be in [0, 1], got {rate}")
+    rates = {key: value for key, value in numeric_metrics.items() if "frame_rate" in key and "_delta_" not in key}
+    invalid_rates = {key: value for key, value in rates.items() if value > 1.0}
+    if invalid_rates:
+        raise ValueError(f"Penetration frame rates must be in [0, 1], got {invalid_rates}")
+    deltas = {key: value for key, value in numeric_metrics.items() if "frame_rate_delta" in key}
+    invalid_deltas = {key: value for key, value in deltas.items() if not -1.0 <= value <= 1.0}
+    if invalid_deltas:
+        raise ValueError(f"Penetration frame-rate deltas must be in [-1, 1], got {invalid_deltas}")
     return metrics
 
 

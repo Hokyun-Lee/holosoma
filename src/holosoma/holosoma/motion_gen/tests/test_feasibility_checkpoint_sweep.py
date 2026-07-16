@@ -26,7 +26,26 @@ def _comparison(
     root_final: float = 0.6,
     tolerance: float = 0.005,
     production_match: bool = True,
+    reference_depth: float = 0.04,
+    reference_rate: float = 0.1,
+    reference_nonfoot_rate: float = 0.025,
 ) -> dict:
+    generated_worst_body = {
+        "robot_body": "right_rubber_hand_link",
+        "is_foot": False,
+        "max_depth_m": depth,
+        "contact_frame_rate": 0.3,
+        "over_tolerance_frame_rate": rate,
+        "deep_penetration_frame_rate": 0.05,
+    }
+    reference_worst_body = {
+        "robot_body": "left_ankle_roll_link",
+        "is_foot": True,
+        "max_depth_m": reference_depth,
+        "contact_frame_rate": 0.2,
+        "over_tolerance_frame_rate": reference_rate,
+        "deep_penetration_frame_rate": 0.0,
+    }
     generated = {
         "kinematic_gate_pass": gate_pass,
         "checks": {
@@ -37,9 +56,20 @@ def _comparison(
             "surface_tolerance_m": tolerance,
             "max_depth_m": depth,
             "over_tolerance_frame_rate": rate,
+            "nonfoot_over_tolerance_frame_rate": rate,
+            "robot_body_breakdown": [generated_worst_body],
         },
         "joint_limits": {"max_violation_rad": joint},
         "fk_consistency": {"body_origin_error_m": {"max": fk}},
+    }
+    reference = {
+        "environment_collision": {
+            "surface_tolerance_m": tolerance,
+            "max_depth_m": reference_depth,
+            "over_tolerance_frame_rate": reference_rate,
+            "nonfoot_over_tolerance_frame_rate": reference_nonfoot_rate,
+            "robot_body_breakdown": [reference_worst_body],
+        }
     }
     return {
         "production_contract": {
@@ -56,6 +86,11 @@ def _comparison(
                 "mujoco_feasibility": {
                     "verdict": {"kinematic_gate_pass": gate_pass},
                     "generated": generated,
+                    "reference": reference,
+                    "comparison_to_reference": {
+                        "over_tolerance_frame_rate_delta": rate - reference_rate,
+                        "nonfoot_over_tolerance_frame_rate_delta": rate - reference_nonfoot_rate,
+                    },
                 },
             }
         },
@@ -96,6 +131,24 @@ def test_extract_production_metrics_preserves_gate_and_requested_errors() -> Non
         "penetration_tolerance_m": 0.005,
         "max_environment_penetration_m": 0.012,
         "penetration_over_5mm_frame_rate": 0.125,
+        "nonfoot_penetration_over_5mm_frame_rate": 0.125,
+        "reference_max_environment_penetration_m": 0.04,
+        "reference_penetration_over_5mm_frame_rate": 0.1,
+        "reference_nonfoot_penetration_over_5mm_frame_rate": 0.025,
+        "penetration_over_5mm_frame_rate_delta_vs_reference": 0.125 - 0.1,
+        "nonfoot_penetration_over_5mm_frame_rate_delta_vs_reference": 0.1,
+        "worst_robot_body": "right_rubber_hand_link",
+        "worst_robot_body_is_foot": False,
+        "worst_robot_body_max_penetration_m": 0.012,
+        "worst_robot_body_contact_frame_rate": 0.3,
+        "worst_robot_body_over_5mm_frame_rate": 0.125,
+        "worst_robot_body_deep_penetration_frame_rate": 0.05,
+        "reference_worst_robot_body": "left_ankle_roll_link",
+        "reference_worst_robot_body_is_foot": True,
+        "reference_worst_robot_body_max_penetration_m": 0.04,
+        "reference_worst_robot_body_contact_frame_rate": 0.2,
+        "reference_worst_robot_body_over_5mm_frame_rate": 0.1,
+        "reference_worst_robot_body_deep_penetration_frame_rate": 0.0,
         "joint_limit_max_violation_rad": 0.002,
         "fk_body_error_max_m": 0.021,
         "root_position_error_m_mean": 0.3,

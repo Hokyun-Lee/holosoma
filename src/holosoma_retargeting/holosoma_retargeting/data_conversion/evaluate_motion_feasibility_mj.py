@@ -176,6 +176,33 @@ def _summarize(values: np.ndarray) -> dict[str, float]:
     }
 
 
+def _robot_body_collision_breakdown(
+    body_frame_max_depth: dict[str, np.ndarray],
+    body_is_foot: dict[str, bool],
+    *,
+    penetration_tolerance_m: float,
+    deep_penetration_threshold_m: float,
+) -> list[dict[str, Any]]:
+    """Summarize penetrating environment contacts once per body and frame."""
+    breakdown = []
+    for robot_body, frame_depths in body_frame_max_depth.items():
+        frame_max_depth = np.asarray(frame_depths, dtype=np.float64)
+        breakdown.append(
+            {
+                "robot_body": robot_body,
+                "is_foot": body_is_foot[robot_body],
+                "max_depth_m": float(frame_max_depth.max()),
+                "contact_frame_rate": float(np.mean(frame_max_depth > 0.0)),
+                "over_tolerance_frame_rate": float(np.mean(frame_max_depth > penetration_tolerance_m)),
+                "deep_penetration_frame_rate": float(np.mean(frame_max_depth > deep_penetration_threshold_m)),
+            }
+        )
+    return sorted(
+        breakdown,
+        key=lambda record: (-record["max_depth_m"], record["robot_body"]),
+    )
+
+
 def _motion_derivatives(
     qpos: np.ndarray,
     joint_columns: np.ndarray,
@@ -312,6 +339,8 @@ def analyze_motion(
     frame_max_ground_depth = np.zeros(len(qpos), dtype=np.float64)
     frame_max_nonfoot_depth = np.zeros(len(qpos), dtype=np.float64)
     frame_environment_contact = np.zeros(len(qpos), dtype=bool)
+    body_frame_max_depth: dict[str, np.ndarray] = {}
+    body_is_foot: dict[str, bool] = {}
     contact_records_by_key: dict[tuple[int, str, str, str], dict[str, Any]] = {}
     fk_errors: list[np.ndarray] = []
 
@@ -345,6 +374,10 @@ def analyze_motion(
             robot_body = _name(model, mujoco.mjtObj.mjOBJ_BODY, robot_body_id)
             environment = environment_names[environment_geom]
             is_foot = robot_body.startswith(_FOOT_BODY_PREFIXES)
+            if robot_body not in body_frame_max_depth:
+                body_frame_max_depth[robot_body] = np.zeros(len(qpos), dtype=np.float64)
+                body_is_foot[robot_body] = is_foot
+            body_frame_max_depth[robot_body][frame] = max(body_frame_max_depth[robot_body][frame], depth)
             frame_environment_contact[frame] = True
             frame_max_depth[frame] = max(frame_max_depth[frame], depth)
             if environment == "ground":
@@ -376,6 +409,12 @@ def analyze_motion(
     over_tolerance = frame_max_depth > args.penetration_tolerance_m
     deep_penetration = frame_max_depth > args.deep_penetration_threshold_m
     nonfoot_over_tolerance = frame_max_nonfoot_depth > args.penetration_tolerance_m
+    robot_body_breakdown = _robot_body_collision_breakdown(
+        body_frame_max_depth,
+        body_is_foot,
+        penetration_tolerance_m=args.penetration_tolerance_m,
+        deep_penetration_threshold_m=args.deep_penetration_threshold_m,
+    )
     derivatives = _motion_derivatives(
         qpos,
         joint_columns,
@@ -475,6 +514,11 @@ def analyze_motion(
             "over_tolerance_frame_rate": float(over_tolerance.mean()),
             "deep_penetration_frame_rate": float(deep_penetration.mean()),
             "nonfoot_over_tolerance_frame_rate": float(nonfoot_over_tolerance.mean()),
+            "robot_body_breakdown": robot_body_breakdown,
+            "robot_body_breakdown_semantics": (
+                "contacting robot bodies only; rates use each body's maximum penetrating environment "
+                "contact depth once per frame"
+            ),
             "worst_contacts": contact_records[: args.worst_contacts],
             "semantics": (
                 "negative MuJoCo pairwise contact signed gap after direct qpos placement; "
@@ -508,6 +552,10 @@ def _compare_to_reference(generated: dict[str, Any], reference: dict[str, Any]) 
         "max_environment_depth_delta_m": generated_collision["max_depth_m"] - reference_max_depth,
         "deep_penetration_frame_rate_delta": generated_collision["deep_penetration_frame_rate"]
         - reference_collision["deep_penetration_frame_rate"],
+        "over_tolerance_frame_rate_delta": generated_collision["over_tolerance_frame_rate"]
+        - reference_collision["over_tolerance_frame_rate"],
+        "nonfoot_over_tolerance_frame_rate_delta": generated_collision["nonfoot_over_tolerance_frame_rate"]
+        - reference_collision["nonfoot_over_tolerance_frame_rate"],
         "joint_limit_max_violation_delta_rad": generated["joint_limits"]["max_violation_rad"]
         - reference["joint_limits"]["max_violation_rad"],
         "periodic_transition_joint_step_max_ratio": generated["motion_continuity"]["periodic_transitions"][
@@ -760,7 +808,7 @@ def main(args: Args) -> None:
     comparison = _compare_to_reference(generated, reference) if reference is not None else None
     provenance = _build_provenance(args)
     report: dict[str, Any] = {
-        "schema_version": 3,
+        "schema_version": 4,
         "kind": "kinematic-terrain-feasibility-audit",
         "config": asdict(args),
         "scene": {

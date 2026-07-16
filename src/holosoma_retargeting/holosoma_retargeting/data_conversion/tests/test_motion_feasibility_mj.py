@@ -107,7 +107,65 @@ def test_ground_penetration_uses_five_millimetre_gate() -> None:
     collision = report["environment_collision"]
     assert collision["surface_tolerance_m"] == pytest.approx(0.005)
     assert collision["max_ground_depth_m"] > collision["surface_tolerance_m"]
+    assert collision["robot_body_breakdown"]
+    assert collision["robot_body_breakdown"][0]["max_depth_m"] == pytest.approx(collision["max_depth_m"])
     assert report["checks"]["environment_penetration_within_tolerance"] is False
+
+
+def test_robot_body_collision_breakdown_is_per_frame_and_deterministic() -> None:
+    breakdown = feasibility._robot_body_collision_breakdown(
+        {
+            "zeta_link": np.array([0.0, 0.01, 0.01, 0.0]),
+            "alpha_link": np.array([0.01, 0.0, 0.0, 0.0]),
+            "left_ankle_roll_link": np.array([0.0, 0.06, 0.0, 0.0]),
+        },
+        {
+            "zeta_link": False,
+            "alpha_link": False,
+            "left_ankle_roll_link": True,
+        },
+        penetration_tolerance_m=0.005,
+        deep_penetration_threshold_m=0.05,
+    )
+
+    assert [row["robot_body"] for row in breakdown] == [
+        "left_ankle_roll_link",
+        "alpha_link",
+        "zeta_link",
+    ]
+    assert breakdown[0] == {
+        "robot_body": "left_ankle_roll_link",
+        "is_foot": True,
+        "max_depth_m": 0.06,
+        "contact_frame_rate": 0.25,
+        "over_tolerance_frame_rate": 0.25,
+        "deep_penetration_frame_rate": 0.25,
+    }
+    assert breakdown[2]["contact_frame_rate"] == pytest.approx(0.5)
+    assert breakdown[2]["over_tolerance_frame_rate"] == pytest.approx(0.5)
+    assert breakdown[2]["deep_penetration_frame_rate"] == 0.0
+
+
+def test_reference_comparison_includes_surface_and_nonfoot_rate_deltas() -> None:
+    def motion(over_tolerance: float, nonfoot_over_tolerance: float) -> dict:
+        return {
+            "environment_collision": {
+                "max_depth_m": 0.02,
+                "deep_penetration_frame_rate": 0.0,
+                "over_tolerance_frame_rate": over_tolerance,
+                "nonfoot_over_tolerance_frame_rate": nonfoot_over_tolerance,
+            },
+            "joint_limits": {"max_violation_rad": 0.0},
+            "motion_continuity": {"periodic_transitions": {"joint_l2_step_rad": {"max": 0.1}}},
+        }
+
+    comparison = feasibility._compare_to_reference(
+        motion(over_tolerance=0.75, nonfoot_over_tolerance=0.5),
+        motion(over_tolerance=0.25, nonfoot_over_tolerance=0.125),
+    )
+
+    assert comparison["over_tolerance_frame_rate_delta"] == pytest.approx(0.5)
+    assert comparison["nonfoot_over_tolerance_frame_rate_delta"] == pytest.approx(0.375)
 
 
 def test_nonzero_terrain_urdf_origin_is_rejected(tmp_path: Path) -> None:
